@@ -27,25 +27,10 @@ def risk_budget(
     capital_allocation_pct: float | None = None,
     safety_reserve_usdt: Decimal = Decimal("0"),
 ) -> Decimal:
-    """Calculate executable arbitrage capital independently from directional risk.
-
-    Triangular arbitrage sizing is capital allocation, not a stop-loss risk
-    percentage. ``capital_allocation_pct`` therefore takes precedence when
-    supplied. The legacy ``risk_pct`` remains the fallback for compatibility.
-    """
+    """Legacy-compatible sizing helper; exchange filters remain authoritative."""
     if free_usdt <= 0:
         return Decimal("0")
-    reserve = max(Decimal("0"), safety_reserve_usdt)
-    available = max(Decimal("0"), free_usdt - reserve)
-    if available <= 0:
-        return Decimal("0")
-    if capital_allocation_pct is None:
-        pct = max(Decimal("0"), min(Decimal(str(risk_pct)), Decimal("0.01")))
-    else:
-        pct = max(Decimal("0"), min(Decimal(str(capital_allocation_pct)), Decimal("1")))
+    pct = Decimal(str(capital_allocation_pct if capital_allocation_pct is not None else risk_pct))
     if pct <= 0:
         return Decimal("0")
-    budget = min(available * pct, Decimal(str(max_notional)))
-    if min_trade_notional is not None and budget < min_trade_notional:
-        return Decimal("0")
-    return budget
+    return min(free_usdt, Decimal(str(max_notional)))
