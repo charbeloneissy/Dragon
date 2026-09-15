@@ -49,16 +49,36 @@ class BinanceClient:
     def signed(self, method: str, path: str, params=None):
         if not self.key or not self.secret:
             raise BinanceError("Binance credentials missing")
+
         p = {k: v for k, v in (params or {}).items() if v is not None}
+        # Binance requires the signature to be calculated over the exact
+        # parameter string that is transmitted. Build that string once and
+        # send it unchanged instead of letting the HTTP client re-encode it.
         p["timestamp"] = int(time.time() * 1000) + self.time_offset_ms
         p.setdefault("recvWindow", 5000)
         query = urlencode(p, doseq=True)
-        sig = hmac.new(self.secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
-        headers = {"X-MBX-APIKEY": self.key}
+        signature = hmac.new(
+            self.secret.encode("utf-8"),
+            query.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        wire = f"{query}&signature={signature}"
+        headers = {
+            "X-MBX-APIKEY": self.key,
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+
         try:
-            r = self.http.request(method, self.base + path, params={**p, "signature": sig}, headers=headers)
+            method = method.upper()
+            if method == "GET":
+                r = self.http.get(self.base + path + "?" + wire, headers=headers)
+            elif method in {"POST", "PUT", "DELETE"}:
+                r = self.http.request(method, self.base + path, content=wire, headers=headers)
+            else:
+                raise BinanceError(f"unsupported signed HTTP method: {method}")
         except httpx.HTTPError as exc:
             raise BinanceError(f"signed request failed before response: {exc}") from exc
+
         if r.status_code >= 400:
             code = None
             try:
@@ -68,6 +88,7 @@ class BinanceClient:
             except ValueError:
                 message = r.text[:500]
             raise BinanceError(message, status_code=r.status_code, code=code, response=r.text)
+
         try:
             return r.json()
         except ValueError as exc:
