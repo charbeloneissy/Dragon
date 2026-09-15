@@ -109,8 +109,6 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
         while True:
             data = await queue.get()
             batch = [data]
-            # Coalesce queued market updates so a high-frequency stream cannot
-            # starve the evaluator behind thousands of stale depth messages.
             for _ in range(min(queue.qsize(), 1000)):
                 try: batch.append(queue.get_nowait())
                 except asyncio.QueueEmpty: break
@@ -134,8 +132,20 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                 except Exception as exc:
                     balance_ok = False; last_balance_ms = now; web_runner.event("BALANCE_ERROR", f"balance refresh failed; trading paused until restored: {exc}")
             if not balance_ok or free_usdt <= 0: continue
+
+            # Scanner sizing is independent from live execution sizing. This keeps
+            # opportunity discovery useful even when a small account cannot yet
+            # satisfy the exchange minimum at its configured execution allocation.
             evaluation_notional = min(free_usdt, Decimal(str(cfg.max_notional_usdt)))
-            trade_budget = web_runner.risk_budget(free_usdt, cfg.risk_pct, cfg.max_notional_usdt, Decimal(str(cfg.min_trade_notional_usdt))); trade_budget_ok = trade_budget > 0
+            trade_budget = web_runner.risk_budget(
+                free_usdt,
+                cfg.risk_pct,
+                cfg.max_notional_usdt,
+                Decimal(str(cfg.min_trade_notional_usdt)),
+                capital_allocation_pct=cfg.capital_allocation_pct,
+                safety_reserve_usdt=Decimal(str(cfg.safety_reserve_usdt)),
+            )
+            trade_budget_ok = trade_budget > 0
             if not trade_budget_ok:
                 with web_runner.LOCK: web_runner.STATE["min_notional_blocks"] += 1
             for idx in candidates:
@@ -148,7 +158,8 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                 if DISPLAY_MIN_NET_BPS <= net_bps <= DISPLAY_MAX_NET_BPS:
                     web_runner.record_opportunity(path, net_bps, gross_bps, evaluation_notional, eligible=eligible, trade_budget=trade_budget)
                 if not eligible:
-                    web_runner.event("CANDIDATE", f"net={net_bps:.3f} gross={gross_bps:.3f} gate={'EDGE' if net_bps < Decimal(str(cfg.min_net_edge_bps)) else 'MIN_NOTIONAL'}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps), evaluation_notional=str(evaluation_notional), trade_budget=str(trade_budget))
+                    gate = "EDGE" if net_bps < Decimal(str(cfg.min_net_edge_bps)) else "MIN_NOTIONAL"
+                    web_runner.event("CANDIDATE", f"net={net_bps:.3f} gross={gross_bps:.3f} gate={gate}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps), evaluation_notional=str(evaluation_notional), trade_budget=str(trade_budget))
                 if net_bps < Decimal(str(cfg.min_net_edge_bps)): continue
                 with web_runner.LOCK: web_runner.STATE["opportunities"] += 1; web_runner.STATE["last_opportunity"] = time.time()
                 web_runner.event("OPPORTUNITY", f"net={net_bps:.3f} gross={gross_bps:.3f}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps), evaluation_notional=str(evaluation_notional))
