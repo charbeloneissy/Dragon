@@ -51,22 +51,32 @@ async def run():
     spot = BinanceClient(os.getenv("BINANCE_API_BASE", "https://api.binance.com"), key, secret)
     futures = FuturesClient(os.getenv("BINANCE_FUTURES_API_BASE", "https://fapi.binance.com"), key, secret)
     try:
-        await asyncio.to_thread(spot.sync_time); await asyncio.to_thread(futures.sync_time)
-        spot_info = await asyncio.to_thread(spot.exchange_info); fut_info = await asyncio.to_thread(futures.exchange_info)
+        # Do not call Futures /time on every supervisor restart. The previous
+        # startup/retry pattern amplified a temporary 418 into a long ban.
+        # Signed requests use local time and will surface a clock-skew error if
+        # synchronization is actually needed.
+        await asyncio.to_thread(spot.sync_time)
+        spot_info = await asyncio.to_thread(spot.exchange_info)
+        fut_info = await asyncio.to_thread(futures.exchange_info)
         sf, ff = _spot_filters(spot_info), _futures_filters(fut_info); symbols = _requested_universe(ff)
         if not symbols: raise FuturesError("no tradable USDT-margined perpetual symbols configured")
         max_symbols = int(os.getenv("FUTURES_MAX_SYMBOLS", "0"))
         if max_symbols > 0: symbols = symbols[:max_symbols]
         max_notional = Decimal(os.getenv("FUTURES_MAX_NOTIONAL_USDT", "25")); min_edge = Decimal(os.getenv("FUTURES_MIN_NET_EDGE_BPS", "12")); fee_bps = Decimal(os.getenv("FUTURES_FEE_BPS", "5")); funding_buffer = Decimal(os.getenv("FUTURES_FUNDING_BUFFER_BPS", "3"))
+        poll_seconds = max(30.0, float(os.getenv("FUTURES_POLL_SECONDS", "30")))
         engine = BasisHedgeEngine(futures, spot, max_notional, leverage=1, live=live)
         with web_runner.LOCK:
             web_runner.STATE["futures_enabled"] = True; web_runner.STATE["futures_live"] = live; web_runner.STATE["futures_universe"] = len(symbols)
-        web_runner.event("FUTURES", f"USDⓈ-M supervisor ready: universe={len(symbols)} live={live} poll=30s")
+        web_runner.event("FUTURES", f"USDⓈ-M supervisor ready: universe={len(symbols)} live={live} poll={poll_seconds:.0f}s bulk_market_data=true")
         while True:
             if not analysis_allowed() or not trading_allowed("futures"):
                 await asyncio.sleep(2); continue
             try:
-                spot_rows = await asyncio.to_thread(spot.public, "/api/v3/ticker/bookTicker"); fut_rows = await asyncio.to_thread(futures.all_book_tickers); marks = await asyncio.to_thread(futures.all_mark_prices)
+                # Exactly three bulk market-data requests per scan, regardless
+                # of universe size. Never request premiumIndex once per symbol.
+                spot_rows = await asyncio.to_thread(spot.public, "/api/v3/ticker/bookTicker")
+                fut_rows = await asyncio.to_thread(futures.all_book_tickers)
+                marks = await asyncio.to_thread(futures.all_mark_prices)
                 spot_by = {row.get("symbol"): row for row in spot_rows if row.get("symbol") in sf}; fut_by = {row.get("symbol"): row for row in fut_rows if row.get("symbol") in ff}; mark_by = {row.get("symbol"): row for row in marks if row.get("symbol") in ff}
                 opportunities = 0
                 for symbol in symbols:
@@ -109,6 +119,6 @@ async def run():
             except Exception as exc:
                 with web_runner.LOCK: web_runner.STATE["futures_errors"] += 1; web_runner.STATE["futures_last_error"] = str(exc)
                 web_runner.event("FUTURES_MARKET_ERROR", str(exc))
-            await asyncio.sleep(float(os.getenv("FUTURES_POLL_SECONDS", "30")))
+            await asyncio.sleep(poll_seconds)
     finally:
         spot.close(); futures.close()
