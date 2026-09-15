@@ -13,7 +13,7 @@ class Config:
     max_notional_usdt: float = 25.0
     max_slippage_bps: float = 10.0
     fee_bps: float = 10.0
-    risk_pct: float = 0.0025
+    risk_pct: float = 0.0015
     cooldown_ms: int = 1000
     max_triangles: int = 5000
     stale_ms: int = 750
