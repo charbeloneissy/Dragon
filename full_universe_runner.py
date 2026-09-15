@@ -104,14 +104,26 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
     last_order_ms = 0.0; last_balance_ms = 0.0; free_usdt = Decimal("0"); balance_ok = False; failures = 0
     try:
         while True:
-            data = await queue.get(); symbol = data["s"]
-            bids = [(p, q) for p, q in data.get("b", [])[:cfg.depth_levels] if Decimal(str(p)) > 0 and Decimal(str(q)) > 0]
-            asks = [(p, q) for p, q in data.get("a", [])[:cfg.depth_levels] if Decimal(str(q)) > 0 and Decimal(str(p)) > 0]
-            if not bids or not asks: continue
-            books[symbol] = {"bids": bids, "asks": asks, "depth_ts": time.monotonic() * 1000}; dirty.update(by_symbol.get(symbol, ()))
+            data = await queue.get()
+            batch = [data]
+            # Coalesce queued market updates so a high-frequency stream cannot
+            # starve the evaluator behind thousands of stale depth messages.
+            for _ in range(min(queue.qsize(), 1000)):
+                try:
+                    batch.append(queue.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            for item in batch:
+                symbol = item.get("s")
+                if not symbol: continue
+                bids = [(p, q) for p, q in item.get("b", [])[:cfg.depth_levels] if Decimal(str(p)) > 0 and Decimal(str(q)) > 0]
+                asks = [(p, q) for p, q in item.get("a", [])[:cfg.depth_levels] if Decimal(str(q)) > 0 and Decimal(str(p)) > 0]
+                if not bids or not asks: continue
+                books[symbol] = {"bids": bids, "asks": asks, "depth_ts": time.monotonic() * 1000}
+                dirty.update(by_symbol.get(symbol, ()))
             now = time.monotonic() * 1000; candidates = list(dirty); dirty.clear()
             with web_runner.LOCK:
-                web_runner.STATE["depth_updates"] += 1; web_runner.STATE["scans"] += len(candidates); web_runner.STATE["last_scan"] = time.time()
+                web_runner.STATE["depth_updates"] += len(batch); web_runner.STATE["scans"] += len(candidates); web_runner.STATE["last_scan"] = time.time()
             if not analysis_allowed(): continue
             if now - last_balance_ms >= 1000:
                 try:
@@ -131,7 +143,10 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                 result = web_runner.evaluate_triangle(triangle, books, cfg.fee_bps, cfg.max_slippage_bps, symbol_meta, evaluation_notional)
                 if not result: continue
                 net_bps, gross_bps, path, first, second = result
-                web_runner.record_opportunity(path, net_bps, gross_bps, evaluation_notional, eligible=net_bps >= Decimal(str(cfg.min_net_edge_bps)) and trade_budget_ok, trade_budget=trade_budget)
+                eligible = net_bps >= Decimal(str(cfg.min_net_edge_bps)) and trade_budget_ok
+                web_runner.record_opportunity(path, net_bps, gross_bps, evaluation_notional, eligible=eligible, trade_budget=trade_budget)
+                if not eligible:
+                    web_runner.event("CANDIDATE", f"net={net_bps:.3f} gross={gross_bps:.3f} gate={'EDGE' if net_bps < Decimal(str(cfg.min_net_edge_bps)) else 'MIN_NOTIONAL'}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps), evaluation_notional=str(evaluation_notional), trade_budget=str(trade_budget))
                 if net_bps < Decimal(str(cfg.min_net_edge_bps)): continue
                 with web_runner.LOCK: web_runner.STATE["opportunities"] += 1; web_runner.STATE["last_opportunity"] = time.time()
                 web_runner.event("OPPORTUNITY", f"net={net_bps:.3f} gross={gross_bps:.3f}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps), evaluation_notional=str(evaluation_notional))
