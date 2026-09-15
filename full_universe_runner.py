@@ -18,8 +18,8 @@ WS_SHARD_SIZE = 100
 WS_PING_INTERVAL = 20.0
 WS_PING_TIMEOUT = 20.0
 REST_FALLBACK_SECONDS = 3.0
-DISPLAY_MIN_NET_BPS = Decimal(os.getenv("DASHBOARD_MIN_NET_EDGE_BPS", "10"))
-DISPLAY_MAX_NET_BPS = Decimal(os.getenv("DASHBOARD_MAX_NET_EDGE_BPS", "40"))
+DISPLAY_MIN_NET_BPS = Decimal(os.getenv("DASHBOARD_MIN_NET_EDGE_BPS", "0"))
+DISPLAY_MAX_NET_BPS = Decimal(os.getenv("DASHBOARD_MAX_NET_EDGE_BPS", "100000"))
 
 
 def _ws_state(worker_id, **values):
@@ -88,6 +88,21 @@ async def _rest_book_ticker_worker(client, symbols, queue):
         await asyncio.sleep(REST_FALLBACK_SECONDS)
 
 
+def _filter_sized_budget(path, requested, filters):
+    """Constrain starting USDT using the actual first-leg Binance filters."""
+    budget = Decimal(str(requested))
+    if budget <= 0 or not path or path[0] not in filters:
+        return Decimal("0"), "MISSING_FIRST_LEG_FILTER"
+    meta = filters[path[0]]
+    minimum = Decimal(str(meta.get("minNotional", "0")))
+    maximum = Decimal(str(meta.get("maxNotional", "0")))
+    if minimum > 0 and budget < minimum:
+        return Decimal("0"), f"FIRST_LEG_MIN_NOTIONAL:{minimum}"
+    if maximum > 0:
+        budget = min(budget, maximum)
+    return (budget, "PASS") if budget > 0 else (Decimal("0"), "FILTER_ZERO_BUDGET")
+
+
 async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
     books = {}; dirty = set(); by_symbol = {}
     for i, triangle in enumerate(triangles):
@@ -102,13 +117,12 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
         web_runner.STATE["symbols"] = len(symbols); web_runner.STATE["triangles"] = len(triangles); web_runner.STATE["ws_shards"] = len(shards); web_runner.STATE["ws_shard_size"] = WS_SHARD_SIZE
         web_runner.STATE.setdefault("rest_fallback_updates", 0); web_runner.STATE.setdefault("cross_exchange_opportunities", [])
     web_runner.event("UNIVERSE", f"Full Spot universe active: {len(symbols)} symbols, {len(triangles)} triangles, {len(shards)} WS shards", shard_size=WS_SHARD_SIZE)
-    web_runner.event("SCAN", f"Opportunity scanner armed; dashboard net-edge filter={DISPLAY_MIN_NET_BPS:g}-{DISPLAY_MAX_NET_BPS:g} bps")
+    web_runner.event("SCAN", f"Scanner armed; min_net_edge={cfg.min_net_edge_bps:g}bps min, expected_profit=${cfg.min_expected_profit_usdt:g}")
 
     last_order_ms = 0.0; last_balance_ms = 0.0; free_usdt = Decimal("0"); balance_ok = False; failures = 0
     try:
         while True:
-            data = await queue.get()
-            batch = [data]
+            data = await queue.get(); batch = [data]
             for _ in range(min(queue.qsize(), 1000)):
                 try: batch.append(queue.get_nowait())
                 except asyncio.QueueEmpty: break
@@ -118,8 +132,7 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                 bids = [(p, q) for p, q in item.get("b", [])[:cfg.depth_levels] if Decimal(str(p)) > 0 and Decimal(str(q)) > 0]
                 asks = [(p, q) for p, q in item.get("a", [])[:cfg.depth_levels] if Decimal(str(q)) > 0 and Decimal(str(p)) > 0]
                 if not bids or not asks: continue
-                books[symbol] = {"bids": bids, "asks": asks, "depth_ts": time.monotonic() * 1000}
-                dirty.update(by_symbol.get(symbol, ()))
+                books[symbol] = {"bids": bids, "asks": asks, "depth_ts": time.monotonic() * 1000}; dirty.update(by_symbol.get(symbol, ()))
             now = time.monotonic() * 1000; candidates = list(dirty); dirty.clear()
             with web_runner.LOCK:
                 web_runner.STATE["depth_updates"] += len(batch); web_runner.STATE["scans"] += len(candidates); web_runner.STATE["last_scan"] = time.time()
@@ -133,61 +146,65 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                     balance_ok = False; last_balance_ms = now; web_runner.event("BALANCE_ERROR", f"balance refresh failed; trading paused until restored: {exc}")
             if not balance_ok or free_usdt <= 0: continue
 
-            # Scanner sizing is independent from live execution sizing. This keeps
-            # opportunity discovery useful even when a small account cannot yet
-            # satisfy the exchange minimum at its configured execution allocation.
+            # Discovery and execution sizing are intentionally independent.
             evaluation_notional = min(free_usdt, Decimal(str(cfg.max_notional_usdt)))
             trade_budget = web_runner.risk_budget(
-                free_usdt,
-                cfg.risk_pct,
-                cfg.max_notional_usdt,
-                Decimal(str(cfg.min_trade_notional_usdt)),
+                free_usdt, cfg.risk_pct, cfg.max_notional_usdt, Decimal(str(cfg.min_trade_notional_usdt)),
                 capital_allocation_pct=cfg.capital_allocation_pct,
                 safety_reserve_usdt=Decimal(str(cfg.safety_reserve_usdt)),
             )
-            trade_budget_ok = trade_budget > 0
-            if not trade_budget_ok:
+            if trade_budget <= 0:
                 with web_runner.LOCK: web_runner.STATE["min_notional_blocks"] += 1
+
             for idx in candidates:
                 triangle = triangles[idx]
                 if not all(s in books and now - books[s].get("depth_ts", 0) <= cfg.stale_ms for s in triangle.symbols): continue
                 result = web_runner.evaluate_triangle(triangle, books, cfg.fee_bps, cfg.max_slippage_bps, symbol_meta, evaluation_notional)
                 if not result: continue
                 net_bps, gross_bps, path, first, second = result
-                eligible = net_bps >= Decimal(str(cfg.min_net_edge_bps)) and trade_budget_ok
-                if DISPLAY_MIN_NET_BPS <= net_bps <= DISPLAY_MAX_NET_BPS:
-                    web_runner.record_opportunity(path, net_bps, gross_bps, evaluation_notional, eligible=eligible, trade_budget=trade_budget)
-                if not eligible:
-                    gate = "EDGE" if net_bps < Decimal(str(cfg.min_net_edge_bps)) else "MIN_NOTIONAL"
-                    web_runner.event("CANDIDATE", f"net={net_bps:.3f} gross={gross_bps:.3f} gate={gate}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps), evaluation_notional=str(evaluation_notional), trade_budget=str(trade_budget))
-                if net_bps < Decimal(str(cfg.min_net_edge_bps)): continue
+                expected_profit = evaluation_notional * net_bps / Decimal("10000")
+                executable_budget, filter_reason = _filter_sized_budget(path, trade_budget, filters)
+                edge_ok = net_bps >= Decimal(str(cfg.min_net_edge_bps))
+                profit_ok = expected_profit >= Decimal(str(cfg.min_expected_profit_usdt))
+                size_ok = executable_budget >= Decimal(str(cfg.min_trade_notional_usdt))
+                eligible = edge_ok and profit_ok and size_ok
+
+                # Record every evaluated result so the dashboard exposes the best
+                # rejected candidate instead of reporting zero information.
+                web_runner.record_opportunity(path, net_bps, gross_bps, evaluation_notional, eligible=eligible, trade_budget=executable_budget)
+                if not edge_ok: gate = "NET_EDGE"
+                elif not profit_ok: gate = "MIN_EXPECTED_PROFIT"
+                elif not size_ok: gate = filter_reason if filter_reason != "PASS" else "MIN_NOTIONAL_OR_BALANCE"
+                else: gate = "PASS"
+                web_runner.event("CANDIDATE", f"net={net_bps:.3f} gross={gross_bps:.3f} expected=${expected_profit:.6f} gate={gate}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps), expected_profit_usdt=str(expected_profit), evaluation_notional=str(evaluation_notional), trade_budget=str(executable_budget), rejection_reason=gate)
+
+                if not edge_ok: continue
                 with web_runner.LOCK: web_runner.STATE["opportunities"] += 1; web_runner.STATE["last_opportunity"] = time.time()
-                web_runner.event("OPPORTUNITY", f"net={net_bps:.3f} gross={gross_bps:.3f}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps), evaluation_notional=str(evaluation_notional))
+                web_runner.event("OPPORTUNITY", f"net={net_bps:.3f} gross={gross_bps:.3f} expected=${expected_profit:.6f}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps), expected_profit_usdt=str(expected_profit), evaluation_notional=str(evaluation_notional))
+                if not profit_ok or not size_ok: continue
+
                 now_ms = time.monotonic() * 1000
-                if not trade_budget_ok:
-                    web_runner.event("RISK", "Opportunity found but live trade budget is below minimum notional", path=path, evaluation_notional=str(evaluation_notional)); continue
                 if not (cfg.live_trading and not cfg.dry_run) or not trading_allowed("spot") or now_ms - last_order_ms < cfg.cooldown_ms: continue
-                if not web_runner.approved(net_bps, cfg.min_net_edge_bps, trade_budget, cfg.max_notional_usdt, min_trade_notional=Decimal(str(cfg.min_trade_notional_usdt))):
+                if not web_runner.approved(net_bps, cfg.min_net_edge_bps, executable_budget, cfg.max_notional_usdt, min_trade_notional=Decimal(str(cfg.min_trade_notional_usdt))):
                     with web_runner.LOCK: web_runner.STATE["risk_blocks"] += 1
-                    web_runner.event("RISK", "Trade blocked by risk/notional gate", path=path); continue
+                    web_runner.event("RISK", "Trade blocked by final risk/notional gate", path=path); continue
                 last_order_ms = now_ms
                 try:
-                    web_runner.event("LIVE", "Three-leg execution requested", path=path, net_bps=float(net_bps), budget=str(trade_budget))
-                    execution = await asyncio.to_thread(web_runner.execute_triangle, client, path, "USDT", first, trade_budget, filters, False)
+                    web_runner.event("LIVE", "Three-leg execution requested", path=path, net_bps=float(net_bps), budget=str(executable_budget), expected_profit_usdt=str(expected_profit))
+                    execution = await asyncio.to_thread(web_runner.execute_triangle, client, path, "USDT", first, executable_budget, filters, False)
                     if not execution.get("finished") or execution.get("final_asset") != "USDT": raise RuntimeError("execution returned without a completed USDT cycle")
-                    web_runner.LEDGER.record(path, trade_budget, execution)
+                    web_runner.LEDGER.record(path, executable_budget, execution)
                     with web_runner.LOCK: web_runner.STATE["executions"] += 1; web_runner.STATE["last_execution"] = time.time()
                     web_runner._sync_ledger(); failures = 0
                     web_runner.event("FILLED", f"Triangle fully filled; realized={execution['realized_pnl_usdt']} USDT", path=path)
                 except Exception as exc:
                     failures += 1
                     with web_runner.LOCK: web_runner.STATE["execution_errors"] += 1; web_runner.STATE["last_error"] = str(exc)
-                    if web_runner.LEDGER is not None: web_runner.LEDGER.record(path, trade_budget, error=exc)
+                    if web_runner.LEDGER is not None: web_runner.LEDGER.record(path, executable_budget, error=exc)
                     web_runner.event("ERROR", str(exc), path=path)
                     if failures >= 3: raise RuntimeError("three consecutive execution failures; engine stopped for safety") from exc
     finally:
-        external_task.cancel()
-        await asyncio.gather(external_task, return_exceptions=True)
+        external_task.cancel(); await asyncio.gather(external_task, return_exceptions=True)
         for task in workers: task.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
 
