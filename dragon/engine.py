@@ -3,21 +3,19 @@ import traceback
 
 
 def main():
-    """Start Dragon and keep the web dashboard available on fatal startup errors."""
-    from web_runner import start_health_server, STATE, event, run
+    """Start Dragon and keep the dashboard reachable if startup fails."""
+    from web_runner import STATE, event, run
 
-    # Start the HTTP surface before Binance initialization so Render and the
-    # dashboard remain reachable even when an upstream dependency fails.
-    start_health_server()
     try:
-        asyncio.run(run(start_server=False))
+        # web_runner.run() starts the HTTP server before Binance initialization.
+        asyncio.run(run())
     except Exception as exc:
         STATE["last_error"] = f"FATAL STARTUP ERROR: {exc}"
         event("FATAL", "Dragon startup failed", error=str(exc))
         print("DRAGON FATAL STARTUP ERROR", flush=True)
         traceback.print_exc()
-        # Keep the dashboard alive so the actual failure is visible instead
-        # of letting the Render process disappear while the port was open.
+        # Do not let Render lose the process after the dashboard HTTP server
+        # has been opened. Keep the server available so the failure is visible.
         try:
             asyncio.run(asyncio.Event().wait())
         except KeyboardInterrupt:
