@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from decimal import Decimal, ROUND_DOWN
 
 from src.dragon.binance import BinanceClient
@@ -43,8 +44,7 @@ def _requested_universe(ff):
 
 async def run():
     enabled = os.getenv("FUTURES_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
-    if not enabled:
-        await asyncio.Event().wait()
+    if not enabled: await asyncio.Event().wait()
     live = os.getenv("FUTURES_LIVE_TRADING", "false").lower() in {"1", "true", "yes", "on"}
     key = os.getenv("BINANCE_API_KEY", "").strip(); secret = os.getenv("BINANCE_API_SECRET", "").strip()
     if not key or not secret: raise FuturesError("FUTURES_ENABLED requires Binance credentials")
@@ -62,15 +62,11 @@ async def run():
         with web_runner.LOCK:
             web_runner.STATE["futures_enabled"] = True; web_runner.STATE["futures_live"] = live; web_runner.STATE["futures_universe"] = len(symbols)
         web_runner.event("FUTURES", f"USDⓈ-M supervisor ready: universe={len(symbols)} live={live} poll=30s")
-
         while True:
             if not analysis_allowed() or not trading_allowed("futures"):
-                await asyncio.sleep(2)
-                continue
+                await asyncio.sleep(2); continue
             try:
-                spot_rows = await asyncio.to_thread(spot.public, "/api/v3/ticker/bookTicker")
-                fut_rows = await asyncio.to_thread(futures.all_book_tickers)
-                marks = await asyncio.to_thread(futures.all_mark_prices)
+                spot_rows = await asyncio.to_thread(spot.public, "/api/v3/ticker/bookTicker"); fut_rows = await asyncio.to_thread(futures.all_book_tickers); marks = await asyncio.to_thread(futures.all_mark_prices)
                 spot_by = {row.get("symbol"): row for row in spot_rows if row.get("symbol") in sf}; fut_by = {row.get("symbol"): row for row in fut_rows if row.get("symbol") in ff}; mark_by = {row.get("symbol"): row for row in marks if row.get("symbol") in ff}
                 opportunities = 0
                 for symbol in symbols:
@@ -91,8 +87,7 @@ async def run():
                         positions = await asyncio.to_thread(futures.position_risk, symbol)
                         if any(abs(Decimal(str(p.get("positionAmt", "0")))) > 0 for p in positions):
                             web_runner.event("FUTURES_POSITION", f"{symbol} existing position; skip new hedge"); continue
-                        sa = Decimal(str(st["askPrice"])); notional = min(max_notional, Decimal(os.getenv("FUTURES_ORDER_NOTIONAL_USDT", str(max_notional))))
-                        qty = _floor(notional / sa, max(ff[symbol]["step"], sf[symbol]["step"]))
+                        sa = Decimal(str(st["askPrice"])); notional = min(max_notional, Decimal(os.getenv("FUTURES_ORDER_NOTIONAL_USDT", str(max_notional)))); qty = _floor(notional / sa, max(ff[symbol]["step"], sf[symbol]["step"]))
                         if qty < sf[symbol]["min"] or qty < ff[symbol]["min"]: continue
                         web_runner.event("FUTURES_OPPORTUNITY", f"{symbol} net={basis_edge:.3f}bps spread={spread_bps:.3f}bps funding={funding:.3f}bps qty={qty} live={live}")
                         if live and trading_allowed("futures"):
@@ -106,7 +101,7 @@ async def run():
                         with web_runner.LOCK: web_runner.STATE["futures_errors"] += 1; web_runner.STATE["futures_last_error"] = str(exc)
                         web_runner.event("FUTURES_ERROR", f"{symbol} {exc}")
                 with web_runner.LOCK:
-                    web_runner.STATE["futures_scans"] += 1; web_runner.STATE["futures_opportunities"] += opportunities; web_runner.STATE["futures_last_scan"] = time.time() if False else __import__('time').time()
+                    web_runner.STATE["futures_scans"] += 1; web_runner.STATE["futures_opportunities"] += opportunities; web_runner.STATE["futures_last_scan"] = time.time()
                 web_runner.event("FUTURES_SCAN", f"complete universe={len(symbols)} opportunities={opportunities}")
             except FuturesError as exc:
                 with web_runner.LOCK: web_runner.STATE["futures_errors"] += 1; web_runner.STATE["futures_last_error"] = str(exc)
