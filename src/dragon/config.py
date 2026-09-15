@@ -8,7 +8,7 @@ class Config:
     ws_base: str = "wss://stream.binance.com:9443/ws"
     dry_run: bool = True
     live_trading: bool = False
-    min_net_edge_bps: float = 0.5
+    min_net_edge_bps: float = 5.0
     min_trade_notional_usdt: float = 5.0
     max_notional_usdt: float = 25.0
     max_slippage_bps: float = 10.0
