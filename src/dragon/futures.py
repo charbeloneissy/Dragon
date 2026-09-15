@@ -21,22 +21,51 @@ def _floor(value: Decimal, step: Decimal) -> Decimal:
 
 
 class FuturesClient:
-    """Small USDⓈ-M Futures client with non-retrying live writes."""
+    """USDⓈ-M Futures client with rate-limit aware reads and non-retrying live writes."""
     def __init__(self, api_base="https://fapi.binance.com", api_key="", api_secret="", timeout=5.0):
         self.base = api_base.rstrip("/")
         self.key = api_key.strip()
         self.secret = api_secret.strip()
         self.offset_ms = 0
-        self.http = httpx.Client(timeout=timeout, limits=httpx.Limits(max_connections=20, max_keepalive_connections=10))
+        self.http = httpx.Client(timeout=timeout, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
+        self._next_allowed = 0.0
+        self._backoff = 1.0
 
     def close(self):
         self.http.close()
 
+    def _throttle(self):
+        delay = self._next_allowed - time.monotonic()
+        if delay > 0:
+            time.sleep(min(delay, 300.0))
+
+    def _response_error(self, response, label):
+        if response.status_code in (418, 429):
+            retry = response.headers.get("Retry-After")
+            try:
+                wait = max(float(retry), self._backoff) if retry else self._backoff
+            except ValueError:
+                wait = self._backoff
+            self._next_allowed = time.monotonic() + min(wait, 86400.0)
+            self._backoff = min(max(self._backoff * 2.0, wait), 300.0)
+            raise FuturesError(f"{label}: Binance rate limit HTTP {response.status_code}; backing off {wait:.1f}s")
+        if response.status_code >= 400:
+            try:
+                body = response.json()
+                raise FuturesError(body.get("msg", response.text[:500]))
+            except ValueError:
+                raise FuturesError(response.text[:500])
+
     def public(self, path, params=None):
+        self._throttle()
         try:
             r = self.http.get(self.base + path, params=params or {})
-            r.raise_for_status()
-            return r.json()
+            if r.status_code < 400:
+                self._backoff = 1.0
+                return r.json()
+            self._response_error(r, f"futures public request {path}")
+        except FuturesError:
+            raise
         except Exception as exc:
             raise FuturesError(f"futures public request failed: {exc}") from exc
 
@@ -56,19 +85,15 @@ class FuturesClient:
         query = urlencode(p, doseq=True)
         sig = hmac.new(self.secret.encode("ascii"), query.encode(), hashlib.sha256).hexdigest()
         headers = {"X-MBX-APIKEY": self.key, "Content-Type": "application/x-www-form-urlencoded"}
+        self._throttle()
         try:
             if method.upper() == "GET":
                 r = self.http.get(self.base + path + "?" + query + "&signature=" + sig, headers=headers)
             else:
-                # Live order writes are intentionally never blindly retried.
                 wire = query + "&signature=" + sig
                 r = self.http.request(method.upper(), self.base + path, content=wire, headers=headers)
-            if r.status_code >= 400:
-                try:
-                    body = r.json()
-                    raise FuturesError(body.get("msg", r.text[:500]))
-                except ValueError:
-                    raise FuturesError(r.text[:500])
+            self._response_error(r, f"futures signed request {path}")
+            self._backoff = 1.0
             return r.json()
         except FuturesError:
             raise
@@ -81,8 +106,14 @@ class FuturesClient:
     def book_ticker(self, symbol=None):
         return self.public("/fapi/v1/ticker/bookTicker", {"symbol": symbol} if symbol else None)
 
+    def all_book_tickers(self):
+        return self.book_ticker()
+
     def mark_price(self, symbol=None):
         return self.public("/fapi/v1/premiumIndex", {"symbol": symbol} if symbol else None)
+
+    def all_mark_prices(self):
+        return self.mark_price()
 
     def account(self):
         return self.signed("GET", "/fapi/v2/account")
@@ -113,14 +144,17 @@ class FuturesClient:
         return self.signed("DELETE", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
 
     def create_listen_key(self):
-        return self.public("/fapi/v1/listenKey", {}) if False else self._listen_key("POST")
+        return self._listen_key("POST")
 
     def _listen_key(self, method):
         headers = {"X-MBX-APIKEY": self.key}
+        self._throttle()
         try:
             r = self.http.request(method, self.base + "/fapi/v1/listenKey", headers=headers)
-            r.raise_for_status()
+            self._response_error(r, f"futures listenKey {method}")
             return r.json()["listenKey"]
+        except FuturesError:
+            raise
         except Exception as exc:
             raise FuturesError(f"futures listenKey request failed: {exc}") from exc
 
@@ -132,9 +166,9 @@ class FuturesClient:
 
     def _listen_key_action(self, method, listen_key):
         headers = {"X-MBX-APIKEY": self.key}
+        self._throttle()
         r = self.http.request(method, self.base + "/fapi/v1/listenKey", params={"listenKey": listen_key}, headers=headers)
-        if r.status_code >= 400:
-            raise FuturesError(r.text[:500])
+        self._response_error(r, f"futures listenKey {method}")
         return r.json() if r.text else {}
 
 
