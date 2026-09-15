@@ -18,8 +18,22 @@ def approved(
     return True
 
 
-def risk_budget(free_usdt: Decimal, risk_pct: float, max_notional: float) -> Decimal:
-    # Risk remains a ceiling. Never inflate the budget merely to reach the
-    # exchange minimum notional; the caller must skip when the budget is too small.
+def risk_budget(
+    free_usdt: Decimal,
+    risk_pct: float,
+    max_notional: float,
+    min_trade_notional: Decimal | None = None,
+) -> Decimal:
+    """Return the risk-capped trade budget, or zero when it cannot meet the floor.
+
+    A triangular arbitrage trade must not bypass the configured risk ceiling merely
+    to satisfy an exchange minimum notional. Returning zero makes that condition
+    explicit to the caller and prevents accidental oversized orders on small accounts.
+    """
+    if free_usdt <= 0:
+        return Decimal("0")
     pct = max(Decimal("0.0005"), min(Decimal(str(risk_pct)), Decimal("0.01")))
-    return min(free_usdt * pct, Decimal(str(max_notional)))
+    budget = min(free_usdt * pct, Decimal(str(max_notional)))
+    if min_trade_notional is not None and budget < min_trade_notional:
+        return Decimal("0")
+    return budget
