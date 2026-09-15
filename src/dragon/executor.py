@@ -28,7 +28,13 @@ def _net_received(resp: dict, side: str, base: str, quote: str):
     return received, asset
 
 
-def _validate_market(meta, side, amount):
+def _validate_market(meta, side, amount, market_price=None):
+    """Validate a market order against the symbol's current quantity/notional rules.
+
+    Binance applies LOT_SIZE/MARKET_LOT_SIZE and NOTIONAL/MIN_NOTIONAL filters to
+    market orders. For SELL orders the notional is derived from the current bid;
+    BUY quoteOrderQty is already expressed in quote-asset notional.
+    """
     step = Decimal(str(meta.get("stepSize", "0")))
     min_qty = Decimal(str(meta.get("minQty", "0")))
     max_qty = Decimal(str(meta.get("maxQty", "0")))
@@ -40,6 +46,14 @@ def _validate_market(meta, side, amount):
             raise ExecutionError(f"quantity {qty} below minQty {min_qty}")
         if max_qty > 0 and qty > max_qty:
             qty = floor_step(max_qty, step)
+        if market_price is not None and market_price > 0:
+            notional = qty * market_price
+            if min_notional > 0 and notional < min_notional:
+                raise ExecutionError(f"sell notional {notional} below minNotional {min_notional}")
+            if max_notional > 0 and notional > max_notional:
+                qty = floor_step(max_notional / market_price, step)
+                if qty < min_qty:
+                    raise ExecutionError(f"sell quantity {qty} cannot satisfy maxNotional {max_notional}")
         return qty
     if min_notional > 0 and amount < min_notional:
         raise ExecutionError(f"quote amount {amount} below minNotional {min_notional}")
@@ -113,12 +127,6 @@ def _recover_to_usdt(client, filters, asset, amount):
 
 
 def _reconcile_and_recover(client, filters, baseline, assets):
-    """Flatten only assets whose free balance increased during this cycle.
-
-    This is important for partial fills: a failed leg can leave both the
-    original source asset and the newly acquired target asset in the account.
-    Comparing against a pre-cycle balance avoids selling unrelated inventory.
-    """
     current = _account_balances(client, assets)
     deltas = {asset: current.get(asset, Decimal("0")) - baseline.get(asset, Decimal("0")) for asset in assets}
     recoveries = []
@@ -131,10 +139,7 @@ def _reconcile_and_recover(client, filters, baseline, assets):
             recoveries.append({"recovered": False, "asset": asset, "amount": str(delta), "error": str(exc)})
 
     remaining = _account_balances(client, assets)
-    residual = {
-        asset: remaining.get(asset, Decimal("0")) - baseline.get(asset, Decimal("0"))
-        for asset in assets if asset != "USDT"
-    }
+    residual = {asset: remaining.get(asset, Decimal("0")) - baseline.get(asset, Decimal("0")) for asset in assets if asset != "USDT"}
     unresolved = {asset: str(delta) for asset, delta in residual.items() if delta > 0}
     if unresolved:
         raise ExecutionError(f"exposure reconciliation incomplete: {unresolved}; recoveries={recoveries}")
@@ -159,18 +164,27 @@ def execute_triangle(client: BinanceClient, path, start_asset, first_asset, star
     baseline = _account_balances(client, assets)
 
     try:
+        # One public snapshot is enough to pre-check market notional filters for all legs.
+        ticker_rows = client.book_ticker()
+        ticker = {x.get("symbol"): x for x in ticker_rows if x.get("symbol")}
         for symbol in path:
             if symbol not in filters:
                 raise ExecutionError(f"missing exchange filters for {symbol}")
             meta = filters[symbol]
             base, quote = meta["baseAsset"], meta["quoteAsset"]
+            row = ticker.get(symbol, {})
+            bid = Decimal(str(row.get("bidPrice", "0")))
+            ask = Decimal(str(row.get("askPrice", "0")))
+            if bid <= 0 or ask <= 0:
+                raise ExecutionError(f"missing fresh BBO for {symbol}")
+
             if source_asset == quote:
                 side = "BUY"
-                quote_amount = _validate_market(meta, side, amount)
+                quote_amount = _validate_market(meta, side, amount, ask)
                 params = {"symbol": symbol, "side": side, "type": "MARKET", "quoteOrderQty": format(quote_amount, "f"), "newOrderRespType": "FULL"}
             elif source_asset == base:
                 side = "SELL"
-                qty = _validate_market(meta, side, amount)
+                qty = _validate_market(meta, side, amount, bid)
                 params = {"symbol": symbol, "side": side, "type": "MARKET", "quantity": format(qty, "f"), "newOrderRespType": "FULL"}
             else:
                 raise ExecutionError(f"path asset mismatch at {symbol}: source={source_asset}, base={base}, quote={quote}")
@@ -182,33 +196,13 @@ def execute_triangle(client: BinanceClient, path, start_asset, first_asset, star
 
             resp = _order_filled_or_reconcile(client, symbol, resp.get("orderId"), resp)
             received, received_asset = _net_received(resp, side, base, quote)
-            legs.append({
-                "symbol": symbol,
-                "side": side,
-                "received": str(received),
-                "received_asset": received_asset,
-                "order_id": resp.get("orderId"),
-                "status": resp.get("status"),
-                "executed_qty": str(resp.get("executedQty", "0")),
-                "quote_qty": str(resp.get("cummulativeQuoteQty", "0")),
-                "fills": resp.get("fills", []),
-            })
+            legs.append({"symbol": symbol, "side": side, "received": str(received), "received_asset": received_asset, "order_id": resp.get("orderId"), "status": resp.get("status"), "executed_qty": str(resp.get("executedQty", "0")), "quote_qty": str(resp.get("cummulativeQuoteQty", "0")), "fills": resp.get("fills", [])})
             source_asset = received_asset
             amount = received
 
         if source_asset != "USDT":
             raise ExecutionError(f"triangle did not finish in USDT: {source_asset}")
-        return {
-            "dry_run": False,
-            "legs": legs,
-            "start_usdt": str(start_usdt),
-            "final_asset": source_asset,
-            "final_usdt": str(amount),
-            "realized_pnl_usdt": str(amount - Decimal(str(start_usdt))),
-            "finished": True,
-            "duration_ms": round((time.time() - started) * 1000, 2),
-            "timestamp": time.time(),
-        }
+        return {"dry_run": False, "legs": legs, "start_usdt": str(start_usdt), "final_asset": source_asset, "final_usdt": str(amount), "realized_pnl_usdt": str(amount - Decimal(str(start_usdt))), "finished": True, "duration_ms": round((time.time() - started) * 1000, 2), "timestamp": time.time()}
     except ExecutionError as exc:
         recovery_error = None
         try:
