@@ -5,6 +5,7 @@ import os
 @dataclass(frozen=True)
 class Config:
     api_base: str = "https://api.binance.com"
+    ws_base: str = "wss://stream.binance.com:9443/ws"
     dry_run: bool = True
     live_trading: bool = False
     min_net_edge_bps: float = 20.0
@@ -28,6 +29,7 @@ class Config:
     def from_env(cls) -> "Config":
         return cls(
             api_base=os.getenv("BINANCE_API_BASE", "https://api.binance.com").strip().rstrip("/"),
+            ws_base=os.getenv("BINANCE_WS_BASE", "wss://stream.binance.com:9443/ws").strip().rstrip("/"),
             dry_run=cls._bool("DRY_RUN", True),
             live_trading=cls._bool("LIVE_TRADING", False),
             min_net_edge_bps=float(os.getenv("MIN_NET_EDGE_BPS", "20")),
@@ -44,6 +46,8 @@ class Config:
     def validate(self) -> None:
         if not self.api_base.startswith(("https://", "http://")):
             raise ValueError("BINANCE_API_BASE must be an HTTP(S) URL")
+        if not self.ws_base.startswith(("wss://", "ws://")):
+            raise ValueError("BINANCE_WS_BASE must be a WS(S) URL")
         if self.max_notional_usdt <= 0 or self.risk_pct <= 0:
             raise ValueError("max notional and risk percentage must be positive")
         if self.min_net_edge_bps < 0 or self.fee_bps < 0 or self.max_slippage_bps < 0:
