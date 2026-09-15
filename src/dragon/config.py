@@ -18,11 +18,13 @@ class Config:
     capital_allocation_pct: float = 0.25
     safety_reserve_usdt: float = 5.0
     cooldown_ms: int = 1000
-    max_triangles: int = 5000
+    max_triangles: int = 0
     stale_ms: int = 750
     poll_interval_seconds: float = 0.05
     order_timeout_ms: int = 5000
     depth_levels: int = 20
+    decision_cycle_seconds: int = 30
+    universe_mode: str = "FULL_DYNAMIC"
     health_fail_open: bool = False
     dex_enabled: bool = False
     dex_quote_url: str = ""
@@ -58,6 +60,8 @@ class Config:
             poll_interval_seconds=float(os.getenv("POLL_INTERVAL_SECONDS", str(cls.poll_interval_seconds))),
             order_timeout_ms=int(os.getenv("ORDER_TIMEOUT_MS", str(cls.order_timeout_ms))),
             depth_levels=int(os.getenv("DEPTH_LEVELS", str(cls.depth_levels))),
+            decision_cycle_seconds=int(os.getenv("DECISION_CYCLE_SECONDS", str(cls.decision_cycle_seconds))),
+            universe_mode=os.getenv("UNIVERSE_MODE", cls.universe_mode).strip().upper(),
             health_fail_open=cls._bool("HEALTH_FAIL_OPEN", cls.health_fail_open),
             dex_enabled=cls._bool("DEX_ENABLED", cls.dex_enabled),
             dex_quote_url=os.getenv("DEX_QUOTE_URL", cls.dex_quote_url).strip(),
@@ -92,6 +96,10 @@ class Config:
             raise ValueError("timing values are invalid")
         if not 1 <= self.depth_levels <= 100:
             raise ValueError("DEPTH_LEVELS must be between 1 and 100")
+        if self.decision_cycle_seconds <= 0:
+            raise ValueError("DECISION_CYCLE_SECONDS must be positive")
+        if self.universe_mode not in {"FULL_DYNAMIC"}:
+            raise ValueError("UNIVERSE_MODE must be FULL_DYNAMIC")
         if self.dex_max_gas_quote < 0 or self.dex_max_latency_ms <= 0:
             raise ValueError("DEX cost/latency limits are invalid")
         if self.dex_enabled and not self.dex_quote_url:
