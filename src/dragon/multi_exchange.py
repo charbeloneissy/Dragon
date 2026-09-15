@@ -41,9 +41,12 @@ class MultiExchangeFeeds:
         self._gross=deque(maxlen=500);self._ages=deque(maxlen=500);self._depth=deque(maxlen=500)
         self._adaptive={"min_net_edge_bps":float(os.getenv("CROSS_MIN_NET_EDGE_BPS","0.10")),"slippage_bps":float(os.getenv("CROSS_SLIPPAGE_BPS","0.50")),"max_sync_skew_ms":float(os.getenv("CROSS_MAX_SYNC_SKEW_MS","500"))}
     def _emit(self,m):
-        if self.event:
-            try:self.event(m)
-            except Exception:pass
+        if not self.event:return
+        try:
+            text=str(m); parts=text.split(" | ",1)
+            if len(parts)==2:self.event(parts[0],parts[1])
+            else:self.event("EXT",text)
+        except Exception:pass
     async def _discover(self):
         try:
             b=await asyncio.to_thread(_http_json,"https://api.bybit.com/v5/market/instruments-info?category=spot&limit=1000")
