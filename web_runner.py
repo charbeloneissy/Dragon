@@ -90,7 +90,7 @@ async def stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
                     for idx in candidates:
                         t = triangles[idx]
                         if not all(s in books and now - books[s].get("depth_ts", 0) <= cfg.stale_ms for s in t.symbols): continue
-                        result = evaluate_triangle(t, books, cfg.fee_bps, cfg.slippage_bps, symbol_meta, max(cfg.max_notional_usdt * cfg.risk_pct, Decimal("0.01")))
+                        result = evaluate_triangle(t, books, cfg.fee_bps, cfg.max_slippage_bps, symbol_meta, max(cfg.max_notional_usdt * cfg.risk_pct, Decimal("0.01")))
                         if not result: continue
                         net_bps, gross_bps, path, first, second = result
                         if net_bps < Decimal(str(cfg.min_net_edge_bps)): continue
