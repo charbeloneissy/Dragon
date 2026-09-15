@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 from itertools import combinations
 
 
@@ -10,6 +10,7 @@ class Triangle:
 
 
 def build_triangles(exchange_info: dict, max_triangles: int = 5000):
+    """Build every available USDT triangle direction up to the configured cap."""
     markets = {}
     for s in exchange_info.get("symbols", []):
         if s.get("status") != "TRADING":
@@ -18,58 +19,62 @@ def build_triangles(exchange_info: dict, max_triangles: int = 5000):
 
     usdt_assets = sorted({base for base, quote in markets if quote == "USDT"})
     out = []
+    seen = set()
     for a, b in combinations(usdt_assets, 2):
-        if (a, b) in markets and (a, "USDT") in markets and (b, "USDT") in markets:
-            out.append(Triangle((markets[(a, "USDT")], markets[(a, b)], markets[(b, "USDT")]), ("USDT", a, b)))
-        elif (b, a) in markets and (a, "USDT") in markets and (b, "USDT") in markets:
-            out.append(Triangle((markets[(b, "USDT")], markets[(b, a)], markets[(a, "USDT")]), ("USDT", b, a)))
-        if len(out) >= max_triangles:
-            break
+        a_usdt = markets.get((a, "USDT"))
+        b_usdt = markets.get((b, "USDT"))
+        if not a_usdt or not b_usdt:
+            continue
+        for first, second in ((a, b), (b, a)):
+            cross = markets.get((first, second))
+            if not cross:
+                continue
+            tri = Triangle(
+                (markets[(first, "USDT")], cross, markets[(second, "USDT")]),
+                ("USDT", first, second),
+            )
+            if tri.symbols in seen:
+                continue
+            seen.add(tri.symbols)
+            out.append(tri)
+            if len(out) >= max_triangles:
+                return out
     return out
 
 
-def _convert(asset_from, asset_to, qty, books, symbol_meta):
-    if asset_from == asset_to:
-        return qty, None
-    candidates = []
-    for symbol, meta in symbol_meta.items():
-        base, quote = meta
-        if base == asset_from and quote == asset_to:
-            candidates.append((symbol, "sell"))
-        elif base == asset_to and quote == asset_from:
-            candidates.append((symbol, "buy"))
-    for symbol, side in candidates:
-        book = books.get(symbol, {})
-        levels = book.get("bids" if side == "sell" else "asks") or []
-        if not levels:
+def _walk(symbol: str, side: str, qty: Decimal, books: dict):
+    """Consume current order-book depth and return executable output."""
+    book = books.get(symbol, {})
+    levels = book.get("bids" if side == "sell" else "asks") or []
+    remaining = qty
+    result = Decimal("0")
+    for raw_price, raw_qty in levels:
+        price = Decimal(str(raw_price))
+        level_qty = Decimal(str(raw_qty))
+        if price <= 0 or level_qty <= 0:
             continue
-        remaining = qty
-        result = Decimal("0")
-        spent = Decimal("0")
-        for raw_price, raw_qty in levels:
-            price, level_qty = Decimal(str(raw_price)), Decimal(str(raw_qty))
-            if price <= 0 or level_qty <= 0:
-                continue
-            if side == "sell":
-                take = min(remaining, level_qty)
-                result += take * price
-                remaining -= take
-                spent += take
-            else:
-                # For a BUY, qty is quote currency to spend. Consume ask levels by quote cost.
-                take_base = min(level_qty, remaining / price)
-                result += take_base
-                cost = take_base * price
-                remaining -= cost
-                spent += cost
-            if remaining <= Decimal("0"):
-                break
-        if remaining <= Decimal("0") and result > 0:
-            return result, symbol
-    return None, None
+        if side == "sell":
+            take = min(remaining, level_qty)
+            result += take * price
+            remaining -= take
+        else:
+            take_base = min(level_qty, remaining / price)
+            result += take_base
+            remaining -= take_base * price
+        if remaining <= 0:
+            break
+    if remaining > 0 or result <= 0:
+        return None
+    return result
 
 
 def evaluate_triangle(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
+    """Evaluate the exact configured three-leg path using live depth.
+
+    Depth consumption already captures book impact. The supplied slippage value
+    is therefore used once as an execution-safety buffer rather than multiplied
+    by three.
+    """
     symbol_meta = symbol_meta or {}
     start = Decimal(str(notional_usdt))
     if start <= 0 or not all(s in books for s in t.symbols):
@@ -77,17 +82,32 @@ def evaluate_triangle(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=Non
 
     amount = start
     used = []
-    for i in range(3):
+    fee_factor = Decimal("1") - Decimal(str(fee_bps)) / Decimal("10000")
+    if fee_factor <= 0:
+        return None
+
+    for i, symbol in enumerate(t.symbols):
+        meta = symbol_meta.get(symbol)
+        if not meta:
+            return None
         src = t.assets[i]
         dst = t.assets[(i + 1) % 3]
-        amount, symbol = _convert(src, dst, amount, books, symbol_meta)
+        base, quote = meta
+        if src == quote and dst == base:
+            side = "buy"
+        elif src == base and dst == quote:
+            side = "sell"
+        else:
+            return None
+        amount = _walk(symbol, side, amount, books)
         if amount is None:
             return None
-        used.append(symbol)
-        amount *= Decimal("1") - Decimal(str(fee_bps)) / Decimal("10000")
+        amount *= fee_factor
         if amount <= 0:
             return None
+        used.append(symbol)
 
     gross_bps = (amount / start - Decimal("1")) * Decimal("10000")
-    net_bps = gross_bps - Decimal(str(3 * slippage_bps))
+    safety_bps = Decimal(str(max(0.0, slippage_bps)))
+    net_bps = gross_bps - safety_bps
     return net_bps, gross_bps, tuple(used), t.assets[1], t.assets[2]
