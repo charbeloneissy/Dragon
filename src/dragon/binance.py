@@ -110,6 +110,10 @@ class BinanceClient:
     def ticker_24hr(self):
         return self.public("/api/v3/ticker/24hr")
 
+    def book_ticker(self):
+        """Return current best bid/ask for all Spot symbols in one public call."""
+        return self.public("/api/v3/ticker/bookTicker")
+
     def signed(self, method: str, path: str, params=None):
         if not self.key or not self.secret:
             raise BinanceError("Binance credentials missing")
@@ -153,9 +157,6 @@ class BinanceClient:
             except ValueError:
                 message = r.text[:500]
 
-            # Binance -1021 means the host clock is outside recvWindow.
-            # Re-sync once and retry GET/user-data requests only. Never blindly
-            # retry live writes because execution status can be unknown.
             if code == -1021 and method == "GET":
                 self.sync_time()
                 p["timestamp"] = int(time.time() * 1000) + self.time_offset_ms
