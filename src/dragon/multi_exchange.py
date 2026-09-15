@@ -8,7 +8,6 @@ from typing import Callable
 
 import websockets
 
-
 VENUES = ("BYBIT", "OKX", "COINBASE")
 DEFAULT_SYMBOLS = [
     "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","AVAXUSDT","LINKUSDT","DOTUSDT",
@@ -48,7 +47,6 @@ class MultiExchangeFeeds:
         env_symbols = [s.strip().upper() for s in os.getenv("CROSS_SYMBOLS", "").split(",") if s.strip()]
         self.symbols = env_symbols or symbols or DEFAULT_SYMBOLS
         self.external_feeds = state.setdefault("external_feeds", {})
-        self.external_feed_updates = state.setdefault("external_feed_updates", 0)
         self.cross_exchange_opportunities = state.setdefault("cross_exchange_opportunities", [])
         self._books = {v: {} for v in VENUES}
         self._coinbase_books = {s: {"bid": {}, "offer": {}} for s in self.symbols}
@@ -56,17 +54,18 @@ class MultiExchangeFeeds:
 
     def _record_feed(self, venue: str, symbol: str, bid: float, ask: float, bid_qty: float, ask_qty: float):
         now = time.time()
-        if not all(x is not None for x in (bid, ask, bid_qty, ask_qty)):
+        try:
+            bid, ask, bid_qty, ask_qty = map(float, (bid, ask, bid_qty, ask_qty))
+        except (TypeError, ValueError):
             return
         if min(bid, ask, bid_qty, ask_qty) <= 0 or bid >= ask:
             return
         self._books[venue][symbol] = {"bid": bid, "ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty, "ts": now}
         feed = self.external_feeds.setdefault(venue, {})
-        feed["status"] = "connected"
+        feed.update({"status": "connected", "last_update": now, "quote_age_ms": 0})
         feed["updates"] = int(feed.get("updates", 0)) + 1
-        feed["last_update"] = now
-        feed["quote_age_ms"] = 0
-        self.external_feed_updates += 1
+        with self.lock:
+            self.state["external_feed_updates"] = int(self.state.get("external_feed_updates", 0)) + 1
         self._update_opportunities()
 
     def _update_opportunities(self):
@@ -85,8 +84,6 @@ class MultiExchangeFeeds:
                 age = (now - q["ts"]) * 1000
                 if age <= stale_ms:
                     quotes.append((venue, q, age))
-            if len(quotes) < 2:
-                continue
             for buy_venue, buy, buy_age in quotes:
                 for sell_venue, sell, sell_age in quotes:
                     if buy_venue == sell_venue:
@@ -95,7 +92,7 @@ class MultiExchangeFeeds:
                     fees_bps = _fee_bps(buy_venue) + _fee_bps(sell_venue)
                     net_bps = gross_bps - fees_bps - slippage_bps
                     executable_notional = min(buy["ask"] * buy["ask_qty"], sell["bid"] * sell["bid_qty"])
-                    gate = "PASS" if net_bps >= min_edge_bps and executable_notional >= min_notional else "EDGE_OR_LIQUIDITY"
+                    passed = net_bps >= min_edge_bps and executable_notional >= min_notional
                     rows.append({
                         "symbol": symbol, "buy_venue": buy_venue, "sell_venue": sell_venue,
                         "gross_bps": round(gross_bps, 4), "fees_bps": round(fees_bps, 4),
@@ -104,11 +101,14 @@ class MultiExchangeFeeds:
                         "buy_qty": buy["ask_qty"], "sell_qty": sell["bid_qty"],
                         "executable_notional_usdt": round(executable_notional, 8),
                         "buy_age_ms": round(buy_age, 1), "sell_age_ms": round(sell_age, 1),
-                        "gate": gate, "execution_ready": False,
-                        "execution_reason": "scanner-only: authenticated two-leg execution adapters remain disabled",
+                        "gate": "PASS" if passed else "EDGE_OR_LIQUIDITY",
+                        "execution_ready": False,
+                        "execution_reason": "scanner-only: external two-leg execution disabled",
                     })
         rows.sort(key=lambda r: (r["net_bps"], r["executable_notional_usdt"]), reverse=True)
-        self.state["cross_exchange_opportunities"] = rows[:50]
+        with self.lock:
+            self.state["cross_exchange_opportunities"] = rows[:50]
+            self.state["cross_exchange_last_update"] = now
         if rows and rows[0]["gate"] == "PASS":
             top = rows[0]
             self.event("CROSS_OPPORTUNITY", f"{top['symbol']} {top['buy_venue']}->{top['sell_venue']} net_bps={top['net_bps']}")
@@ -126,7 +126,7 @@ class MultiExchangeFeeds:
                     async for raw in ws:
                         try:
                             data = json.loads(raw)
-                            for symbol, bid, ask, bid_qty, ask_qty in parser(data):
+                            for symbol, bid, ask, bid_qty, ask_qty in parser(data) or ():
                                 self._record_feed(venue, symbol, bid, ask, bid_qty, ask_qty)
                         except Exception as exc:
                             feed = self.external_feeds.setdefault(venue, {})
@@ -155,8 +155,7 @@ class MultiExchangeFeeds:
                 yield s.upper(), float(b[0][0]), float(a[0][0]), float(b[0][1]), float(a[0][1])
 
     def _okx_messages(self):
-        args = [{"channel": "bbo-tbt", "instId": _okx_id(s)} for s in self.symbols]
-        return [{"op": "subscribe", "args": args}]
+        return [{"op": "subscribe", "args": [{"channel": "bbo-tbt", "instId": _okx_id(s)} for s in self.symbols]}]
 
     def _okx_parser(self, msg):
         if msg.get("arg", {}).get("channel") == "bbo-tbt":
