@@ -82,12 +82,20 @@ class DynamicFee:
         return self.bps
 
 
+def _fee_cost_bps(fee_bps: Decimal, legs: int = 3) -> Decimal:
+    """Return compounded taker-fee drag in basis points for a multi-leg path."""
+    fee_factor = Decimal("1") - fee_bps / Decimal("10000")
+    if fee_factor <= 0 or legs <= 0:
+        return Decimal("0")
+    return (Decimal("1") - fee_factor ** legs) * Decimal("10000")
+
+
 def _ensure_state(main):
     defaults = {
         "rejection": Counter(), "rejection_total": 0,
         "latency": {"count": 0, "avg_ms": 0.0, "p95_ms": 0.0, "max_ms": 0.0},
         "circuit_breaker_trips": 0, "dynamic_fee_bps": 0.0,
-        "last_fee_refresh": None, "last_execution_latency_ms": None,
+        "fee_cost_bps": 0.0, "last_fee_refresh": None, "last_execution_latency_ms": None,
     }
     with main.LOCK:
         for key, value in defaults.items():
@@ -127,24 +135,40 @@ def install(main):
         if not all(books.get(s, {}).get("bids") and books.get(s, {}).get("asks") for s in t.symbols):
             record("NO_LIQUIDITY")
             return None
+
         effective_fee = fee.bps if fee.updated_at else Decimal(str(fee_bps))
-        no_fee = original_eval(t, books, Decimal("0"), Decimal("0"), symbol_meta, notional_usdt)
-        if no_fee is None:
+        fee_cost = _fee_cost_bps(effective_fee, len(t.symbols))
+        with main.LOCK:
+            main.STATE["dynamic_fee_bps"] = float(effective_fee)
+            main.STATE["fee_cost_bps"] = float(fee_cost)
+
+        # First pass is the true depth-only edge. Second pass isolates the
+        # compounded fee effect. Final pass adds the configured execution buffer.
+        depth_only = original_eval(t, books, Decimal("0"), Decimal("0"), symbol_meta, notional_usdt)
+        if depth_only is None:
             record("NO_LIQUIDITY")
             return None
-        with_fee = original_eval(t, books, effective_fee, Decimal("0"), symbol_meta, notional_usdt)
-        if with_fee is None:
+        after_fee = original_eval(t, books, effective_fee, Decimal("0"), symbol_meta, notional_usdt)
+        if after_fee is None:
             record("NO_LIQUIDITY")
             return None
-        if with_fee[0] <= 0:
-            record("FEE_REJECTED")
         result = original_eval(t, books, effective_fee, slippage_bps, symbol_meta, notional_usdt)
         if result is None:
             record("NO_LIQUIDITY")
             return None
-        if result[0] <= 0 and no_fee[0] > 0:
+
+        depth_edge_bps = depth_only[0]
+        after_fee_edge_bps = after_fee[0]
+        final_net_bps = result[0]
+
+        # Exactly one primary rejection reason is recorded per evaluated path.
+        if depth_edge_bps <= 0:
+            record("NO_EDGE")
+        elif after_fee_edge_bps <= 0:
+            record("FEE_REJECTED")
+        elif final_net_bps <= 0:
             record("SLIPPAGE_REJECTED")
-        elif cfg is not None and result[0] < Decimal(str(cfg.min_net_edge_bps)):
+        elif cfg is not None and final_net_bps < Decimal(str(cfg.min_net_edge_bps)):
             record("NET_EDGE_REJECTED")
         else:
             record("NET_EDGE_PASSED")
@@ -181,15 +205,18 @@ def install(main):
         value = await asyncio.to_thread(fee.refresh, client)
         with main.LOCK:
             main.STATE["dynamic_fee_bps"] = float(value)
+            main.STATE["fee_cost_bps"] = float(_fee_cost_bps(value, 3))
             main.STATE["last_fee_refresh"] = time.time()
-        main.event("FEE", f"Dynamic Binance taker fee loaded: {value:.4f} bps")
+        main.event("FEE", f"Dynamic Binance taker fee loaded: {value:.4f} bps; 3-leg cost={_fee_cost_bps(value, 3):.4f} bps")
 
         async def fee_loop():
             while True:
                 await asyncio.sleep(float(os.getenv("FEE_REFRESH_SECONDS", "60")))
                 value = await asyncio.to_thread(fee.refresh, client)
+                fee_cost = _fee_cost_bps(value, 3)
                 with main.LOCK:
                     main.STATE["dynamic_fee_bps"] = float(value)
+                    main.STATE["fee_cost_bps"] = float(fee_cost)
                     main.STATE["last_fee_refresh"] = time.time()
                     telemetry = {
                         "depth_updates": main.STATE.get("depth_updates", 0),
@@ -201,7 +228,7 @@ def install(main):
                         "rejections": dict(main.STATE.get("rejection", {})),
                     }
                 main.event("TELEMETRY", f"market={telemetry['depth_updates']} scans={telemetry['scans']} opp={telemetry['opportunities']} exec={telemetry['executions']} balance_refreshes={telemetry['balance_refreshes']} free_usdt={telemetry['free_usdt']} rejections={telemetry['rejections']}")
-                main.event("FEE", f"Dynamic Binance taker fee refreshed: {value:.4f} bps")
+                main.event("FEE", f"Dynamic Binance taker fee refreshed: {value:.4f} bps; 3-leg cost={fee_cost:.4f} bps")
 
         task = asyncio.create_task(fee_loop())
         try:
