@@ -28,12 +28,16 @@ def _net_received(resp: dict, side: str, base: str, quote: str):
     return received, asset
 
 
-def _validate_market(meta, side, amount):
+def _validate_market(meta, side, amount, current_base_position=Decimal("0")):
     step = Decimal(str(meta.get("stepSize", "0")))
     min_qty = Decimal(str(meta.get("minQty", "0")))
     max_qty = Decimal(str(meta.get("maxQty", "0")))
     min_notional = Decimal(str(meta.get("minNotional", "0")))
     max_notional = Decimal(str(meta.get("maxNotional", "0")))
+    apply_min = bool(meta.get("applyMinToMarket", True))
+    apply_max = bool(meta.get("applyMaxToMarket", True))
+    max_position = Decimal(str(meta.get("maxPosition", "0")))
+
     if side == "SELL":
         qty = floor_step(amount, step)
         if qty < min_qty:
@@ -41,11 +45,29 @@ def _validate_market(meta, side, amount):
         if max_qty > 0 and qty > max_qty:
             qty = floor_step(max_qty, step)
         return qty
-    if min_notional > 0 and amount < min_notional:
-        raise ExecutionError(f"quote amount {amount} below minNotional {min_notional}")
-    if max_notional > 0 and amount > max_notional:
-        raise ExecutionError(f"quote amount {amount} above maxNotional {max_notional}")
+
+    # BUY market orders use quoteOrderQty here. Binance's market-notional
+    # applicability flags must be respected instead of assuming every
+    # MIN_NOTIONAL/NOTIONAL filter applies to MARKET orders.
+    if apply_min and min_notional > 0 and amount < min_notional:
+        raise ExecutionError(f"quote amount {amount} below applicable minNotional {min_notional}")
+    if apply_max and max_notional > 0 and amount > max_notional:
+        raise ExecutionError(f"quote amount {amount} above applicable maxNotional {max_notional}")
     return amount
+
+
+def _validate_max_position(meta, side, base_balance, base_qty):
+    """Enforce Binance MAX_POSITION for BUY orders before submission."""
+    if side != "BUY":
+        return
+    limit = Decimal(str(meta.get("maxPosition", "0")))
+    if limit <= 0:
+        return
+    resulting = Decimal(str(base_balance)) + Decimal(str(base_qty))
+    if resulting > limit:
+        raise ExecutionError(
+            f"base position {resulting} would exceed Binance maxPosition {limit}"
+        )
 
 
 def _find_recovery_symbol(filters, asset):
@@ -89,6 +111,25 @@ def _account_balances(client, assets):
     }
 
 
+def _live_symbol_max_positions(client, symbols):
+    """Read current Binance symbol MAX_POSITION limits without trusting stale config."""
+    try:
+        info = client.exchange_info()
+    except BinanceError as exc:
+        raise ExecutionError(f"cannot refresh Binance position filters: {exc}") from exc
+    limits = {}
+    wanted = set(symbols)
+    for row in info.get("symbols", []):
+        symbol = row.get("symbol")
+        if symbol not in wanted:
+            continue
+        for f in row.get("filters", []):
+            if f.get("filterType") == "MAX_POSITION":
+                limits[symbol] = Decimal(str(f.get("maxPosition", "0")))
+                break
+    return limits
+
+
 def _recover_to_usdt(client, filters, asset, amount):
     if asset == "USDT" or amount <= 0:
         return {"recovered": True, "asset": asset, "amount": str(amount)}
@@ -113,12 +154,6 @@ def _recover_to_usdt(client, filters, asset, amount):
 
 
 def _reconcile_and_recover(client, filters, baseline, assets):
-    """Flatten only assets whose free balance increased during this cycle.
-
-    This is important for partial fills: a failed leg can leave both the
-    original source asset and the newly acquired target asset in the account.
-    Comparing against a pre-cycle balance avoids selling unrelated inventory.
-    """
     current = _account_balances(client, assets)
     deltas = {asset: current.get(asset, Decimal("0")) - baseline.get(asset, Decimal("0")) for asset in assets}
     recoveries = []
@@ -157,16 +192,31 @@ def execute_triangle(client: BinanceClient, path, start_asset, first_asset, star
             assets.add(filters[symbol]["baseAsset"])
             assets.add(filters[symbol]["quoteAsset"])
     baseline = _account_balances(client, assets)
+    live_max_positions = _live_symbol_max_positions(client, path)
 
     try:
         for symbol in path:
             if symbol not in filters:
                 raise ExecutionError(f"missing exchange filters for {symbol}")
-            meta = filters[symbol]
+            meta = dict(filters[symbol])
+            if symbol in live_max_positions:
+                meta["maxPosition"] = live_max_positions[symbol]
             base, quote = meta["baseAsset"], meta["quoteAsset"]
             if source_asset == quote:
                 side = "BUY"
                 quote_amount = _validate_market(meta, side, amount)
+                # quoteOrderQty does not let us know the exact base quantity
+                # until the fill, so use current best ask as a conservative
+                # pre-trade estimate for MAX_POSITION.
+                try:
+                    book = client.public("/api/v3/depth", {"symbol": symbol, "limit": 5})
+                    best_ask = Decimal(str(book.get("asks", [["0", "0"]])[0][0]))
+                except Exception as exc:
+                    raise ExecutionError(f"cannot validate max position for {symbol}: {exc}") from exc
+                if best_ask <= 0:
+                    raise ExecutionError(f"invalid best ask for {symbol}: {best_ask}")
+                estimated_base_qty = quote_amount / best_ask
+                _validate_max_position(meta, side, baseline.get(base, Decimal("0")), estimated_base_qty)
                 params = {"symbol": symbol, "side": side, "type": "MARKET", "quoteOrderQty": format(quote_amount, "f"), "newOrderRespType": "FULL"}
             elif source_asset == base:
                 side = "SELL"
@@ -183,15 +233,10 @@ def execute_triangle(client: BinanceClient, path, start_asset, first_asset, star
             resp = _order_filled_or_reconcile(client, symbol, resp.get("orderId"), resp)
             received, received_asset = _net_received(resp, side, base, quote)
             legs.append({
-                "symbol": symbol,
-                "side": side,
-                "received": str(received),
-                "received_asset": received_asset,
-                "order_id": resp.get("orderId"),
-                "status": resp.get("status"),
-                "executed_qty": str(resp.get("executedQty", "0")),
-                "quote_qty": str(resp.get("cummulativeQuoteQty", "0")),
-                "fills": resp.get("fills", []),
+                "symbol": symbol, "side": side, "received": str(received),
+                "received_asset": received_asset, "order_id": resp.get("orderId"),
+                "status": resp.get("status"), "executed_qty": str(resp.get("executedQty", "0")),
+                "quote_qty": str(resp.get("cummulativeQuoteQty", "0")), "fills": resp.get("fills", []),
             })
             source_asset = received_asset
             amount = received
@@ -199,15 +244,10 @@ def execute_triangle(client: BinanceClient, path, start_asset, first_asset, star
         if source_asset != "USDT":
             raise ExecutionError(f"triangle did not finish in USDT: {source_asset}")
         return {
-            "dry_run": False,
-            "legs": legs,
-            "start_usdt": str(start_usdt),
-            "final_asset": source_asset,
-            "final_usdt": str(amount),
+            "dry_run": False, "legs": legs, "start_usdt": str(start_usdt),
+            "final_asset": source_asset, "final_usdt": str(amount),
             "realized_pnl_usdt": str(amount - Decimal(str(start_usdt))),
-            "finished": True,
-            "duration_ms": round((time.time() - started) * 1000, 2),
-            "timestamp": time.time(),
+            "finished": True, "duration_ms": round((time.time() - started) * 1000, 2), "timestamp": time.time(),
         }
     except ExecutionError as exc:
         recovery_error = None
