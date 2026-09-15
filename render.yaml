@@ -41,13 +41,13 @@ services:
       - key: FUTURES_ORDER_NOTIONAL_USDT
         value: "5"
       - key: MIN_NET_EDGE_BPS
-        value: "5"
+        value: "2"
       - key: MIN_TRADE_NOTIONAL_USDT
         value: "5"
       - key: MAX_NOTIONAL_USDT
         value: "25"
       - key: MAX_SLIPPAGE_BPS
-        value: "10"
+        value: "2"
       - key: FEE_BPS
         value: "10"
       - key: ARB_RISK_PCT
