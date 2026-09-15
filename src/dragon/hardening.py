@@ -191,6 +191,16 @@ def install(main):
                 with main.LOCK:
                     main.STATE["dynamic_fee_bps"] = float(value)
                     main.STATE["last_fee_refresh"] = time.time()
+                    telemetry = {
+                        "depth_updates": main.STATE.get("depth_updates", 0),
+                        "scans": main.STATE.get("scans", 0),
+                        "opportunities": main.STATE.get("opportunities", 0),
+                        "executions": main.STATE.get("executions", 0),
+                        "balance_refreshes": main.STATE.get("balance_refreshes", 0),
+                        "free_usdt": main.STATE.get("free_usdt", "0"),
+                        "rejections": dict(main.STATE.get("rejection", {})),
+                    }
+                main.event("TELEMETRY", f"market={telemetry['depth_updates']} scans={telemetry['scans']} opp={telemetry['opportunities']} exec={telemetry['executions']} balance_refreshes={telemetry['balance_refreshes']} free_usdt={telemetry['free_usdt']} rejections={telemetry['rejections']}")
                 main.event("FEE", f"Dynamic Binance taker fee refreshed: {value:.4f} bps")
 
         task = asyncio.create_task(fee_loop())
