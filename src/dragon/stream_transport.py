@@ -1,8 +1,5 @@
 """Harden Binance Spot market WebSocket transport and payload handling."""
-import asyncio
-import json
 import time
-from dataclasses import replace
 from decimal import Decimal
 
 
@@ -55,11 +52,6 @@ def _depth_payload(msg, levels):
     }
 
 
-def _record(main_module, key, value=1):
-    with main_module.LOCK:
-        main_module.STATE[key] = main_module.STATE.get(key, 0) + value
-
-
 def install(main_module):
     """Patch the production Spot stream loop without touching execution/risk logic."""
     if getattr(main_module, "_spot_stream_transport_fixed", False):
@@ -70,29 +62,26 @@ def install(main_module):
 
     async def patched_loop(cfg, client, filters, triangles, symbols, symbol_meta):
         main_module._depth_payload = _depth_payload
-        patched_cfg = replace(cfg, ws_base=_combined_ws_url(cfg.ws_base))
-
-        # The existing loop already owns reconnect/backoff and execution safety.
-        # This wrapper adds protocol-level diagnostics and a scheduled reconnect so
-        # a long-lived process never crosses Binance's 24-hour connection lifetime.
-        async def run_with_watchdog():
-            connected_since = time.monotonic()
-            task = asyncio.create_task(
-                original_loop(patched_cfg, client, filters, triangles, symbols, symbol_meta)
-            )
-            try:
-                while not task.done():
-                    await asyncio.sleep(30)
-                    if time.monotonic() - connected_since >= 23 * 60 * 60:
-                        task.cancel()
-                        raise RuntimeError("scheduled Binance WebSocket rotation")
-            finally:
-                if not task.done():
-                    task.cancel()
-            return await task
-
+        patched_cfg = cfg.__class__(
+            api_base=cfg.api_base,
+            ws_base=_combined_ws_url(cfg.ws_base),
+            dry_run=cfg.dry_run,
+            live_trading=cfg.live_trading,
+            min_net_edge_bps=cfg.min_net_edge_bps,
+            max_notional_usdt=cfg.max_notional_usdt,
+            max_slippage_bps=cfg.max_slippage_bps,
+            fee_bps=cfg.fee_bps,
+            risk_pct=cfg.risk_pct,
+            cooldown_ms=cfg.cooldown_ms,
+            max_triangles=cfg.max_triangles,
+            stale_ms=cfg.stale_ms,
+            poll_interval_seconds=cfg.poll_interval_seconds,
+            order_timeout_ms=cfg.order_timeout_ms,
+            depth_levels=cfg.depth_levels,
+            health_fail_open=cfg.health_fail_open,
+        )
         try:
-            return await run_with_watchdog()
+            return await original_loop(patched_cfg, client, filters, triangles, symbols, symbol_meta)
         finally:
             main_module._depth_payload = original_payload
 
