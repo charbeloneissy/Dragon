@@ -19,10 +19,17 @@ async def run_production():
     dashboard_path = Path(__file__).resolve().parent.parent / "dashboard.html"
 
     def robust_get(self):
-        raw_path = self.path
+        """Serve the dashboard reliably, including query strings such as ?utm_source=... ."""
+        raw_path = self.path or "/"
         normalized = urlsplit(raw_path).path or "/"
-        if normalized in ("/dashboard", "/dashboard/") and dashboard_path.exists():
-            body = dashboard_path.read_bytes()
+
+        if normalized in ("/dashboard", "/dashboard/"):
+            # Prefer the repository dashboard, but fall back to the embedded
+            # dashboard so a missing/mis-mounted dashboard.html can never cause 404.
+            if dashboard_path.is_file():
+                body = dashboard_path.read_bytes()
+            else:
+                body = web_runner.DASHBOARD.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
@@ -30,10 +37,10 @@ async def run_production():
             self.end_headers()
             self.wfile.write(body)
             return
-        if normalized == "/":
-            self.path = "/"
-        elif normalized in ("/health", "/healthz"):
-            self.path = normalized + ("?" if "?" in raw_path else "")
+
+        # web_runner historically matched only exact paths. Normalize the path
+        # before delegating so /health?ts=... and similar requests remain valid.
+        self.path = normalized
         try:
             return original_get(self)
         finally:
