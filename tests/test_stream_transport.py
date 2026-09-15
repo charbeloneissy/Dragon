@@ -32,3 +32,8 @@ def test_diff_depth_payload_still_works():
 def test_combined_ws_url():
     assert _combined_ws_url("wss://stream.binance.com:9443/ws") == "wss://stream.binance.com:9443/stream"
     assert _combined_ws_url("wss://stream.binance.com:9443/stream") == "wss://stream.binance.com:9443/stream"
+
+
+def test_invalid_event_is_ignored():
+    msg = {"stream": "btcusdt@trade", "data": {"e": "trade", "s": "BTCUSDT"}}
+    assert _depth_payload(msg, 20) is None
