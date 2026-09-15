@@ -226,10 +226,7 @@ async def run():
         filters = make_filters(info); symbol_meta = _symbol_meta(info)
         triangles = build_triangles(info, cfg.max_triangles)
         symbols = sorted({s for t in triangles for s in t.symbols})
-        if len(symbols) * 2 > 1000:
-            symbols = symbols[:500]
-            allowed = set(symbols)
-            triangles = [t for t in triangles if all(s in allowed for s in t.symbols)]
+        # No arbitrary symbol cap. Full-universe runner handles WebSocket sharding.
         with LOCK:
             STATE["triangles"] = len(triangles); STATE["symbols"] = len(symbols)
         event("START", f"Dragon triangular engine ready: triangles={len(triangles)} symbols={len(symbols)} live={cfg.live_trading and not cfg.dry_run}")
