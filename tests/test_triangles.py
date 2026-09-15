@@ -1,7 +1,7 @@
 from decimal import Decimal
 
-from dragon.triangles import Triangle, evaluate_triangle
-from dragon.hardening import _fee_cost_bps
+from src.dragon.triangles import Triangle, evaluate_triangle
+from src.dragon.hardening import _fee_cost_bps
 
 
 def test_triangle_uses_direct_and_inverse_conversions():
