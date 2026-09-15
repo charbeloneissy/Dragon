@@ -23,9 +23,23 @@ services:
       - key: LIVE_TRADING
         value: "true"
       - key: FUTURES_ENABLED
-        value: "false"
+        value: "true"
       - key: FUTURES_LIVE_TRADING
         value: "false"
+      - key: FUTURES_MIN_NET_EDGE_BPS
+        value: "12"
+      - key: FUTURES_FEE_BPS
+        value: "5"
+      - key: FUTURES_FUNDING_BUFFER_BPS
+        value: "3"
+      - key: FUTURES_SLIPPAGE_BPS
+        value: "1"
+      - key: FUTURES_POLL_SECONDS
+        value: "30"
+      - key: FUTURES_MAX_NOTIONAL_USDT
+        value: "25"
+      - key: FUTURES_ORDER_NOTIONAL_USDT
+        value: "5"
       - key: MIN_NET_EDGE_BPS
         value: "5"
       - key: MIN_TRADE_NOTIONAL_USDT
