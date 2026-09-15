@@ -50,6 +50,28 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers(); self.wfile.write(body); return
+        if self.path == "/manifest.json":
+            body = MANIFEST.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/manifest+json")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body); return
+        if self.path == "/service-worker.js":
+            body = SERVICE_WORKER.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/javascript")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Service-Worker-Allowed", "/")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body); return
+        if self.path == "/dragon-icon.svg":
+            body = DRAGON_ICON.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body); return
         self.send_response(404); self.end_headers()
 
     def log_message(self, *_args): return
@@ -63,7 +85,39 @@ def start_health_server():
     return server
 
 
-DASHBOARD = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dragon Arbitrage Live</title><style>body{margin:0;background:#0b0d10;color:#eee;font-family:system-ui,Arial}main{max-width:1100px;margin:auto;padding:22px}h1{margin:0 0 4px}.sub{color:#8f98a3;margin-bottom:20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:#14181e;border:1px solid #252b34;border-radius:14px;padding:16px}.label{color:#8f98a3;font-size:12px;text-transform:uppercase}.value{font-size:28px;font-weight:700;margin-top:5px}.good{color:#55d68a}.warn{color:#f0c75e}.bad{color:#ff6874}.feed{margin-top:16px;max-height:430px;overflow:auto}.row{padding:10px 0;border-bottom:1px solid #242932;font-size:13px}.pill{display:inline-block;padding:3px 8px;border-radius:20px;background:#242a33;margin-right:8px}.mono{font-family:ui-monospace,monospace}.small{color:#9da5af;font-size:12px}</style></head><body><main><h1>🐉 Dragon Arbitrage</h1><div class="sub">Live engine monitor • refreshes every 2 seconds</div><div id="status" class="card">Loading...</div><br><div id="cards" class="grid"></div><div class="card feed"><b>Live Activity</b><div id="feed"></div></div></main><script>async function tick(){try{const r=await fetch('/health?x='+Date.now());const j=await r.json(),s=j.state||{};document.getElementById('status').innerHTML='<span class="pill '+(s.ws_connected?'good':'bad')+'">● '+(s.ws_connected?'BINANCE CONNECTED':'BINANCE DISCONNECTED')+'</span><span class="pill '+(j.live&&!j.dry_run?'good':'warn')+'">'+(j.live&&!j.dry_run?'LIVE TRADING':'NOT LIVE')+'</span><span class="small">Updated '+new Date().toLocaleTimeString()+'</span>';const vals=[['Triangles',s.triangles],['Symbols',s.symbols],['Opportunities',s.opportunities],['Executions',s.executions],['Errors',s.execution_errors],['Risk blocks',s.risk_blocks],['Reconnects',s.reconnects]];document.getElementById('cards').innerHTML=vals.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="value">'+(x[1]??0)+'</div></div>').join('');const feed=(s.recent||[]).slice().reverse();document.getElementById('feed').innerHTML=feed.map(e=>'<div class="row"><span class="small">'+new Date(e.ts*1000).toLocaleTimeString()+'</span> <span class="pill">'+e.kind+'</span> '+e.message+' '+(e.path?'<span class="mono">'+e.path+'</span>':'')+(e.net_bps!=null?' <b>'+Number(e.net_bps).toFixed(3)+' bps</b>':'')+'</div>').join('')||'<div class="small">Waiting for activity...</div>'}catch(e){document.getElementById('status').innerHTML='<span class="bad">Dashboard connection error</span>'}}tick();setInterval(tick,2000)</script></body></html>'''
+MANIFEST = r'''{
+  "name": "Dragon Arbitrage Live",
+  "short_name": "Dragon",
+  "description": "Dragon arbitrage engine live dashboard",
+  "start_url": "/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b0d10",
+  "theme_color": "#0b0d10",
+  "icons": [
+    {"src":"/dragon-icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}
+  ]
+}'''
+
+SERVICE_WORKER = r'''const CACHE_NAME = "dragon-dashboard-v1";
+const APP_SHELL = ["/dashboard", "/manifest.json", "/dragon-icon.svg"];
+self.addEventListener("install", event => {
+  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()));
+});
+self.addEventListener("activate", event => {
+  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))).then(() => self.clients.claim()));
+});
+self.addEventListener("fetch", event => {
+  const url = new URL(event.request.url);
+  if (url.pathname === "/health" || url.pathname === "/healthz") return;
+  if (event.request.method !== "GET" || url.origin !== self.location.origin) return;
+  event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
+});'''
+
+DRAGON_ICON = r'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0b0d10"/><path d="M106 364c62-18 78-69 76-122-2-60 31-113 99-139-4 32 10 48 38 64 27 16 51 40 61 75 8 29 4 60-14 88-18 28-48 50-84 61-53 17-113 10-176-27z" fill="#c9a85b"/><path d="M229 188c34-13 69-8 97 12-20 5-37 17-48 35-14-15-31-31-49-47z" fill="#0b0d10"/><circle cx="333" cy="196" r="10" fill="#c9a85b"/><path d="M385 317l42 28-55 1z" fill="#c9a85b"/></svg>'''
+
+DASHBOARD = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#0b0d10"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><link rel="manifest" href="/manifest.json"><link rel="icon" href="/dragon-icon.svg"><title>Dragon Arbitrage Live</title><style>body{margin:0;background:#0b0d10;color:#eee;font-family:system-ui,Arial}main{max-width:1100px;margin:auto;padding:22px;padding-bottom:40px}h1{margin:0 0 4px}.sub{color:#8f98a3;margin-bottom:20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:#14181e;border:1px solid #252b34;border-radius:14px;padding:16px}.label{color:#8f98a3;font-size:12px;text-transform:uppercase}.value{font-size:28px;font-weight:700;margin-top:5px}.good{color:#55d68a}.warn{color:#f0c75e}.bad{color:#ff6874}.feed{margin-top:16px;max-height:430px;overflow:auto}.row{padding:10px 0;border-bottom:1px solid #242932;font-size:13px}.pill{display:inline-block;padding:3px 8px;border-radius:20px;background:#242a33;margin-right:8px}.mono{font-family:ui-monospace,monospace}.small{color:#9da5af;font-size:12px}.install{display:none;position:sticky;top:10px;z-index:10;width:100%;box-sizing:border-box;margin-bottom:14px;padding:12px 14px;border:1px solid #3a424d;border-radius:12px;background:#181d24;color:#eee;font-weight:700}.install button{float:right;border:0;border-radius:8px;padding:7px 12px;background:#eee;color:#111;font-weight:700}</style></head><body><main><div id="install" class="install">📱 Install Dragon on this phone <button id="installBtn">Install</button></div><h1>🐉 Dragon Arbitrage</h1><div class="sub">Live engine monitor • refreshes every 2 seconds</div><div id="status" class="card">Loading...</div><br><div id="cards" class="grid"></div><div class="card feed"><b>Live Activity</b><div id="feed"></div></div></main><script>let deferredPrompt=null;const installBox=document.getElementById('install'),installBtn=document.getElementById('installBtn');window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;installBox.style.display='block'});installBtn.onclick=async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;installBox.style.display='none'};window.addEventListener('appinstalled',()=>installBox.style.display='none');if('serviceWorker'in navigator)navigator.serviceWorker.register('/service-worker.js').catch(()=>{});async function tick(){try{const r=await fetch('/health?x='+Date.now());const j=await r.json(),s=j.state||{};document.getElementById('status').innerHTML='<span class="pill '+(s.ws_connected?'good':'bad')+'">● '+(s.ws_connected?'BINANCE CONNECTED':'BINANCE DISCONNECTED')+'</span><span class="pill '+(j.live&&!j.dry_run?'good':'warn')+'">'+(j.live&&!j.dry_run?'LIVE TRADING':'NOT LIVE')+'</span><span class="small">Updated '+new Date().toLocaleTimeString()+'</span>';const vals=[['Triangles',s.triangles],['Symbols',s.symbols],['Opportunities',s.opportunities],['Executions',s.executions],['Errors',s.execution_errors],['Risk blocks',s.risk_blocks],['Reconnects',s.reconnects]];document.getElementById('cards').innerHTML=vals.map(x=>'<div class="card"><div class="label">'+x[0]+'</div><div class="value">'+(x[1]??0)+'</div></div>').join('');const feed=(s.recent||[]).slice().reverse();document.getElementById('feed').innerHTML=feed.map(e=>'<div class="row"><span class="small">'+new Date(e.ts*1000).toLocaleTimeString()+'</span> <span class="pill">'+e.kind+'</span> '+e.message+' '+(e.path?'<span class="mono">'+e.path+'</span>':'')+(e.net_bps!=null?' <b>'+Number(e.net_bps).toFixed(3)+' bps</b>':'')+'</div>').join('')||'<div class="small">Waiting for activity...</div>'}catch(e){document.getElementById('status').innerHTML='<span class="bad">Dashboard connection error</span>'}}tick();setInterval(tick,2000)</script></body></html>'''
 
 
 async def stream_loop(cfg, client, filters, triangles, symbols):
