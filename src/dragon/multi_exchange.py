@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from typing import Callable
 
@@ -35,12 +36,17 @@ def _normalize_usd_symbol(symbol: str) -> str:
     return s.replace("-", "")
 
 
+def _fee_bps(venue: str) -> float:
+    return float(os.getenv(f"CROSS_{venue}_FEE_BPS", os.getenv("CROSS_FEE_BPS", "10")))
+
+
 class MultiExchangeFeeds:
     def __init__(self, state: dict, lock, event: Callable[[str, str], None], symbols=None):
         self.state = state
         self.lock = lock
         self.event = event
-        self.symbols = symbols or DEFAULT_SYMBOLS
+        env_symbols = [s.strip().upper() for s in os.getenv("CROSS_SYMBOLS", "").split(",") if s.strip()]
+        self.symbols = env_symbols or symbols or DEFAULT_SYMBOLS
         self.external_feeds = state.setdefault("external_feeds", {})
         self.external_feed_updates = state.setdefault("external_feed_updates", 0)
         self.cross_exchange_opportunities = state.setdefault("cross_exchange_opportunities", [])
@@ -54,9 +60,7 @@ class MultiExchangeFeeds:
             return
         if min(bid, ask, bid_qty, ask_qty) <= 0 or bid >= ask:
             return
-        self._books[venue][symbol] = {
-            "bid": bid, "ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty, "ts": now,
-        }
+        self._books[venue][symbol] = {"bid": bid, "ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty, "ts": now}
         feed = self.external_feeds.setdefault(venue, {})
         feed["status"] = "connected"
         feed["updates"] = int(feed.get("updates", 0)) + 1
@@ -66,10 +70,10 @@ class MultiExchangeFeeds:
         self._update_opportunities()
 
     def _update_opportunities(self):
-        stale_ms = float(__import__("os").getenv("CROSS_STALE_MS", "3000"))
-        min_edge_bps = float(__import__("os").getenv("CROSS_MIN_NET_EDGE_BPS", "0.10"))
-        fee_bps = float(__import__("os").getenv("CROSS_FEE_BPS", "10"))
-        min_notional = float(__import__("os").getenv("CROSS_MIN_DISPLAY_NOTIONAL_USDT", "0.01"))
+        stale_ms = float(os.getenv("CROSS_STALE_MS", "1500"))
+        min_edge_bps = float(os.getenv("CROSS_MIN_NET_EDGE_BPS", "0.10"))
+        slippage_bps = float(os.getenv("CROSS_SLIPPAGE_BPS", "0.50"))
+        min_notional = float(os.getenv("CROSS_MIN_DISPLAY_NOTIONAL_USDT", "0.01"))
         now = time.time()
         rows = []
         for symbol in self.symbols:
@@ -83,35 +87,31 @@ class MultiExchangeFeeds:
                     quotes.append((venue, q, age))
             if len(quotes) < 2:
                 continue
-            buy_venue, buy = min(quotes, key=lambda x: x[1]["ask"])
-            sell_venue, sell = max(quotes, key=lambda x: x[1]["bid"])
-            if buy_venue == sell_venue:
-                alternatives = [(v, q, age) for v, q, age in quotes if v != buy_venue]
-                if not alternatives:
-                    continue
-                sell_venue, sell = max(alternatives, key=lambda x: x[1]["bid"])
-            if sell["bid"] <= buy["ask"]:
-                gross_bps = (sell["bid"] / buy["ask"] - 1.0) * 10000.0
-            else:
-                gross_bps = (sell["bid"] / buy["ask"] - 1.0) * 10000.0
-            net_bps = gross_bps - fee_bps * 2.0
-            executable_notional = min(buy["ask"] * buy["ask_qty"], sell["bid"] * sell["bid_qty"])
-            gate = "PASS" if net_bps >= min_edge_bps and executable_notional >= min_notional else "EDGE_OR_LIQUIDITY"
-            rows.append({
-                "symbol": symbol, "buy_venue": buy_venue, "sell_venue": sell_venue,
-                "gross_bps": round(gross_bps, 4), "net_bps": round(net_bps, 4),
-                "buy_ask": buy["ask"], "sell_bid": sell["bid"],
-                "buy_qty": buy["ask_qty"], "sell_qty": sell["bid_qty"],
-                "executable_notional_usdt": round(executable_notional, 8),
-                "buy_age_ms": round((now - buy["ts"]) * 1000, 1),
-                "sell_age_ms": round((now - sell["ts"]) * 1000, 1),
-                "gate": gate, "execution_ready": False,
-                "execution_reason": "external order adapters and authenticated two-leg fill coordination are disabled",
-            })
-        rows.sort(key=lambda r: r["net_bps"], reverse=True)
-        self.state["cross_exchange_opportunities"] = rows[:20]
+            for buy_venue, buy, buy_age in quotes:
+                for sell_venue, sell, sell_age in quotes:
+                    if buy_venue == sell_venue:
+                        continue
+                    gross_bps = (sell["bid"] / buy["ask"] - 1.0) * 10000.0
+                    fees_bps = _fee_bps(buy_venue) + _fee_bps(sell_venue)
+                    net_bps = gross_bps - fees_bps - slippage_bps
+                    executable_notional = min(buy["ask"] * buy["ask_qty"], sell["bid"] * sell["bid_qty"])
+                    gate = "PASS" if net_bps >= min_edge_bps and executable_notional >= min_notional else "EDGE_OR_LIQUIDITY"
+                    rows.append({
+                        "symbol": symbol, "buy_venue": buy_venue, "sell_venue": sell_venue,
+                        "gross_bps": round(gross_bps, 4), "fees_bps": round(fees_bps, 4),
+                        "slippage_bps": round(slippage_bps, 4), "net_bps": round(net_bps, 4),
+                        "buy_ask": buy["ask"], "sell_bid": sell["bid"],
+                        "buy_qty": buy["ask_qty"], "sell_qty": sell["bid_qty"],
+                        "executable_notional_usdt": round(executable_notional, 8),
+                        "buy_age_ms": round(buy_age, 1), "sell_age_ms": round(sell_age, 1),
+                        "gate": gate, "execution_ready": False,
+                        "execution_reason": "scanner-only: authenticated two-leg execution adapters remain disabled",
+                    })
+        rows.sort(key=lambda r: (r["net_bps"], r["executable_notional_usdt"]), reverse=True)
+        self.state["cross_exchange_opportunities"] = rows[:50]
         if rows and rows[0]["gate"] == "PASS":
-            self.event("CROSS_OPPORTUNITY", f"{rows[0]['symbol']} {rows[0]['buy_venue']}->{rows[0]['sell_venue']} net_bps={rows[0]['net_bps']}")
+            top = rows[0]
+            self.event("CROSS_OPPORTUNITY", f"{top['symbol']} {top['buy_venue']}->{top['sell_venue']} net_bps={top['net_bps']}")
 
     async def _run_venue(self, venue, url, messages, parser):
         delay = 1.0
@@ -129,7 +129,8 @@ class MultiExchangeFeeds:
                             for symbol, bid, ask, bid_qty, ask_qty in parser(data):
                                 self._record_feed(venue, symbol, bid, ask, bid_qty, ask_qty)
                         except Exception as exc:
-                            self.external_feeds.setdefault(venue, {})["parse_errors"] = int(self.external_feeds.setdefault(venue, {}).get("parse_errors", 0)) + 1
+                            feed = self.external_feeds.setdefault(venue, {})
+                            feed["parse_errors"] = int(feed.get("parse_errors", 0)) + 1
                             self.event("EXT_PARSE_ERROR", f"{venue}: {exc}")
             except asyncio.CancelledError:
                 raise
