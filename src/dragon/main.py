@@ -39,7 +39,11 @@ def event(kind, message, **data):
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ("/", "/health", "/healthz") or self.path.startswith("/health?"):
+        if self.path == "/":
+            self.send_response(302)
+            self.send_header("Location", "/dashboard")
+            self.end_headers(); return
+        if self.path in ("/health", "/healthz") or self.path.startswith("/health?"):
             with LOCK:
                 payload = {"status": STATE["status"], "service": "dragon", "state": dict(STATE)}
             body = json.dumps(payload, default=str).encode()
