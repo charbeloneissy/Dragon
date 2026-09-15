@@ -13,11 +13,10 @@ WS_BACKOFF_MIN = 1.0
 WS_BACKOFF_MAX = 60.0
 WS_STALE_SECONDS = 45.0
 # Keep combined-stream URLs comfortably below proxy/server URI limits.
-# Binance permits many streams per connection, but a single giant URL can
-# trigger HTTP 414 before the WebSocket handshake is accepted.
 WS_SHARD_SIZE = 100
 WS_PING_INTERVAL = 20.0
 WS_PING_TIMEOUT = 20.0
+REST_FALLBACK_SECONDS = 3.0
 
 
 def _ws_state(worker_id, **values):
@@ -89,6 +88,51 @@ async def _feed_worker(cfg, symbols, queue, worker_id):
             _ws_state(worker_id, ws_reconnects=web_runner.STATE.get("ws_reconnects", 0) + 1)
 
 
+async def _rest_book_ticker_worker(client, symbols, queue):
+    """Keep scanning alive when a WS transport is silent or unavailable.
+
+    Binance's all-symbol bookTicker endpoint is one public request and gives a
+    current best bid/ask for every Spot symbol. It is a deliberately slower
+    fallback, not a replacement for the low-latency WebSocket feed.
+    """
+    wanted = set(symbols)
+    while True:
+        try:
+            payload = await asyncio.to_thread(client.book_ticker)
+            count = 0
+            now_ms = time.monotonic() * 1000
+            for item in payload if isinstance(payload, list) else []:
+                symbol = item.get("symbol")
+                if symbol not in wanted:
+                    continue
+                bid = item.get("bidPrice")
+                bid_qty = item.get("bidQty")
+                ask = item.get("askPrice")
+                ask_qty = item.get("askQty")
+                if not all((bid, bid_qty, ask, ask_qty)):
+                    continue
+                data = {
+                    "s": symbol,
+                    "b": [[str(bid), str(bid_qty)]],
+                    "a": [[str(ask), str(ask_qty)]],
+                    "_source": "rest_book_ticker",
+                    "_ts_ms": now_ms,
+                }
+                if queue.full():
+                    break
+                queue.put_nowait(data)
+                count += 1
+            with web_runner.LOCK:
+                web_runner.STATE.setdefault("rest_fallback_updates", 0)
+                web_runner.STATE["rest_fallback_updates"] += count
+            web_runner.event("REST_SCAN", f"BookTicker fallback refreshed {count} symbols", symbols=count)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            web_runner.event("REST_SCAN_ERROR", f"BookTicker fallback failed: {exc}")
+        await asyncio.sleep(REST_FALLBACK_SECONDS)
+
+
 async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
     books = {}
     dirty = set()
@@ -99,14 +143,19 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
     shards = [symbols[i:i + WS_SHARD_SIZE] for i in range(0, len(symbols), WS_SHARD_SIZE)]
     queue = asyncio.Queue(maxsize=20000)
     workers = [asyncio.create_task(_feed_worker(cfg, shard, queue, i + 1)) for i, shard in enumerate(shards)]
+    # REST bookTicker is a bounded-rate safety net so the opportunity scanner
+    # still runs if a WebSocket transport is accepted but emits no data.
+    workers.append(asyncio.create_task(_rest_book_ticker_worker(client, symbols, queue)))
     with web_runner.LOCK:
-        web_runner.STATE["ws_connected"] = bool(workers)
+        web_runner.STATE["ws_connected"] = bool(shards)
         web_runner.STATE["status"] = "running" if workers else "degraded"
         web_runner.STATE["symbols"] = len(symbols)
         web_runner.STATE["triangles"] = len(triangles)
         web_runner.STATE["ws_shards"] = len(shards)
         web_runner.STATE["ws_shard_size"] = WS_SHARD_SIZE
+        web_runner.STATE.setdefault("rest_fallback_updates", 0)
     web_runner.event("UNIVERSE", f"Full Spot universe active: {len(symbols)} symbols, {len(triangles)} triangles, {len(shards)} WS shards", shard_size=WS_SHARD_SIZE)
+    web_runner.event("SCAN", "Opportunity scanner armed with WebSocket + REST bookTicker fallback")
 
     last_order_ms = 0.0
     last_balance_ms = 0.0
@@ -124,10 +173,12 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
             books[symbol] = {"bids": bids, "asks": asks, "depth_ts": time.monotonic() * 1000}
             dirty.update(by_symbol.get(symbol, ()))
             now = time.monotonic() * 1000
-            candidates = list(dirty); dirty.clear()
+            candidates = list(dirty)
+            dirty.clear()
             with web_runner.LOCK:
                 web_runner.STATE["depth_updates"] += 1
                 web_runner.STATE["scans"] += len(candidates)
+                web_runner.STATE["last_scan"] = time.time()
             if not analysis_allowed():
                 continue
             if now - last_balance_ms >= 1000:
@@ -188,7 +239,8 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                     if failures >= 3:
                         raise RuntimeError("three consecutive execution failures; engine stopped for safety") from exc
     finally:
-        for task in workers: task.cancel()
+        for task in workers:
+            task.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
 
 
@@ -198,7 +250,7 @@ async def run():
 
 
 def main():
-    asyncio.run(run())
+    asyncio.run(main())
 
 if __name__ == "__main__":
     main()
