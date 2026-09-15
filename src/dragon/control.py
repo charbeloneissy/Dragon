@@ -1,8 +1,8 @@
 """Runtime controls shared by the single Dragon process.
 
-These switches are in-memory safety gates. They do not rewrite Binance
-credentials or Render environment variables and they never force-close an
-existing position.
+Dragon production execution is Spot-only. Futures is deliberately unavailable
+through the dashboard control surface so the UI cannot imply that futures
+execution is enabled.
 """
 from threading import RLock
 
@@ -10,7 +10,7 @@ LOCK = RLock()
 STATE = {
     "master": True,
     "spot": True,
-    "futures": True,
+    "futures": False,
     "analysis": True,
     "warning": "",
     "kill_switch": False,
@@ -26,6 +26,8 @@ def set_control(name, value):
     with LOCK:
         if name not in STATE:
             raise KeyError(name)
+        if name == "futures":
+            value = False
         STATE[name] = value
         if name == "kill_switch":
             STATE["master"] = not bool(value)
