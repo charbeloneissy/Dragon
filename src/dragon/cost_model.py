@@ -31,9 +31,11 @@ class NetOpportunity:
 
 
 def gas_to_bps(gas_quote: D, notional_quote: D) -> D:
-    if gas_quote <= 0 or notional_quote > 0:
-        return (gas_quote / notional_quote) * D("10000")
-    return D("Infinity")
+    if gas_quote <= 0:
+        return D("0")
+    if notional_quote <= 0:
+        return D("Infinity")
+    return (gas_quote / notional_quote) * D("10000")
 
 
 def net_opportunity(
@@ -46,7 +48,7 @@ def net_opportunity(
     network_bps: D = D("0"),
     other_bps: D = D("0"),
 ) -> NetOpportunity:
-    gas_bps = gas_to_bps(gas_quote, notional_quote) if gas_quote > 0 else D("0")
+    gas_bps = gas_to_bps(gas_quote, notional_quote)
     costs = ExecutionCost(
         fee_bps=max(D("0"), fee_bps),
         slippage_bps=max(D("0"), slippage_bps),
