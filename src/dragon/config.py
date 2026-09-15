@@ -9,10 +9,11 @@ class Config:
     dry_run: bool = True
     live_trading: bool = False
     min_net_edge_bps: float = 0.5
+    min_trade_notional_usdt: float = 5.0
     max_notional_usdt: float = 25.0
     max_slippage_bps: float = 10.0
     fee_bps: float = 10.0
-    risk_pct: float = 0.01
+    risk_pct: float = 0.0025
     cooldown_ms: int = 1000
     max_triangles: int = 5000
     stale_ms: int = 750
@@ -40,6 +41,7 @@ class Config:
             dry_run=cls._bool("DRY_RUN", cls.dry_run),
             live_trading=cls._bool("LIVE_TRADING", cls.live_trading),
             min_net_edge_bps=float(os.getenv("MIN_NET_EDGE_BPS", str(cls.min_net_edge_bps))),
+            min_trade_notional_usdt=float(os.getenv("MIN_TRADE_NOTIONAL_USDT", str(cls.min_trade_notional_usdt))),
             max_notional_usdt=float(os.getenv("MAX_NOTIONAL_USDT", str(cls.max_notional_usdt))),
             max_slippage_bps=float(os.getenv("MAX_SLIPPAGE_BPS", str(cls.max_slippage_bps))),
             fee_bps=float(os.getenv("FEE_BPS", str(cls.fee_bps))),
@@ -66,8 +68,10 @@ class Config:
             raise ValueError("BINANCE_API_BASE must be an HTTP(S) URL")
         if not self.ws_base.startswith(("wss://", "ws://")):
             raise ValueError("BINANCE_WS_BASE must be a WebSocket URL")
-        if self.max_notional_usdt <= 0 or self.risk_pct <= 0:
-            raise ValueError("max notional and risk percentage must be positive")
+        if self.max_notional_usdt <= 0 or self.min_trade_notional_usdt <= 0 or self.risk_pct <= 0:
+            raise ValueError("trade notionals and risk percentage must be positive")
+        if self.min_trade_notional_usdt > self.max_notional_usdt:
+            raise ValueError("MIN_TRADE_NOTIONAL_USDT cannot exceed MAX_NOTIONAL_USDT")
         if self.risk_pct > 0.01:
             raise ValueError("ARB_RISK_PCT cannot exceed 0.01 (1%)")
         if self.min_net_edge_bps < 0 or self.fee_bps < 0 or self.max_slippage_bps < 0:
