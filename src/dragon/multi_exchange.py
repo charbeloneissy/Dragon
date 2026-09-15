@@ -50,6 +50,21 @@ def _fee_bps(venue: str) -> float:
         return DEFAULT_FEES_BPS[venue]
 
 
+def _best_distinct_pair(fresh):
+    """Return the best buy/sell pair on different venues by executable ratio."""
+    pairs = [
+        (buy_v, buy_q, sell_v, sell_q)
+        for buy_v, buy_q in fresh
+        for sell_v, sell_q in fresh
+        if buy_v != sell_v
+        and buy_q.get("ask", 0) > 0
+        and sell_q.get("bid", 0) > 0
+    ]
+    if not pairs:
+        return None
+    return max(pairs, key=lambda x: x[3]["bid"] / x[1]["ask"])
+
+
 class MultiExchangeFeeds:
     """Resilient public Bybit/OKX/Coinbase BBO collectors."""
 
@@ -69,12 +84,19 @@ class MultiExchangeFeeds:
 
     def _update(self, venue: str, symbol: str, bid: float, ask: float, bid_qty=0.0, ask_qty=0.0):
         symbol = _normalize_usd_symbol(symbol)
+        try:
+            bid = float(bid)
+            ask = float(ask)
+            bid_qty = max(0.0, float(bid_qty or 0))
+            ask_qty = max(0.0, float(ask_qty or 0))
+        except (TypeError, ValueError):
+            return
         if bid <= 0 or ask <= 0 or ask < bid:
             return
         now = time.time()
         self.books[venue][symbol] = {
             "bid": bid, "ask": ask,
-            "bid_qty": float(bid_qty or 0), "ask_qty": float(ask_qty or 0), "ts": now,
+            "bid_qty": bid_qty, "ask_qty": ask_qty, "ts": now,
         }
         with self.lock:
             feeds = self.state.setdefault("external_feeds", {})
@@ -91,35 +113,26 @@ class MultiExchangeFeeds:
             if len(fresh) < 2:
                 return
 
-            buy_v, buy_q = min(fresh, key=lambda x: x[1]["ask"])
-            sell_v, sell_q = max(fresh, key=lambda x: x[1]["bid"])
-            if buy_v == sell_v:
-                # Try the best distinct venue pair instead of allowing the
-                # cheapest quote to suppress a valid second-best cross.
-                pairs = [
-                    (b, q1, s, q2) for b, q1 in fresh for s, q2 in fresh
-                    if b != s
-                ]
-                if not pairs:
-                    return
-                buy_v, buy_q, sell_v, sell_q = min(
-                    pairs, key=lambda x: x[3]["bid"] / x[1]["ask"]
-                )
-                buy_v, buy_q, sell_v, sell_q = max(
-                    pairs, key=lambda x: x[3]["bid"] / x[1]["ask"]
-                )
+            pair = _best_distinct_pair(fresh)
+            if pair is None:
+                return
+            buy_v, buy_q, sell_v, sell_q = pair
 
             buy_qty = max(0.0, buy_q.get("ask_qty", 0.0))
             sell_qty = max(0.0, sell_q.get("bid_qty", 0.0))
+            if buy_qty <= 0 or sell_qty <= 0:
+                return
             size_base = min(buy_qty, sell_qty, self.max_notional / buy_q["ask"])
+            if size_base <= 0:
+                return
             gross_bps = (sell_q["bid"] / buy_q["ask"] - 1.0) * 10000
             fee_bps = _fee_bps(buy_v) + _fee_bps(sell_v)
             net_bps = gross_bps - fee_bps
             age_ms = max((now - buy_q["ts"]) * 1000, (now - sell_q["ts"]) * 1000)
-            buy_notional = max(0.0, size_base * buy_q["ask"])
-            sell_notional = max(0.0, size_base * sell_q["bid"])
+            buy_notional = size_base * buy_q["ask"]
+            sell_notional = size_base * sell_q["bid"]
             net_pnl = buy_notional * (net_bps / 10000.0)
-            executable = size_base > 0 and buy_notional >= self.min_display_notional and net_bps >= self.min_net_bps
+            executable = buy_notional >= self.min_display_notional and net_bps >= self.min_net_bps
 
             rows = [x for x in self.state.get("cross_exchange_opportunities", []) if x.get("symbol") != symbol]
             rows.append({
@@ -204,7 +217,7 @@ class MultiExchangeFeeds:
                 yield s.upper(), float(b[0][0]), float(a[0][0]), float(b[0][1]), float(a[0][1])
 
     def _okx_messages(self):
-        return [{"op": "subscribe", "args": [{"channel": "bbo-tbt", "instId": _okx_id(s)} for s in self.symbols]}]
+        return [{"op": "subscribe", "args": [{"channel": "bbo-tbt", "instId": _okx_id(s)} for s in self.symbols}]}]
 
     def _okx_parser(self, msg):
         if msg.get("arg", {}).get("channel") == "bbo-tbt":
