@@ -14,13 +14,28 @@ from src.dragon.ledger import Ledger
 from src.dragon.risk import approved, risk_budget
 from src.dragon.triangles import build_triangles, evaluate_triangle
 
-STATE = {"started_at": None, "status": "starting", "ws_connected": False, "triangles": 0, "symbols": 0, "quote_updates": 0, "depth_updates": 0, "scans": 0, "opportunities": 0, "executions": 0, "execution_errors": 0, "risk_blocks": 0, "reconnects": 0, "last_opportunity": None, "last_execution": None, "last_error": None, "recent": [], "live": False, "dry_run": True, "binance_authenticated": False, "free_usdt": "0", "realized_pnl_usdt": 0.0, "ledger_filled": 0, "futures_enabled": False, "futures_live": False, "futures_universe": 0, "futures_scans": 0, "futures_opportunities": 0, "futures_executions": 0, "futures_errors": 0, "futures_last_error": None, "futures_last_scan": None}
+STATE = {
+    "started_at": None, "status": "starting", "ws_connected": False,
+    "ws_shards": 0, "ws_shard_size": 0, "ws_reconnects": 0,
+    "ws_disconnects": 0, "ws_last_disconnect": None, "ws_next_retry_at": None,
+    "ws_shard_status": {}, "triangles": 0, "symbols": 0, "market_streams": 0,
+    "quote_updates": 0, "depth_updates": 0, "scans": 0, "opportunities": 0,
+    "executions": 0, "execution_errors": 0, "risk_blocks": 0,
+    "min_notional_blocks": 0, "balance_refreshes": 0,
+    "last_opportunity": None, "last_execution": None, "last_error": None,
+    "recent": [], "live": False, "dry_run": True, "binance_authenticated": False,
+    "free_usdt": "0", "realized_pnl_usdt": 0.0, "ledger_filled": 0,
+    "futures_enabled": False, "futures_live": False, "futures_universe": 0,
+    "futures_scans": 0, "futures_opportunities": 0, "futures_executions": 0,
+    "futures_errors": 0, "futures_last_error": None, "futures_last_scan": None,
+}
 LOCK = Lock(); SERVER = None; LEDGER = None
 
 
 def event(kind, message, **data):
     item = {"ts": time.time(), "kind": kind, "message": message, **data}
-    with LOCK: STATE["recent"] = (STATE["recent"] + [item])[-100:]
+    with LOCK:
+        STATE["recent"] = (STATE["recent"] + [item])[-100:]
     print(f"DRAGON {kind} | {message}", flush=True)
 
 
@@ -29,7 +44,7 @@ def _control_payload():
     if c["kill_switch"]: warnings.append("KILL SWITCH ACTIVE: new trading execution is blocked")
     if not c["master"]: warnings.append("Master execution is OFF")
     if not c["spot"]: warnings.append("Spot execution is OFF")
-    if not c["futures"]: warnings.append("Futures execution is OFF")
+    if c["futures"]: warnings.append("Futures control is available but production futures execution is disabled")
     if not c["analysis"]: warnings.append("Data analysis is OFF")
     with LOCK:
         if not STATE["ws_connected"]: warnings.append("Spot market WebSocket is disconnected")
@@ -41,17 +56,20 @@ def _control_payload():
 
 class Handler(BaseHTTPRequestHandler):
     def _json(self, code, payload):
-        body = json.dumps(payload, default=str).encode(); self.send_response(code); self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        body = json.dumps(payload, default=str).encode()
+        self.send_response(code); self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(body)))
+        self.end_headers(); self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/":
-            body = DASHBOARD.encode(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path in ("/health", "/healthz") or self.path.startswith("/health?"):
             with LOCK: state = dict(STATE)
             controls, warnings = _control_payload(); state["controls"] = controls; state["warnings"] = warnings
-            self._json(200 if state["status"] in ("running", "starting", "degraded") else 503, {"status": state["status"], "service": "dragon", "state": state}); return
-        if self.path in ("/dashboard", "/dashboard/"):
-            body = DASHBOARD.encode(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+            self._json(200 if state["status"] in ("running", "starting", "degraded") else 503,
+                       {"status": state["status"], "service": "dragon", "state": state}); return
+        if self.path in ("/", "/dashboard", "/dashboard/"):
+            body = DASHBOARD.encode(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path == "/control":
             controls, warnings = _control_payload(); self._json(200, {"controls": controls, "warnings": warnings}); return
         self.send_response(404); self.end_headers()
@@ -68,7 +86,9 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 if name not in {"master", "spot", "futures", "analysis", "kill_switch"}: raise ValueError("invalid control")
                 value = bool(data.get("value"))
-            controls = set_control(name, value); event("CONTROL", f"{name}={'ON' if value else 'OFF'}"); self._json(200, {"controls": controls, "warnings": _control_payload()[1]})
+                if name == "futures": value = False
+            controls = set_control(name, value); event("CONTROL", f"{name}={'ON' if value else 'OFF'}")
+            self._json(200, {"controls": controls, "warnings": _control_payload()[1]})
         except Exception as exc: self._json(400, {"error": str(exc)})
 
     def log_message(self, *_args): return
@@ -77,10 +97,11 @@ class Handler(BaseHTTPRequestHandler):
 def start_health_server():
     global SERVER
     if SERVER is not None: return SERVER
-    SERVER = ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "10000"))), Handler); Thread(target=SERVER.serve_forever, daemon=True).start(); return SERVER
+    SERVER = ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "10000"))), Handler)
+    Thread(target=SERVER.serve_forever, daemon=True).start(); return SERVER
 
 
-DASHBOARD = r'''<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dragon Live Control</title><style>body{margin:0;background:#080a0d;color:#eee;font:14px system-ui}main{max-width:1200px;margin:auto;padding:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.card{background:#12161c;border:1px solid #252b34;border-radius:14px;padding:14px;margin-bottom:12px}.v{font-size:24px;font-weight:700}.muted{color:#89929d}.good{color:#54d88b}.warn{color:#f0c75e}.bad{color:#ff6674}.btn{border:1px solid #38404b;background:#1b2129;color:#fff;border-radius:10px;padding:11px 13px;margin:4px;cursor:pointer;font-weight:700}.on{border-color:#54d88b}.off{border-color:#ff6674}.kill{background:#5c1118;border-color:#ff6674}.row{padding:8px 0;border-bottom:1px solid #252b34;font-size:12px}.mono{font-family:monospace}.warnbox{background:#2b2108;border:1px solid #80671b;padding:12px;border-radius:10px;margin-bottom:12px}input{background:#0b0f14;color:#fff;border:1px solid #38404b;border-radius:8px;padding:10px;width:min(420px,90%)}button{font:inherit}</style><main><h1>🐉 Dragon Live Control</h1><div class=card><b>Control access</b><br><input id=token type=password placeholder="Paste dashboard control token"><button class=btn onclick="saveToken()">Save</button> <span class=muted>Stored only in this browser.</span></div><div id=warning></div><div id=status class=card>Loading...</div><div class=card><b>Runtime controls</b><div><button class=btn id=master onclick="setc('master',!C.master)"></button><button class=btn id=spot onclick="setc('spot',!C.spot)"></button><button class=btn id=futures onclick="setc('futures',!C.futures)"></button><button class=btn id=analysis onclick="setc('analysis',!C.analysis)"></button><button class="btn kill" onclick="kill()">☠ KILL SWITCH</button></div><div class=muted>These are execution gates for this single Dragon process. They do not force-close an existing position.</div></div><div id=cards class=grid></div><div class=card><b>Live activity</b><div id=feed></div></div></main><script>let C={};const T='dragon_control_token';document.getElementById('token').value=localStorage.getItem(T)||'';function saveToken(){localStorage.setItem(T,document.getElementById('token').value);tick()}async function setc(name,value){let r=await fetch('/control',{method:'POST',headers:{'Content-Type':'application/json','X-Dragon-Control-Token':localStorage.getItem(T)||''},body:JSON.stringify({name,value})});if(r.status===403)alert('Control token required');tick()}async function kill(){if(confirm('Activate emergency execution lock?'))await setc('kill_switch',true)}function button(id,label,key){let e=document.getElementById(id);e.textContent=label+': '+(C[key]?'ON':'OFF');e.className='btn '+(C[key]?'on':'off')}async function tick(){try{let j=await(await fetch('/health?'+Date.now())).json(),s=j.state;C=s.controls||{};document.getElementById('status').innerHTML='<b class="'+(s.ws_connected?'good':'bad')+'">'+(s.ws_connected?'● SPOT DATA CONNECTED':'● SPOT DATA DISCONNECTED')+'</b> &nbsp; <b class="'+(s.binance_authenticated?'good':'bad')+'">'+(s.binance_authenticated?'● BINANCE AUTHENTICATED':'● BINANCE NOT AUTHENTICATED')+'</b> &nbsp; <b class="'+(s.live&&!s.dry_run?'good':'warn')+'">'+(s.live&&!s.dry_run?'LIVE CONFIGURED':'SAFE CONFIGURED')+'</b> &nbsp; USDT '+s.free_usdt+' &nbsp; P&L '+Number(s.realized_pnl_usdt||0).toFixed(6);button('master','MASTER','master');button('spot','SPOT','spot');button('futures','FUTURES','futures');button('analysis','ANALYSIS','analysis');let a=[['Spot triangles',s.triangles],['Spot symbols',s.symbols],['Spot scans',s.scans],['Spot opportunities',s.opportunities],['Spot executions',s.executions],['Futures universe',s.futures_universe],['Futures scans',s.futures_scans],['Futures opportunities',s.futures_opportunities],['Futures executions',s.futures_executions],['Errors',s.execution_errors+s.futures_errors],['Risk blocks',s.risk_blocks],['Realized P&L',Number(s.realized_pnl_usdt||0).toFixed(6)]];document.getElementById('cards').innerHTML=a.map(x=>'<div class=card><span class=muted>'+x[0]+'</span><div class=v>'+x[1]+'</div></div>').join('');document.getElementById('warning').innerHTML=(s.warnings||[]).map(w=>'<div class=warnbox>⚠️ '+w+'</div>').join('');document.getElementById('feed').innerHTML=(s.recent||[]).slice().reverse().map(e=>'<div class=row><span class=muted>'+new Date(e.ts*1000).toLocaleTimeString()+'</span> <b>'+e.kind+'</b> '+e.message+(e.path?' <span class=mono>'+e.path.join(' → ')+'</span>':'')+(e.net_bps!=null?' <b>'+Number(e.net_bps).toFixed(3)+' bps</b>':'')).join('')||'<span class=muted>Waiting...</span>'}catch(e){document.getElementById('status').innerHTML='<b class=bad>Dashboard connection error</b>'}}tick();setInterval(tick,2000)</script>'''
+DASHBOARD = '''<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dragon Live Monitor</title><style>body{margin:0;background:#080a0d;color:#eee;font:14px system-ui}main{max-width:1200px;margin:auto;padding:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.card{background:#12161c;border:1px solid #252b34;border-radius:14px;padding:14px;margin-bottom:12px}.v{font-size:24px;font-weight:700}.muted{color:#89929d}.good{color:#54d88b}.bad{color:#ff6674}.warnbox{background:#2b2108;border:1px solid #80671b;padding:12px;border-radius:10px;margin-bottom:12px}.row{padding:8px 0;border-bottom:1px solid #252b34;font-size:12px}.mono{font-family:monospace}</style><main><h1>🐉 Dragon Live Monitor</h1><div id="status" class="card">Loading...</div><div id="cards" class="grid"></div><div id="warning"></div><div class="card"><b>Live activity</b><div id="feed"></div></div></main><script>async function tick(){try{let j=await(await fetch('/health?'+Date.now())).json(),s=j.state;document.getElementById('status').innerHTML='<b class="'+(s.ws_connected?'good':'bad')+'">'+(s.ws_connected?'● MARKET DATA CONNECTED':'● MARKET DATA DISCONNECTED')+'</b> &nbsp; <b class="'+(s.binance_authenticated?'good':'bad')+'">'+(s.binance_authenticated?'● BINANCE AUTHENTICATED':'● BINANCE NOT AUTHENTICATED')+'</b> &nbsp; <b>'+String(s.status||'unknown').toUpperCase()+'</b> &nbsp; USDT '+s.free_usdt+' &nbsp; P&L '+Number(s.realized_pnl_usdt||0).toFixed(6);let a=[['Triangles',s.triangles],['Symbols',s.symbols],['WS shards',s.ws_shards],['Depth updates',s.depth_updates],['Scans',s.scans],['Opportunities',s.opportunities],['Executions',s.executions],['Risk blocks',s.risk_blocks],['Min-notional blocks',s.min_notional_blocks],['Balance refreshes',s.balance_refreshes],['Execution errors',s.execution_errors],['Realized P&L',Number(s.realized_pnl_usdt||0).toFixed(6)]];document.getElementById('cards').innerHTML=a.map(x=>'<div class="card"><span class="muted">'+x[0]+'</span><div class="v">'+x[1]+'</div></div>').join('');document.getElementById('warning').innerHTML=(s.warnings||[]).map(w=>'<div class="warnbox">⚠️ '+w+'</div>').join('');document.getElementById('feed').innerHTML=(s.recent||[]).slice().reverse().map(e=>'<div class="row"><span class="muted">'+new Date(e.ts*1000).toLocaleTimeString()+'</span> <b>'+e.kind+'</b> '+e.message+'</div>').join('')||'<span class="muted">Waiting...</span>'}catch(e){document.getElementById('status').innerHTML='<b class="bad">Dashboard connection error</b>'}}tick();setInterval(tick,2000)</script>'''
 
 
 def _symbol_meta(info): return {s["symbol"]: (s["baseAsset"], s["quoteAsset"]) for s in info.get("symbols", []) if s.get("status") == "TRADING"}
@@ -102,13 +123,15 @@ async def stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
 def _sync_ledger():
     if LEDGER is None: return
     summary = LEDGER.summary()
-    with LOCK: STATE["ledger_filled"] = summary["filled"]; STATE["realized_pnl_usdt"] = summary["realized_pnl_usdt"]
+    with LOCK:
+        STATE["ledger_filled"] = summary["filled"]; STATE["realized_pnl_usdt"] = summary["realized_pnl_usdt"]
 
 
 async def run():
     global LEDGER
     cfg = Config.from_env(); cfg.validate(); start_health_server()
-    with LOCK: STATE["started_at"] = time.time(); STATE["live"] = cfg.live_trading; STATE["dry_run"] = cfg.dry_run; STATE["status"] = "starting"
+    with LOCK:
+        STATE["started_at"] = time.time(); STATE["live"] = cfg.live_trading; STATE["dry_run"] = cfg.dry_run; STATE["status"] = "starting"
     LEDGER = Ledger(); api_key = os.getenv("BINANCE_API_KEY", "").strip(); api_secret = os.getenv("BINANCE_API_SECRET", "").strip(); client = BinanceClient(cfg.api_base, api_key, api_secret)
     try:
         if cfg.live_trading and not cfg.dry_run:
@@ -120,7 +143,7 @@ async def run():
             event("AUTH", "Binance API authenticated successfully", usdt_free=str(free))
         else: event("SAFE", "Live execution disabled")
         info = client.exchange_info(); filters = make_filters(info); symbol_meta = _symbol_meta(info); triangles = build_triangles(info, cfg.max_triangles); symbols = sorted({s for t in triangles for s in t.symbols})
-        with LOCK: STATE["triangles"] = len(triangles); STATE["symbols"] = len(symbols)
+        with LOCK: STATE["triangles"] = len(triangles); STATE["symbols"] = len(symbols); STATE["market_streams"] = len(symbols)
         event("START", f"Dragon triangular engine ready: triangles={len(triangles)} symbols={len(symbols)} live={cfg.live_trading and not cfg.dry_run}")
         await stream_loop(cfg, client, filters, triangles, symbols, symbol_meta)
     finally: client.close()
