@@ -1,0 +1,66 @@
+services:
+  - type: web
+    name: dragon-arbitrage-live
+    runtime: python
+    region: frankfurt
+    plan: free
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m dragon.engine
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.4
+      - key: PORT
+        value: 10000
+      - key: BINANCE_API_BASE
+        value: https://api.binance.com
+      - key: BINANCE_WS_BASE
+        value: wss://stream.binance.com:9443/ws
+      - key: DRY_RUN
+        value: "false"
+      - key: LIVE_TRADING
+        value: "true"
+      - key: FUTURES_ENABLED
+        value: "false"
+      - key: FUTURES_LIVE_TRADING
+        value: "false"
+      - key: MIN_NET_EDGE_BPS
+        value: "5"
+      - key: MIN_TRADE_NOTIONAL_USDT
+        value: "5"
+      - key: MAX_NOTIONAL_USDT
+        value: "25"
+      - key: MAX_SLIPPAGE_BPS
+        value: "10"
+      - key: FEE_BPS
+        value: "10"
+      - key: ARB_RISK_PCT
+        value: "0.0015"
+      - key: LIVE_ORDER_COOLDOWN_MS
+        value: "1000"
+      - key: MAX_TRIANGLES
+        value: "0"
+      - key: STREAM_SYMBOL_CAP
+        value: "0"
+      - key: STALE_MS
+        value: "750"
+      - key: POLL_INTERVAL_SECONDS
+        value: "0.05"
+      - key: ORDER_TIMEOUT_MS
+        value: "5000"
+      - key: DEPTH_LEVELS
+        value: "20"
+      - key: HEALTH_FAIL_OPEN
+        value: "false"
+      - key: DEX_ENABLED
+        value: "false"
+      - key: LEDGER_PATH
+        value: /tmp/dragon_ledger.sqlite3
+      - key: BINANCE_API_KEY
+        sync: false
+      - key: BINANCE_API_SECRET
+        sync: false
+      - key: DASHBOARD_CONTROL_TOKEN
+        generateValue: true
