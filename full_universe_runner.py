@@ -12,7 +12,6 @@ from src.dragon.control import analysis_allowed, trading_allowed
 WS_BACKOFF_MIN = 1.0
 WS_BACKOFF_MAX = 60.0
 WS_STALE_SECONDS = 45.0
-# Keep combined-stream URLs comfortably below proxy/server URI limits.
 WS_SHARD_SIZE = 100
 WS_PING_INTERVAL = 20.0
 WS_PING_TIMEOUT = 20.0
@@ -89,12 +88,6 @@ async def _feed_worker(cfg, symbols, queue, worker_id):
 
 
 async def _rest_book_ticker_worker(client, symbols, queue):
-    """Keep scanning alive when a WS transport is silent or unavailable.
-
-    Binance's all-symbol bookTicker endpoint is one public request and gives a
-    current best bid/ask for every Spot symbol. It is a deliberately slower
-    fallback, not a replacement for the low-latency WebSocket feed.
-    """
     wanted = set(symbols)
     while True:
         try:
@@ -143,8 +136,6 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
     shards = [symbols[i:i + WS_SHARD_SIZE] for i in range(0, len(symbols), WS_SHARD_SIZE)]
     queue = asyncio.Queue(maxsize=20000)
     workers = [asyncio.create_task(_feed_worker(cfg, shard, queue, i + 1)) for i, shard in enumerate(shards)]
-    # REST bookTicker is a bounded-rate safety net so the opportunity scanner
-    # still runs if a WebSocket transport is accepted but emits no data.
     workers.append(asyncio.create_task(_rest_book_ticker_worker(client, symbols, queue)))
     with web_runner.LOCK:
         web_runner.STATE["ws_connected"] = bool(shards)
@@ -185,12 +176,14 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                 try:
                     account = await asyncio.to_thread(client.account)
                     free_usdt = next((Decimal(str(x.get("free", "0"))) for x in account.get("balances", []) if x.get("asset") == "USDT"), Decimal("0"))
-                    last_balance_ms = now; balance_ok = True
+                    last_balance_ms = now
+                    balance_ok = True
                     with web_runner.LOCK:
                         web_runner.STATE["free_usdt"] = str(free_usdt)
                         web_runner.STATE["balance_refreshes"] += 1
                 except Exception as exc:
-                    balance_ok = False; last_balance_ms = now
+                    balance_ok = False
+                    last_balance_ms = now
                     web_runner.event("BALANCE_ERROR", f"balance refresh failed; trading paused until restored: {exc}")
             if not balance_ok:
                 continue
@@ -210,13 +203,15 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                 if net_bps < Decimal(str(cfg.min_net_edge_bps)):
                     continue
                 with web_runner.LOCK:
-                    web_runner.STATE["opportunities"] += 1; web_runner.STATE["last_opportunity"] = time.time()
+                    web_runner.STATE["opportunities"] += 1
+                    web_runner.STATE["last_opportunity"] = time.time()
                 web_runner.event("OPPORTUNITY", f"net={net_bps:.3f} gross={gross_bps:.3f}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps))
                 now_ms = time.monotonic() * 1000
                 if not (cfg.live_trading and not cfg.dry_run) or not trading_allowed("spot") or now_ms - last_order_ms < cfg.cooldown_ms:
                     continue
                 if not web_runner.approved(net_bps, cfg.min_net_edge_bps, budget, cfg.max_notional_usdt, min_trade_notional=Decimal(str(cfg.min_trade_notional_usdt))):
-                    with web_runner.LOCK: web_runner.STATE["risk_blocks"] += 1
+                    with web_runner.LOCK:
+                        web_runner.STATE["risk_blocks"] += 1
                     web_runner.event("RISK", "Trade blocked by risk/notional gate", path=path)
                     continue
                 last_order_ms = now_ms
@@ -227,14 +222,18 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                         raise RuntimeError("execution returned without a completed USDT cycle")
                     web_runner.LEDGER.record(path, budget, execution)
                     with web_runner.LOCK:
-                        web_runner.STATE["executions"] += 1; web_runner.STATE["last_execution"] = time.time()
-                    web_runner._sync_ledger(); failures = 0
+                        web_runner.STATE["executions"] += 1
+                        web_runner.STATE["last_execution"] = time.time()
+                    web_runner._sync_ledger()
+                    failures = 0
                     web_runner.event("FILLED", f"Triangle fully filled; realized={execution['realized_pnl_usdt']} USDT", path=path)
                 except Exception as exc:
                     failures += 1
                     with web_runner.LOCK:
-                        web_runner.STATE["execution_errors"] += 1; web_runner.STATE["last_error"] = str(exc)
-                    if web_runner.LEDGER is not None: web_runner.LEDGER.record(path, budget, error=exc)
+                        web_runner.STATE["execution_errors"] += 1
+                        web_runner.STATE["last_error"] = str(exc)
+                    if web_runner.LEDGER is not None:
+                        web_runner.LEDGER.record(path, budget, error=exc)
                     web_runner.event("ERROR", str(exc), path=path)
                     if failures >= 3:
                         raise RuntimeError("three consecutive execution failures; engine stopped for safety") from exc
@@ -250,7 +249,8 @@ async def run():
 
 
 def main():
-    asyncio.run(main())
+    asyncio.run(run())
+
 
 if __name__ == "__main__":
     main()
