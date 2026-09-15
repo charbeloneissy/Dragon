@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from decimal import Decimal
 from itertools import combinations
@@ -9,12 +10,26 @@ class Triangle:
     assets: tuple[str, str, str]
 
 
+def _excluded_assets() -> set[str]:
+    """Return optional base assets excluded from the triangle universe.
+
+    Configure with a comma-separated environment variable, for example:
+    EXCLUDED_BASE_ASSETS=BTC,ETH
+    An empty value keeps the full universe unchanged.
+    """
+    raw = os.getenv("EXCLUDED_BASE_ASSETS", "")
+    return {asset.strip().upper() for asset in raw.split(",") if asset.strip()}
+
+
 def build_triangles(exchange_info: dict, max_triangles: int = 5000):
     """Build every available USDT triangle direction.
 
     max_triangles <= 0 means no application-level cap. Binance/exchange
     stream limits are handled by the transport layer rather than silently
     deleting candidates from the opportunity graph.
+
+    EXCLUDED_BASE_ASSETS optionally removes triangles containing any listed
+    base asset, without removing those assets from Binance market data feeds.
     """
     markets = {}
     for s in exchange_info.get("symbols", []):
@@ -22,16 +37,24 @@ def build_triangles(exchange_info: dict, max_triangles: int = 5000):
             continue
         markets[(s["baseAsset"], s["quoteAsset"])] = s["symbol"]
 
-    usdt_assets = sorted({base for base, quote in markets if quote == "USDT"})
+    excluded = _excluded_assets()
+    usdt_assets = sorted(
+        base for base, quote in markets
+        if quote == "USDT" and base not in excluded
+    )
     out = []
     seen = set()
     unlimited = max_triangles <= 0
     for a, b in combinations(usdt_assets, 2):
+        if a in excluded or b in excluded:
+            continue
         a_usdt = markets.get((a, "USDT"))
         b_usdt = markets.get((b, "USDT"))
         if not a_usdt or not b_usdt:
             continue
         for first, second in ((a, b), (b, a)):
+            if first in excluded or second in excluded:
+                continue
             cross = markets.get((first, second))
             if not cross:
                 continue
