@@ -50,8 +50,6 @@ class FuturesClient:
                 wait = max(float(retry), self._backoff) if retry else self._backoff
             except (TypeError, ValueError):
                 wait = self._backoff
-            # Respect Binance's server-provided ban/rate-limit delay. Never
-            # hammer the endpoint while a ban is active.
             self._next_allowed = max(self._next_allowed, time.monotonic() + min(wait, 86400.0))
             self._backoff = min(max(self._backoff * 2.0, wait), 300.0)
             raise FuturesError(f"{label}: Binance rate limit HTTP {response.status_code}; backing off {wait:.1f}s")
@@ -179,7 +177,8 @@ class FuturesClient:
 
 
 class FuturesOpportunity:
-    def __init__(self, symbol, spot_bid, spot_ask, futures_bid, futures_ask, fee_bps, funding_bps=Decimal("0")):
+    """Executable cross-market basis calculation using the correct bid/ask side."""
+    def __init__(self, symbol, spot_bid, spot_ask, futures_bid, futures_ask, fee_bps, funding_bps=Decimal("0"), slippage_bps=Decimal("0")):
         self.symbol = symbol
         self.spot_bid = spot_bid
         self.spot_ask = spot_ask
@@ -187,33 +186,48 @@ class FuturesOpportunity:
         self.futures_ask = futures_ask
         self.fee_bps = fee_bps
         self.funding_bps = funding_bps
+        self.slippage_bps = slippage_bps
 
     def cash_and_carry_bps(self):
+        """Spot BUY at ask, Futures SELL at bid. Funding is a cost buffer."""
         if self.spot_ask <= 0 or self.futures_bid <= 0:
             return Decimal("-999999")
         gross = (self.futures_bid / self.spot_ask - Decimal("1")) * Decimal("10000")
-        return gross - self.fee_bps * Decimal("2") - self.funding_bps
+        return gross - self.fee_bps * Decimal("2") - max(self.funding_bps, Decimal("0")) - self.slippage_bps * Decimal("2")
+
+    def reverse_basis_bps(self):
+        """Futures BUY at ask, Spot SELL at bid. Negative funding is a cost here."""
+        if self.futures_ask <= 0 or self.spot_bid <= 0:
+            return Decimal("-999999")
+        gross = (self.spot_bid / self.futures_ask - Decimal("1")) * Decimal("10000")
+        return gross - self.fee_bps * Decimal("2") - max(-self.funding_bps, Decimal("0")) - self.slippage_bps * Decimal("2")
+
+    def best(self):
+        a = self.cash_and_carry_bps()
+        b = self.reverse_basis_bps()
+        return ("SPOT_LONG_FUT_SHORT", a) if a >= b else ("FUT_LONG_SPOT_SHORT", b)
 
 
-def evaluate_basis(rows: List[dict], fee_bps: Decimal, min_edge_bps: Decimal) -> List[Tuple[str, Decimal]]:
+def evaluate_basis(rows: List[dict], fee_bps: Decimal, min_edge_bps: Decimal, slippage_bps: Decimal = Decimal("0")) -> List[Tuple[str, Decimal, str]]:
+    """Return only genuinely positive executable edges, checking both directions."""
     opportunities = []
     for row in rows:
         try:
             opp = FuturesOpportunity(
                 row["symbol"], Decimal(str(row["spotBid"])), Decimal(str(row["spotAsk"])),
                 Decimal(str(row["futuresBid"])), Decimal(str(row["futuresAsk"])), fee_bps,
-                Decimal(str(row.get("fundingBps", "0"))),
+                Decimal(str(row.get("fundingBps", "0"))), slippage_bps,
             )
-            edge = opp.cash_and_carry_bps()
+            direction, edge = opp.best()
             if edge >= min_edge_bps:
-                opportunities.append((opp.symbol, edge))
+                opportunities.append((opp.symbol, edge, direction))
         except (KeyError, ValueError, ArithmeticError):
             continue
     return sorted(opportunities, key=lambda x: x[1], reverse=True)
 
 
 class BasisHedgeEngine:
-    """Matched spot-long / perpetual-short hedge with immediate unwind on leg failure."""
+    """Matched hedge execution primitive. Production use remains separately gated."""
     def __init__(self, futures, spot, max_notional_usdt=25, leverage=1, live=False):
         self.futures = futures
         self.spot = spot
