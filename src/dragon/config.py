@@ -9,6 +9,7 @@ class Config:
     dry_run: bool = True
     live_trading: bool = False
     min_net_edge_bps: float = 5.0
+    min_expected_profit_usdt: float = 0.01
     min_trade_notional_usdt: float = 5.0
     max_notional_usdt: float = 25.0
     max_slippage_bps: float = 10.0
@@ -43,6 +44,7 @@ class Config:
             dry_run=cls._bool("DRY_RUN", cls.dry_run),
             live_trading=cls._bool("LIVE_TRADING", cls.live_trading),
             min_net_edge_bps=float(os.getenv("MIN_NET_EDGE_BPS", str(cls.min_net_edge_bps))),
+            min_expected_profit_usdt=float(os.getenv("MIN_EXPECTED_PROFIT_USDT", str(cls.min_expected_profit_usdt))),
             min_trade_notional_usdt=float(os.getenv("MIN_TRADE_NOTIONAL_USDT", str(cls.min_trade_notional_usdt))),
             max_notional_usdt=float(os.getenv("MAX_NOTIONAL_USDT", str(cls.max_notional_usdt))),
             max_slippage_bps=float(os.getenv("MAX_SLIPPAGE_BPS", str(cls.max_slippage_bps))),
@@ -82,6 +84,8 @@ class Config:
             raise ValueError("ARB_CAPITAL_ALLOCATION_PCT must be between 0 and 1")
         if self.safety_reserve_usdt < 0:
             raise ValueError("ARB_SAFETY_RESERVE_USDT cannot be negative")
+        if self.min_expected_profit_usdt < 0:
+            raise ValueError("MIN_EXPECTED_PROFIT_USDT cannot be negative")
         if self.min_net_edge_bps < 0 or self.fee_bps < 0 or self.max_slippage_bps < 0:
             raise ValueError("edge, fee, and slippage limits cannot be negative")
         if self.cooldown_ms < 0 or self.stale_ms <= 0 or self.order_timeout_ms <= 0:
