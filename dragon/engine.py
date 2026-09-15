@@ -1,5 +1,6 @@
 import asyncio
 import os
+from pathlib import Path
 from urllib.parse import urlsplit
 
 
@@ -15,14 +16,22 @@ async def run_production():
     from src.dragon.triangles import build_triangles
 
     original_get = web_runner.Handler.do_GET
+    dashboard_path = Path(__file__).resolve().parent.parent / "dashboard.html"
 
     def robust_get(self):
         raw_path = self.path
         normalized = urlsplit(raw_path).path or "/"
+        if normalized in ("/dashboard", "/dashboard/") and dashboard_path.exists():
+            body = dashboard_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if normalized == "/":
             self.path = "/"
-        elif normalized in ("/dashboard", "/dashboard/"):
-            self.path = normalized
         elif normalized in ("/health", "/healthz"):
             self.path = normalized + ("?" if "?" in raw_path else "")
         try:
