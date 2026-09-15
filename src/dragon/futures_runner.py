@@ -1,9 +1,9 @@
-"""USDⓈ-M perpetual basis supervisor with dynamic universe discovery.
+"""USDⓈ-M perpetual basis supervisor with full Futures-universe discovery.
 
-The scanner covers all currently tradable USDT-settled perpetuals that also have
-an eligible Spot counterpart. It uses bulk market-data endpoints so universe
-size does not multiply REST request rate. Live order writes remain capped and
-are never blindly retried.
+Market discovery is independent of Spot: every currently tradable USDT-margined
+perpetual is scanned. Spot is only required when an executable basis hedge is
+actually considered. This keeps Futures-only contracts visible to the scanner
+without pretending they are executable Spot/Futures hedges.
 """
 from __future__ import annotations
 
@@ -55,13 +55,13 @@ def _futures_filters(info):
     return out
 
 
-def _requested_universe(sf, ff):
-    common = sorted(set(sf) & set(ff))
+def _requested_universe(ff):
     configured = os.getenv("FUTURES_SYMBOLS", "").strip()
+    universe = sorted(ff)
     if configured:
         requested = {s.strip().upper() for s in configured.split(",") if s.strip()}
-        return [s for s in common if s in requested]
-    return common
+        universe = [s for s in universe if s in requested]
+    return universe
 
 
 async def run():
@@ -82,29 +82,29 @@ async def run():
         spot_info = await asyncio.to_thread(spot.exchange_info)
         fut_info = await asyncio.to_thread(futures.exchange_info)
         sf, ff = _spot_filters(spot_info), _futures_filters(fut_info)
-        symbols = _requested_universe(sf, ff)
+        symbols = _requested_universe(ff)
         if not symbols:
-            raise FuturesError("no common Spot/USD-M USDT perpetual symbols configured")
+            raise FuturesError("no tradable USDT-margined perpetual symbols configured")
 
         max_symbols = int(os.getenv("FUTURES_MAX_SYMBOLS", "0"))
         if max_symbols > 0:
             symbols = symbols[:max_symbols]
 
         max_notional = Decimal(os.getenv("FUTURES_MAX_NOTIONAL_USDT", "25"))
-        min_edge = Decimal(os.getenv("FUTURES_MIN_NET_EDGE_BPS", "8"))
+        min_edge = Decimal(os.getenv("FUTURES_MIN_NET_EDGE_BPS", "12"))
         fee_bps = Decimal(os.getenv("FUTURES_FEE_BPS", "5"))
-        funding_buffer = Decimal(os.getenv("FUTURES_FUNDING_BUFFER_BPS", "2"))
+        funding_buffer = Decimal(os.getenv("FUTURES_FUNDING_BUFFER_BPS", "3"))
         engine = BasisHedgeEngine(futures, spot, max_notional, leverage=1, live=live)
         print(
             f"DRAGON FUTURES | enabled=True live={live} universe={len(symbols)} "
-            f"max_notional={max_notional} leverage=1",
+            f"max_notional={max_notional} leverage=1 full_universe=True",
             flush=True,
         )
 
         while True:
             try:
-                # Bulk endpoints keep request volume nearly constant even when the
-                # universe grows to hundreds of perpetuals.
+                # One bulk request per market-data family. Universe size does not
+                # create a per-symbol REST request storm.
                 spot_rows = await asyncio.to_thread(spot.public, "/api/v3/ticker/bookTicker")
                 fut_rows = await asyncio.to_thread(futures.all_book_tickers)
                 marks = await asyncio.to_thread(futures.all_mark_prices)
@@ -112,48 +112,67 @@ async def run():
                 fut_by = {row.get("symbol"): row for row in fut_rows if row.get("symbol") in ff}
                 mark_by = {row.get("symbol"): row for row in marks if row.get("symbol") in ff}
 
+                opportunities = 0
                 for symbol in symbols:
                     try:
-                        st = spot_by.get(symbol)
                         ft = fut_by.get(symbol)
                         mark = mark_by.get(symbol)
-                        if not st or not ft or not mark:
+                        if not ft or not mark:
                             continue
-                        sa = Decimal(str(st["askPrice"]))
                         fb = Decimal(str(ft["bidPrice"]))
-                        if sa <= 0 or fb <= 0:
-                            continue
-                        funding = Decimal(str(mark.get("lastFundingRate", "0"))) * Decimal("10000")
-                        net = (
-                            (fb / sa - Decimal("1")) * Decimal("10000")
-                            - fee_bps * Decimal("2")
-                            - max(funding, Decimal("0"))
-                            - funding_buffer
-                        )
-                        if net < min_edge:
+                        fa = Decimal(str(ft["askPrice"]))
+                        if fb <= 0 or fa <= 0:
                             continue
 
+                        funding = Decimal(str(mark.get("lastFundingRate", "0"))) * Decimal("10000")
+
+                        # Full Futures scanner: calculate a market-quality snapshot
+                        # for every perpetual. Basis execution is only possible when
+                        # the corresponding Spot market exists.
+                        spread_bps = ((fa / fb) - Decimal("1")) * Decimal("10000")
+                        basis_edge = Decimal("-999999")
+                        st = spot_by.get(symbol)
+                        if st:
+                            sa = Decimal(str(st["askPrice"]))
+                            if sa > 0:
+                                basis_edge = (
+                                    (fb / sa - Decimal("1")) * Decimal("10000")
+                                    - fee_bps * Decimal("2")
+                                    - max(funding, Decimal("0"))
+                                    - funding_buffer
+                                )
+
+                        if basis_edge < min_edge:
+                            continue
+
+                        opportunities += 1
                         positions = await asyncio.to_thread(futures.position_risk, symbol)
                         if any(abs(Decimal(str(p.get("positionAmt", "0")))) > 0 for p in positions):
                             print(f"DRAGON FUTURES | EXISTING_POSITION {symbol}; skip new hedge", flush=True)
                             continue
 
-                        notional = min(
-                            max_notional,
-                            Decimal(os.getenv("FUTURES_ORDER_NOTIONAL_USDT", str(max_notional))),
-                        )
-                        qty = _floor(notional / sa, max(sf[symbol]["step"], ff[symbol]["step"]))
+                        if not st:
+                            print(
+                                f"DRAGON FUTURES | OPPORTUNITY {symbol} basis={basis_edge:.3f}bps "
+                                f"funding={funding:.3f}bps spot_counterpart=False execution=SKIP",
+                                flush=True,
+                            )
+                            continue
+
+                        sa = Decimal(str(st["askPrice"]))
+                        notional = min(max_notional, Decimal(os.getenv("FUTURES_ORDER_NOTIONAL_USDT", str(max_notional))))
+                        qty = _floor(notional / sa, max(ff[symbol]["step"], sf[symbol]["step"]))
                         if qty < sf[symbol]["min"] or qty < ff[symbol]["min"]:
                             print(f"DRAGON FUTURES | FILTER_REJECTED {symbol} qty={qty}", flush=True)
                             continue
 
                         print(
-                            f"DRAGON FUTURES | OPPORTUNITY {symbol} net={net:.3f}bps "
-                            f"qty={qty} live={live}",
+                            f"DRAGON FUTURES | OPPORTUNITY {symbol} net={basis_edge:.3f}bps "
+                            f"spread={spread_bps:.3f}bps funding={funding:.3f}bps qty={qty} live={live}",
                             flush=True,
                         )
                         if live:
-                            result = await asyncio.to_thread(engine.open_hedge, symbol, qty, sa, net)
+                            result = await asyncio.to_thread(engine.open_hedge, symbol, qty, sa, basis_edge)
                             print(
                                 f"DRAGON FUTURES | HEDGE {symbol} status={result.get('futures_order', {}).get('status', 'UNKNOWN')}",
                                 flush=True,
@@ -162,14 +181,17 @@ async def run():
                         print(f"DRAGON FUTURES | SYMBOL_ERROR {symbol} {exc}", flush=True)
                     except Exception as exc:
                         print(f"DRAGON FUTURES | ERROR {symbol} {exc}", flush=True)
+
+                print(
+                    f"DRAGON FUTURES | SCAN_COMPLETE universe={len(symbols)} opportunities={opportunities}",
+                    flush=True,
+                )
             except FuturesError as exc:
-                # In particular, 418/429 responses are converted into a client-side
-                # backoff. Do not hammer Binance while an IP ban is active.
                 print(f"DRAGON FUTURES | MARKET_DATA_BACKOFF {exc}", flush=True)
             except Exception as exc:
                 print(f"DRAGON FUTURES | MARKET_DATA_ERROR {exc}", flush=True)
 
-            await asyncio.sleep(float(os.getenv("FUTURES_POLL_SECONDS", "5")))
+            await asyncio.sleep(float(os.getenv("FUTURES_POLL_SECONDS", "10")))
     finally:
         spot.close()
         futures.close()
