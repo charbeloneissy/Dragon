@@ -1,206 +1,143 @@
-"""Public multi-exchange market-data feeds and net-edge discovery.
-
-Cross-exchange execution is intentionally gated: this module produces ranked,
-size-aware opportunities and execution-readiness telemetry. It never submits
-orders to external venues.
-"""
+from __future__ import annotations
 
 import asyncio
 import json
-import os
 import time
-from collections import defaultdict
+from typing import Callable
 
 import websockets
 
-DEFAULT_SYMBOLS = """BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,
-DOTUSDT,TRXUSDT,LTCUSDT,BCHUSDT,UNIUSDT,NEARUSDT,ATOMUSDT,APTUSDT,ARBUSDT,
-OPUSDT,FILUSDT,ETCUSDT,ICPUSDT,INJUSDT,SUIUSDT,SEIUSDT,TONUSDT,HBARUSDT,
-AAVEUSDT,PEPEUSDT,SHIBUSDT,RENDERUSDT,FETUSDT,TAOUSDT,ENAUSDT,WIFUSDT,
-JUPUSDT,STXUSDT,IMXUSDT,MKRUSDT,RUNEUSDT,GRTUSDT,ALGOUSDT,XLMUSDT,
-VETUSDT,EOSUSDT,XTZUSDT,THETAUSDT,CRVUSDT,LDOUSDT""".replace("\n", "")
 
-DEFAULT_FEES_BPS = {"BYBIT": 10.0, "OKX": 10.0, "COINBASE": 40.0, "BINANCE": 10.0}
-
-
-def _symbols() -> list[str]:
-    return list(dict.fromkeys(s.strip().upper() for s in DEFAULT_SYMBOLS.split(",") if s.strip()))
+VENUES = ("BYBIT", "OKX", "COINBASE")
+DEFAULT_SYMBOLS = [
+    "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","AVAXUSDT","LINKUSDT","DOTUSDT",
+    "TRXUSDT","LTCUSDT","BCHUSDT","UNIUSDT","NEARUSDT","ATOMUSDT","APTUSDT","ARBUSDT","OPUSDT","FILUSDT",
+    "ETCUSDT","ICPUSDT","INJUSDT","SUIUSDT","SEIUSDT","TONUSDT","HBARUSDT","AAVEUSDT","PEPEUSDT","SHIBUSDT",
+    "RENDERUSDT","FETUSDT","TAOUSDT","ENAUSDT","WIFUSDT","JUPUSDT","STXUSDT","IMXUSDT","MKRUSDT","RUNEUSDT",
+    "GRTUSDT","ALGOUSDT","XLMUSDT","VETUSDT","EOSUSDT","XTZUSDT","THETAUSDT","CRVUSDT","LDOUSDT",
+]
 
 
 def _okx_id(symbol: str) -> str:
-    return f"{symbol[:-4]}-USDT" if symbol.endswith("USDT") else symbol
+    return symbol[:-4] + "-USDT" if symbol.endswith("USDT") else symbol
 
 
 def _coinbase_id(symbol: str) -> str:
-    return f"{symbol[:-4]}-USD" if symbol.endswith("USDT") else symbol
+    return symbol[:-4] + "-USD" if symbol.endswith("USDT") else symbol
 
 
 def _normalize_usd_symbol(symbol: str) -> str:
-    symbol = symbol.replace("-", "").upper()
-    if symbol.endswith("USD") and not symbol.endswith("USDT"):
-        return symbol + "T"
-    return symbol
-
-
-def _fee_bps(venue: str) -> float:
-    key = f"CROSS_{venue}_FEE_BPS"
-    try:
-        return max(0.0, float(os.getenv(key, DEFAULT_FEES_BPS[venue])))
-    except (TypeError, ValueError):
-        return DEFAULT_FEES_BPS[venue]
-
-
-def _best_distinct_pair(fresh):
-    """Return the best buy/sell pair on different venues by executable ratio."""
-    pairs = [
-        (buy_v, buy_q, sell_v, sell_q)
-        for buy_v, buy_q in fresh
-        for sell_v, sell_q in fresh
-        if buy_v != sell_v
-        and buy_q.get("ask", 0) > 0
-        and sell_q.get("bid", 0) > 0
-    ]
-    if not pairs:
-        return None
-    return max(pairs, key=lambda x: x[3]["bid"] / x[1]["ask"])
+    s = symbol.upper()
+    if s.endswith("-USD"):
+        return s[:-4] + "USDT"
+    if s.endswith("USD"):
+        return s[:-3] + "USDT"
+    return s.replace("-", "")
 
 
 class MultiExchangeFeeds:
-    """Resilient public Bybit/OKX/Coinbase BBO collectors."""
-
-    def __init__(self, state, lock, event):
+    def __init__(self, state: dict, lock, event: Callable[[str, str], None], symbols=None):
         self.state = state
         self.lock = lock
         self.event = event
-        self.books: dict[str, dict[str, dict[str, float]]] = defaultdict(dict)
-        self._coinbase_books: dict[str, dict[str, dict[float, float]]] = defaultdict(lambda: {"bid": {}, "offer": {}})
-        self._tasks: list[asyncio.Task] = []
-        self.symbols = _symbols()
-        self.enabled = os.getenv("CROSS_EXCHANGE_ENABLED", "true").lower() == "true"
-        self.stale_ms = max(500, int(os.getenv("CROSS_STALE_MS", "3000")))
-        self.min_net_bps = float(os.getenv("CROSS_MIN_NET_EDGE_BPS", "0.10"))
-        self.max_notional = max(1.0, float(os.getenv("CROSS_MAX_NOTIONAL_USDT", "25")))
-        self.min_display_notional = max(0.0, float(os.getenv("CROSS_MIN_DISPLAY_NOTIONAL_USDT", "0.01")))
+        self.symbols = symbols or DEFAULT_SYMBOLS
+        self.external_feeds = state.setdefault("external_feeds", {})
+        self.external_feed_updates = state.setdefault("external_feed_updates", 0)
+        self.cross_exchange_opportunities = state.setdefault("cross_exchange_opportunities", [])
+        self._books = {v: {} for v in VENUES}
+        self._coinbase_books = {s: {"bid": {}, "offer": {}} for s in self.symbols}
+        self._tasks = []
 
-    def _update(self, venue: str, symbol: str, bid: float, ask: float, bid_qty=0.0, ask_qty=0.0):
-        symbol = _normalize_usd_symbol(symbol)
-        try:
-            bid = float(bid)
-            ask = float(ask)
-            bid_qty = max(0.0, float(bid_qty or 0))
-            ask_qty = max(0.0, float(ask_qty or 0))
-        except (TypeError, ValueError):
-            return
-        if bid <= 0 or ask <= 0 or ask < bid:
-            return
+    def _record_feed(self, venue: str, symbol: str, bid: float, ask: float, bid_qty: float, ask_qty: float):
         now = time.time()
-        self.books[venue][symbol] = {
-            "bid": bid, "ask": ask,
-            "bid_qty": bid_qty, "ask_qty": ask_qty, "ts": now,
+        if not all(x is not None for x in (bid, ask, bid_qty, ask_qty)):
+            return
+        if min(bid, ask, bid_qty, ask_qty) <= 0 or bid >= ask:
+            return
+        self._books[venue][symbol] = {
+            "bid": bid, "ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty, "ts": now,
         }
-        with self.lock:
-            feeds = self.state.setdefault("external_feeds", {})
-            self.state["external_feed_updates"] = int(self.state.get("external_feed_updates", 0)) + 1
-            feed = feeds.setdefault(venue, {"status": "starting", "updates": 0, "last_update": None})
-            feed["updates"] = int(feed.get("updates", 0)) + 1
-            feed["last_update"] = now
-            feed["status"] = "connected"
+        feed = self.external_feeds.setdefault(venue, {})
+        feed["status"] = "connected"
+        feed["updates"] = int(feed.get("updates", 0)) + 1
+        feed["last_update"] = now
+        feed["quote_age_ms"] = 0
+        self.external_feed_updates += 1
+        self._update_opportunities()
 
-            fresh = [
-                (v, q) for v, books in self.books.items()
-                if (q := books.get(symbol)) and (now - q["ts"]) * 1000 <= self.stale_ms
-            ]
-            if len(fresh) < 2:
-                return
-
-            pair = _best_distinct_pair(fresh)
-            if pair is None:
-                return
-            buy_v, buy_q, sell_v, sell_q = pair
-
-            buy_qty = max(0.0, buy_q.get("ask_qty", 0.0))
-            sell_qty = max(0.0, sell_q.get("bid_qty", 0.0))
-            if buy_qty <= 0 or sell_qty <= 0:
-                return
-            size_base = min(buy_qty, sell_qty, self.max_notional / buy_q["ask"])
-            if size_base <= 0:
-                return
-            gross_bps = (sell_q["bid"] / buy_q["ask"] - 1.0) * 10000
-            fee_bps = _fee_bps(buy_v) + _fee_bps(sell_v)
-            net_bps = gross_bps - fee_bps
-            age_ms = max((now - buy_q["ts"]) * 1000, (now - sell_q["ts"]) * 1000)
-            buy_notional = size_base * buy_q["ask"]
-            sell_notional = size_base * sell_q["bid"]
-            net_pnl = buy_notional * (net_bps / 10000.0)
-            executable = buy_notional >= self.min_display_notional and net_bps >= self.min_net_bps
-
-            rows = [x for x in self.state.get("cross_exchange_opportunities", []) if x.get("symbol") != symbol]
+    def _update_opportunities(self):
+        stale_ms = float(__import__("os").getenv("CROSS_STALE_MS", "3000"))
+        min_edge_bps = float(__import__("os").getenv("CROSS_MIN_NET_EDGE_BPS", "0.10"))
+        fee_bps = float(__import__("os").getenv("CROSS_FEE_BPS", "10"))
+        min_notional = float(__import__("os").getenv("CROSS_MIN_DISPLAY_NOTIONAL_USDT", "0.01"))
+        now = time.time()
+        rows = []
+        for symbol in self.symbols:
+            quotes = []
+            for venue in VENUES:
+                q = self._books[venue].get(symbol)
+                if not q:
+                    continue
+                age = (now - q["ts"]) * 1000
+                if age <= stale_ms:
+                    quotes.append((venue, q, age))
+            if len(quotes) < 2:
+                continue
+            buy_venue, buy = min(quotes, key=lambda x: x[1]["ask"])
+            sell_venue, sell = max(quotes, key=lambda x: x[1]["bid"])
+            if buy_venue == sell_venue:
+                alternatives = [(v, q, age) for v, q, age in quotes if v != buy_venue]
+                if not alternatives:
+                    continue
+                sell_venue, sell = max(alternatives, key=lambda x: x[1]["bid"])
+            if sell["bid"] <= buy["ask"]:
+                gross_bps = (sell["bid"] / buy["ask"] - 1.0) * 10000.0
+            else:
+                gross_bps = (sell["bid"] / buy["ask"] - 1.0) * 10000.0
+            net_bps = gross_bps - fee_bps * 2.0
+            executable_notional = min(buy["ask"] * buy["ask_qty"], sell["bid"] * sell["bid_qty"])
+            gate = "PASS" if net_bps >= min_edge_bps and executable_notional >= min_notional else "EDGE_OR_LIQUIDITY"
             rows.append({
-                "symbol": symbol, "buy": buy_v, "sell": sell_v,
-                "gross_bps": round(gross_bps, 3), "fee_bps": round(fee_bps, 3),
-                "net_bps": round(net_bps, 3), "notional_usdt": round(buy_notional, 6),
-                "estimated_net_pnl_usdt": round(net_pnl, 6),
-                "buy_ask": buy_q["ask"], "sell_bid": sell_q["bid"],
-                "buy_qty": buy_qty, "sell_qty": sell_qty,
-                "age_ms": round(age_ms, 1), "executable_bbo": executable,
-                "execution_ready": False, "gate": "PASS" if executable else "EDGE_OR_LIQUIDITY",
-                "ts": now,
+                "symbol": symbol, "buy_venue": buy_venue, "sell_venue": sell_venue,
+                "gross_bps": round(gross_bps, 4), "net_bps": round(net_bps, 4),
+                "buy_ask": buy["ask"], "sell_bid": sell["bid"],
+                "buy_qty": buy["ask_qty"], "sell_qty": sell["bid_qty"],
+                "executable_notional_usdt": round(executable_notional, 8),
+                "buy_age_ms": round((now - buy["ts"]) * 1000, 1),
+                "sell_age_ms": round((now - sell["ts"]) * 1000, 1),
+                "gate": gate, "execution_ready": False,
+                "execution_reason": "external order adapters and authenticated two-leg fill coordination are disabled",
             })
-            rows.sort(key=lambda x: x["net_bps"], reverse=True)
-            self.state["cross_exchange_opportunities"] = rows[:20]
-            self.state["cross_exchange_execution"] = {
-                "enabled": self.enabled,
-                "market_data_ready": True,
-                "execution_ready": False,
-                "reason": "External order adapters and authenticated two-leg fill coordination are not enabled",
-                "min_net_bps": self.min_net_bps,
-                "stale_ms": self.stale_ms,
-                "last_candidate": rows[0] if rows else None,
-            }
-            if net_bps >= self.min_net_bps:
-                self.event(
-                    "CROSS_OPPORTUNITY",
-                    f"{symbol} {buy_v}->{sell_v} net={net_bps:.3f}bps size={buy_notional:.4f}USDT",
-                    gross_bps=round(gross_bps, 3), fee_bps=round(fee_bps, 3),
-                    net_bps=round(net_bps, 3), notional_usdt=round(buy_notional, 6),
-                )
+        rows.sort(key=lambda r: r["net_bps"], reverse=True)
+        self.state["cross_exchange_opportunities"] = rows[:20]
+        if rows and rows[0]["gate"] == "PASS":
+            self.event("CROSS_OPPORTUNITY", f"{rows[0]['symbol']} {rows[0]['buy_venue']}->{rows[0]['sell_venue']} net_bps={rows[0]['net_bps']}")
 
-    async def _run(self, venue, url, subscribe_messages, parser):
+    async def _run_venue(self, venue, url, messages, parser):
         delay = 1.0
         while True:
             try:
-                with self.lock:
-                    self.state.setdefault("external_feeds", {}).setdefault(
-                        venue, {"status": "starting", "updates": 0, "last_update": None}
-                    )["status"] = "connecting"
-                async with websockets.connect(
-                    url, ping_interval=20, ping_timeout=20, close_timeout=5,
-                    open_timeout=15, max_size=2**24, compression=None
-                ) as ws:
-                    for message in subscribe_messages:
-                        await ws.send(json.dumps(message))
+                async with websockets.connect(url, ping_interval=20, ping_timeout=20, open_timeout=15, max_size=2**24) as ws:
+                    self.external_feeds.setdefault(venue, {})["status"] = "connected"
+                    self.event("EXT_WS", f"{venue} connected")
                     delay = 1.0
-                    with self.lock:
-                        self.state["external_feeds"][venue]["status"] = "connected"
-                    self.event("EXT_WS", f"{venue} public market feed connected", symbols=len(self.symbols))
-                    while True:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=45)
+                    for msg in messages:
+                        await ws.send(json.dumps(msg))
+                    async for raw in ws:
                         try:
-                            for symbol, bid, ask, bq, aq in parser(json.loads(raw)):
-                                self._update(venue, symbol, bid, ask, bq, aq)
+                            data = json.loads(raw)
+                            for symbol, bid, ask, bid_qty, ask_qty in parser(data):
+                                self._record_feed(venue, symbol, bid, ask, bid_qty, ask_qty)
                         except Exception as exc:
-                            self.event("EXT_WS_PARSE", f"{venue}: {exc}")
+                            self.external_feeds.setdefault(venue, {})["parse_errors"] = int(self.external_feeds.setdefault(venue, {}).get("parse_errors", 0)) + 1
+                            self.event("EXT_PARSE_ERROR", f"{venue}: {exc}")
             except asyncio.CancelledError:
-                with self.lock:
-                    if venue in self.state.get("external_feeds", {}):
-                        self.state["external_feeds"][venue]["status"] = "stopped"
                 raise
             except Exception as exc:
-                with self.lock:
-                    feed = self.state.setdefault("external_feeds", {}).setdefault(venue, {})
-                    feed["status"] = "reconnecting"
-                    feed["last_error"] = str(exc)
-                    feed["reconnects"] = int(feed.get("reconnects", 0)) + 1
+                feed = self.external_feeds.setdefault(venue, {})
+                feed["status"] = "reconnecting"
+                feed["last_error"] = str(exc)
+                feed["reconnects"] = int(feed.get("reconnects", 0)) + 1
                 self.event("EXT_WS_ERROR", f"{venue}: {exc}")
                 await asyncio.sleep(delay)
                 delay = min(60.0, delay * 2)
@@ -217,7 +154,8 @@ class MultiExchangeFeeds:
                 yield s.upper(), float(b[0][0]), float(a[0][0]), float(b[0][1]), float(a[0][1])
 
     def _okx_messages(self):
-        return [{"op": "subscribe", "args": [{"channel": "bbo-tbt", "instId": _okx_id(s)} for s in self.symbols}]}]
+        args = [{"channel": "bbo-tbt", "instId": _okx_id(s)} for s in self.symbols]
+        return [{"op": "subscribe", "args": args}]
 
     def _okx_parser(self, msg):
         if msg.get("arg", {}).get("channel") == "bbo-tbt":
@@ -237,48 +175,35 @@ class MultiExchangeFeeds:
         if msg.get("channel") != "l2_data":
             return
         for event in msg.get("events", []):
-            product = event.get("product_id", "")
-            symbol = _normalize_usd_symbol(product)
-            book = self._coinbase_books[symbol]
+            product_id = event.get("product_id", "")
+            symbol = _normalize_usd_symbol(product_id)
+            book = self._coinbase_books.setdefault(symbol, {"bid": {}, "offer": {}})
             for update in event.get("updates", []):
-                side = update.get("side")
-                if side not in ("bid", "offer"):
-                    continue
-                try:
-                    price = float(update.get("price_level", 0))
-                    qty = float(update.get("new_quantity", 0))
-                except (TypeError, ValueError):
-                    continue
+                side = "bid" if update.get("side") == "bid" else "offer"
+                price = float(update.get("price_level", 0))
+                qty = float(update.get("new_quantity", 0))
                 if price <= 0:
                     continue
                 if qty <= 0:
                     book[side].pop(price, None)
                 else:
                     book[side][price] = qty
-            if not book["bid"] or not book["offer"]:
-                continue
-            bid = max(book["bid"])
-            ask = min(book["offer"])
-            if ask > bid:
-                yield symbol, bid, ask, book["bid"][bid], book["offer"][ask]
+            if book["bid"] and book["offer"]:
+                bid = max(book["bid"])
+                ask = min(book["offer"])
+                if bid < ask:
+                    yield symbol, bid, ask, book["bid"][bid], book["offer"][ask]
 
     async def run(self):
-        if not self.enabled:
-            with self.lock:
-                self.state["cross_exchange_execution"] = {
-                    "enabled": False, "market_data_ready": False,
-                    "execution_ready": False, "reason": "CROSS_EXCHANGE_ENABLED=false",
-                }
-            return
-        self._tasks = [
-            asyncio.create_task(self._run("BYBIT", "wss://stream.bybit.com/v5/public/spot", self._bybit_messages(), self._bybit_parser)),
-            asyncio.create_task(self._run("OKX", "wss://ws.okx.com:8443/ws/v5/public", self._okx_messages(), self._okx_parser)),
-            asyncio.create_task(self._run("COINBASE", "wss://advanced-trade-ws.coinbase.com", self._coinbase_messages(), self._coinbase_parser)),
+        configs = [
+            ("BYBIT", "wss://stream.bybit.com/v5/public/spot", self._bybit_messages(), self._bybit_parser),
+            ("OKX", "wss://ws.okx.com:8443/ws/v5/public", self._okx_messages(), self._okx_parser),
+            ("COINBASE", "wss://advanced-trade-ws.coinbase.com", self._coinbase_messages(), self._coinbase_parser),
         ]
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-
-    async def stop(self):
-        for task in self._tasks:
-            task.cancel()
-        if self._tasks:
+        self._tasks = [asyncio.create_task(self._run_venue(*cfg)) for cfg in configs]
+        try:
+            await asyncio.gather(*self._tasks)
+        finally:
+            for task in self._tasks:
+                task.cancel()
             await asyncio.gather(*self._tasks, return_exceptions=True)
