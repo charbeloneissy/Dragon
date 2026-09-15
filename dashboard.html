@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dragon Live Monitor</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#07090d;color:#eef2f7;font:14px system-ui,-apple-system,Segoe UI,sans-serif}main{max-width:1400px;margin:auto;padding:18px}.top{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.brand{font-size:28px;font-weight:800}.sub{color:#8993a1}.pill{padding:7px 11px;border:1px solid #29313d;border-radius:999px;background:#10151c}.good{color:#53df91}.warn{color:#f0c75e}.bad{color:#ff6876}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:14px 0}.card{background:#10141a;border:1px solid #252d38;border-radius:15px;padding:15px;box-shadow:0 8px 28px #0004}.label{color:#8e99a8;font-size:12px}.value{font-size:25px;font-weight:800;margin-top:6px}.wide{grid-column:1/-1}.bar{height:7px;background:#202733;border-radius:8px;overflow:hidden;margin-top:10px}.fill{height:100%;width:0;background:#53df91;transition:width .4s}.feed{max-height:430px;overflow:auto}.event{padding:9px 0;border-bottom:1px solid #202731;font-size:12px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.chart{height:150px;width:100%;display:block}.two{display:grid;grid-template-columns:2fr 1fr;gap:10px}@media(max-width:800px){.two{grid-template-columns:1fr}.brand{font-size:23px}}
+</style>
+</head>
+<body><main>
+<div class="top"><div><div class="brand">🐉 Dragon Live Monitor</div><div class="sub">Binance Spot triangular arbitrage telemetry</div></div><div id="mode" class="pill">Connecting...</div></div>
+<div class="grid" id="cards"></div>
+<div class="two">
+<section class="card"><div class="label">REALIZED P&L HISTORY</div><canvas id="chart" class="chart"></canvas><div id="pnlText" class="sub"></div></section>
+<section class="card"><div class="label">SYSTEM HEALTH</div><div id="health" style="margin-top:12px;line-height:2"></div></section>
+</div>
+<section class="card wide"><div class="top"><b>LIVE EVENT STREAM</b><span id="updated" class="sub"></span></div><div id="feed" class="feed" style="margin-top:8px"></div></section>
+</main>
+<script>
+const pnl=[];let lastFilled=0;
+const $=id=>document.getElementById(id);
+function fmt(n,d=4){return Number(n||0).toLocaleString(undefined,{maximumFractionDigits:d})}
+function metric(label,value,cls=''){return `<div class="card"><div class="label">${label}</div><div class="value ${cls}">${value}</div></div>`}
+function draw(){const c=$('chart'),r=c.getBoundingClientRect(),d=devicePixelRatio||1;c.width=r.width*d;c.height=r.height*d;const x=c.getContext('2d');x.scale(d,d);x.clearRect(0,0,r.width,r.height);if(pnl.length<2){x.fillStyle='#7f8996';x.fillText('Waiting for realized P&L updates...',12,40);return}const mn=Math.min(...pnl),mx=Math.max(...pnl),span=mx-mn||1;x.beginPath();pnl.forEach((v,i)=>{const px=i*(r.width-16)/(pnl.length-1)+8,py=r.height-12-(v-mn)/span*(r.height-24);i?x.lineTo(px,py):x.moveTo(px,py)});x.strokeStyle='#53df91';x.lineWidth=2;x.stroke();x.fillStyle='#8e99a8';x.fillText(`min ${fmt(mn,6)}  max ${fmt(mx,6)}`,8,14)}
+function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+async function tick(){try{const j=await (await fetch('/health?ts='+Date.now(),{cache:'no-store'})).json(),s=j.state||{};const live=!!(s.live&&!s.dry_run);$('mode').innerHTML=`<span class="${live?'good':'warn'}">● ${live?'LIVE EXECUTION':'SAFE / NOT LIVE'}</span>`;
+$('cards').innerHTML=[metric('USDT FREE',fmt(s.free_usdt,6)),metric('REALIZED P&L',fmt(s.realized_pnl_usdt,6),Number(s.realized_pnl_usdt||0)>=0?'good':'bad'),metric('TRIANGLES',fmt(s.triangles,0)),metric('SYMBOLS',fmt(s.symbols,0)),metric('SCANS',fmt(s.scans,0)),metric('OPPORTUNITIES',fmt(s.opportunities,0)),metric('EXECUTIONS',fmt(s.executions,0)),metric('RISK BLOCKS',fmt(s.risk_blocks,0),'warn'),metric('EXEC ERRORS',fmt((s.execution_errors||0)+(s.futures_errors||0),(0)),'bad')].join('');
+const ws=s.ws_connected?'<span class="good">● CONNECTED</span>':'<span class="bad">● DISCONNECTED</span>';const auth=s.binance_authenticated?'<span class="good">● AUTHENTICATED</span>':'<span class="bad">● NOT AUTHENTICATED</span>';const controls=s.controls||{};$('health').innerHTML=`WebSocket: ${ws}<br>Binance API: ${auth}<br>Master: ${controls.master?'ON':'OFF'}<br>Spot: ${controls.spot?'ON':'OFF'}<br>Analysis: ${controls.analysis?'ON':'OFF'}<br>Futures: ${controls.futures?'ON':'OFF'}<br>Kill switch: ${controls.kill_switch?'ACTIVE':'clear'}<br>Status: <b>${esc(s.status)}</b>`;
+if(lastFilled!==s.ledger_filled){pnl.push(Number(s.realized_pnl_usdt||0));if(pnl.length>120)pnl.shift();lastFilled=s.ledger_filled;draw()};if(!pnl.length){pnl.push(Number(s.realized_pnl_usdt||0));draw()};$('pnlText').textContent=`Filled trades: ${fmt(s.ledger_filled,0)} • Last opportunity: ${esc(s.last_opportunity||'none')} • Last execution: ${esc(s.last_execution||'none')}`;
+$('feed').innerHTML=(s.recent||[]).slice().reverse().map(e=>`<div class="event"><span class="sub">${new Date(Number(e.ts)*1000).toLocaleTimeString()}</span> <b>${esc(e.kind)}</b> ${esc(e.message)}${e.net_bps!=null?` <span class="good mono">${fmt(e.net_bps,3)} bps</span>`:''}</div>`).join('')||'<span class="sub">Waiting for events...</span>';$('updated').textContent='Updated '+new Date().toLocaleTimeString();}catch(e){$('mode').innerHTML='<span class="bad">● DASHBOARD ERROR</span>'}}
+tick();setInterval(tick,1000);addEventListener('resize',draw);draw();
+</script></body></html>
