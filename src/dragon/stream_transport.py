@@ -81,7 +81,7 @@ class _SocketProxy:
     def __init__(self, websocket, main, expected):
         self._ws = websocket
         self._main = main
-        self._expected = set(expected)
+        self._expected = expected
         self._verify_sent = False
 
     def __getattr__(self, name):
@@ -94,10 +94,17 @@ class _SocketProxy:
             obj = None
         if isinstance(obj, dict) and obj.get("method") == "SUBSCRIBE":
             params = obj.get("params") or []
+            self._expected.update(params)
             with self._main.LOCK:
-                self._main.STATE["subscribed_streams"] += len(params)
-            self._main.event("WS", f"Subscription batch sent; id={obj.get('id')} count={len(params)}")
+                self._main.STATE["subscribed_streams"] = len(self._expected)
         return await self._ws.send(payload)
+
+    async def _request_verification(self):
+        if self._verify_sent:
+            return
+        self._verify_sent = True
+        await self._ws.send(json.dumps({"method": "LIST_SUBSCRIPTIONS", "id": self.VERIFY_ID}))
+        self._main.event("WS", "Subscription verification requested")
 
     async def recv(self):
         raw = await self._ws.recv()
@@ -116,24 +123,26 @@ class _SocketProxy:
             if msg.get("id") == self.VERIFY_ID:
                 result = msg.get("result")
                 active = set(result) if isinstance(result, list) else set()
-                verified = self._expected.issubset(active)
+                verified = not msg.get("error") and self._expected.issubset(active)
                 with self._main.LOCK:
                     self._main.STATE["subscription_verified"] = verified
-                    self._main.STATE["subscription_acks"] += 1 if msg.get("error") is None else 0
                 if verified:
                     self._main.event("WS", f"Subscription verification passed; active={len(active)} expected={len(self._expected)}")
                 else:
-                    self._main.event("WS_ERROR", f"Subscription verification failed; active={len(active)} expected={len(self._expected)}")
+                    self._main.event("WS_ERROR", f"Subscription verification failed; active={len(active)} expected={len(self._expected)} result={msg.get('result')}")
                 return raw
 
             if msg.get("error") is not None:
                 with self._main.LOCK:
                     self._main.STATE["subscription_errors"] += 1
                     self._main.STATE["last_error"] = str(msg.get("error"))
-                self._main.event("WS_ERROR", f"Binance subscription error: {msg.get('error')}")
+                self._main.event("WS_ERROR", f"Binance WebSocket error: {msg.get('error')}")
             elif msg.get("result") is None:
                 with self._main.LOCK:
                     self._main.STATE["subscription_acks"] += 1
+                # Main sends every SUBSCRIBE frame before entering recv(), so the
+                # first ACK arrives only after the complete expected set is known.
+                await self._request_verification()
 
         depth = _depth_payload(msg, 1)
         if depth:
@@ -151,15 +160,8 @@ class _SocketProxy:
                 self._main.STATE["ws_malformed_messages"] += 1
         return raw
 
-    async def verify(self):
-        if self._verify_sent:
-            return
-        self._verify_sent = True
-        await self._ws.send(json.dumps({"method": "LIST_SUBSCRIPTIONS", "id": self.VERIFY_ID}))
-        self._main.event("WS", "Subscription verification requested")
-
     async def __aenter__(self):
-        entered = await self._ws.__aenter__()
+        await self._ws.__aenter__()
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -176,11 +178,9 @@ def install(main_module):
     original_payload = main_module._depth_payload
     original_loop = main_module.stream_loop
     original_connect = main_module.websockets.connect
+    expected = set()
 
     def connect(*args, **kwargs):
-        url = kwargs.get("uri") if "uri" in kwargs else (args[0] if args else "")
-        expected = []
-        # Main sends subscriptions after connect, so derive the expected list later from send().
         socket = original_connect(*args, **kwargs)
 
         class ConnectProxy:
@@ -202,6 +202,7 @@ def install(main_module):
 
     async def patched_loop(cfg, client, filters, triangles, symbols, symbol_meta):
         main_module._depth_payload = _depth_payload
+        expected.clear()
         patched_cfg = cfg.__class__(
             api_base=cfg.api_base,
             ws_base=_combined_ws_url(cfg.ws_base),
