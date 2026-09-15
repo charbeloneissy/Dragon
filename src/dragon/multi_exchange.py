@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import time
+from collections import deque
 from typing import Callable
 
 import websockets
@@ -50,19 +51,28 @@ class MultiExchangeFeeds:
         self.cross_exchange_opportunities = state.setdefault("cross_exchange_opportunities", [])
         self._books = {v: {} for v in VENUES}
         self._coinbase_books = {s: {"bid": {}, "offer": {}} for s in self.symbols}
+        self._update_times = {v: deque(maxlen=300) for v in VENUES}
+        self._calc_times = deque(maxlen=300)
+        self._last_calc_mono = 0.0
         self._tasks = []
 
     def _record_feed(self, venue: str, symbol: str, bid: float, ask: float, bid_qty: float, ask_qty: float):
         now = time.time()
+        mono = time.monotonic()
         try:
             bid, ask, bid_qty, ask_qty = map(float, (bid, ask, bid_qty, ask_qty))
         except (TypeError, ValueError):
             return
         if min(bid, ask, bid_qty, ask_qty) <= 0 or bid >= ask:
             return
-        self._books[venue][symbol] = {"bid": bid, "ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty, "ts": now}
+        self._books[venue][symbol] = {"bid": bid, "ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty, "ts": now, "mono": mono}
+        times = self._update_times[venue]
+        times.append(mono)
+        window_start = mono - 10.0
+        recent = [t for t in times if t >= window_start]
+        rate = len(recent) / 10.0
         feed = self.external_feeds.setdefault(venue, {})
-        feed.update({"status": "connected", "last_update": now, "quote_age_ms": 0})
+        feed.update({"status": "connected", "last_update": now, "quote_age_ms": 0, "updates_per_sec": round(rate, 3)})
         feed["updates"] = int(feed.get("updates", 0)) + 1
         with self.lock:
             self.state["external_feed_updates"] = int(self.state.get("external_feed_updates", 0)) + 1
@@ -72,9 +82,17 @@ class MultiExchangeFeeds:
         stale_ms = float(os.getenv("CROSS_STALE_MS", "1500"))
         min_edge_bps = float(os.getenv("CROSS_MIN_NET_EDGE_BPS", "0.10"))
         slippage_bps = float(os.getenv("CROSS_SLIPPAGE_BPS", "0.50"))
+        latency_bps_per_ms = float(os.getenv("CROSS_LATENCY_BPS_PER_MS", "0.005"))
         min_notional = float(os.getenv("CROSS_MIN_DISPLAY_NOTIONAL_USDT", "0.01"))
+        recalc_min_ms = float(os.getenv("CROSS_RECALC_MIN_MS", "100"))
+        mono = time.monotonic()
+        if self._last_calc_mono and (mono - self._last_calc_mono) * 1000.0 < recalc_min_ms:
+            return
+        self._last_calc_mono = mono
+        calc_start = mono
         now = time.time()
         rows = []
+        max_age_ms = 0.0
         for symbol in self.symbols:
             quotes = []
             for venue in VENUES:
@@ -84,19 +102,21 @@ class MultiExchangeFeeds:
                 age = (now - q["ts"]) * 1000
                 if age <= stale_ms:
                     quotes.append((venue, q, age))
+                    max_age_ms = max(max_age_ms, age)
             for buy_venue, buy, buy_age in quotes:
                 for sell_venue, sell, sell_age in quotes:
                     if buy_venue == sell_venue:
                         continue
                     gross_bps = (sell["bid"] / buy["ask"] - 1.0) * 10000.0
                     fees_bps = _fee_bps(buy_venue) + _fee_bps(sell_venue)
-                    net_bps = gross_bps - fees_bps - slippage_bps
+                    latency_bps = max(buy_age, sell_age) * latency_bps_per_ms
+                    net_bps = gross_bps - fees_bps - slippage_bps - latency_bps
                     executable_notional = min(buy["ask"] * buy["ask_qty"], sell["bid"] * sell["bid_qty"])
                     passed = net_bps >= min_edge_bps and executable_notional >= min_notional
                     rows.append({
                         "symbol": symbol, "buy_venue": buy_venue, "sell_venue": sell_venue,
                         "gross_bps": round(gross_bps, 4), "fees_bps": round(fees_bps, 4),
-                        "slippage_bps": round(slippage_bps, 4), "net_bps": round(net_bps, 4),
+                        "slippage_bps": round(slippage_bps, 4), "latency_bps": round(latency_bps, 4), "net_bps": round(net_bps, 4),
                         "buy_ask": buy["ask"], "sell_bid": sell["bid"],
                         "buy_qty": buy["ask_qty"], "sell_qty": sell["bid_qty"],
                         "executable_notional_usdt": round(executable_notional, 8),
@@ -106,9 +126,18 @@ class MultiExchangeFeeds:
                         "execution_reason": "scanner-only: external two-leg execution disabled",
                     })
         rows.sort(key=lambda r: (r["net_bps"], r["executable_notional_usdt"]), reverse=True)
+        calc_ms = (time.monotonic() - calc_start) * 1000.0
+        self._calc_times.append(calc_ms)
+        calc_rate = len(self._calc_times) / max(1.0, min(300.0, (self._calc_times[-1] - self._calc_times[0]) if len(self._calc_times) > 1 else 1.0))
         with self.lock:
             self.state["cross_exchange_opportunities"] = rows[:50]
             self.state["cross_exchange_last_update"] = now
+            self.state["cross_exchange_calc_ms"] = round(calc_ms, 3)
+            self.state["cross_exchange_max_quote_age_ms"] = round(max_age_ms, 1)
+            self.state["cross_exchange_symbols"] = len(self.symbols)
+            self.state["cross_exchange_calc_samples"] = len(self._calc_times)
+            self.state["cross_exchange_last_net_bps"] = rows[0]["net_bps"] if rows else None
+            self.state["cross_exchange_calc_rate_per_sec"] = round(calc_rate, 3)
         if rows and rows[0]["gate"] == "PASS":
             top = rows[0]
             self.event("CROSS_OPPORTUNITY", f"{top['symbol']} {top['buy_venue']}->{top['sell_venue']} net_bps={top['net_bps']}")
@@ -163,7 +192,7 @@ class MultiExchangeFeeds:
                 inst = d.get("instId", "")
                 bids, asks = d.get("bids"), d.get("asks")
                 if bids and asks:
-                    yield _normalize_usd_symbol(inst), float(bids[0][0]), float(asks[0][0]), float(bids[0][1]), float(asks[0][1])
+                    yield _normalize_usd_symbol(inst), float(bids[0][0]), float(bids[0][1]), float(bids[0][1]), float(asks[0][1])
 
     def _coinbase_messages(self):
         return [
