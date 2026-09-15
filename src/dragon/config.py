@@ -20,6 +20,10 @@ class Config:
     order_timeout_ms: int = 5000
     depth_levels: int = 20
     health_fail_open: bool = False
+    dex_enabled: bool = False
+    dex_quote_url: str = ""
+    dex_max_gas_quote: float = 0.0
+    dex_max_latency_ms: int = 2000
 
     @staticmethod
     def _bool(name: str, default: bool) -> bool:
@@ -47,6 +51,10 @@ class Config:
             order_timeout_ms=int(os.getenv("ORDER_TIMEOUT_MS", str(cls.order_timeout_ms))),
             depth_levels=int(os.getenv("DEPTH_LEVELS", str(cls.depth_levels))),
             health_fail_open=cls._bool("HEALTH_FAIL_OPEN", cls.health_fail_open),
+            dex_enabled=cls._bool("DEX_ENABLED", cls.dex_enabled),
+            dex_quote_url=os.getenv("DEX_QUOTE_URL", cls.dex_quote_url).strip(),
+            dex_max_gas_quote=float(os.getenv("DEX_MAX_GAS_QUOTE", str(cls.dex_max_gas_quote))),
+            dex_max_latency_ms=int(os.getenv("DEX_MAX_LATENCY_MS", str(cls.dex_max_latency_ms))),
         )
 
     @property
@@ -68,5 +76,9 @@ class Config:
             raise ValueError("timing values are invalid")
         if not 1 <= self.depth_levels <= 100:
             raise ValueError("DEPTH_LEVELS must be between 1 and 100")
+        if self.dex_max_gas_quote < 0 or self.dex_max_latency_ms <= 0:
+            raise ValueError("DEX cost/latency limits are invalid")
+        if self.dex_enabled and not self.dex_quote_url:
+            raise ValueError("DEX_ENABLED=true requires DEX_QUOTE_URL")
         if self.live_trading and self.dry_run:
             raise ValueError("LIVE_TRADING=true cannot be combined with DRY_RUN=true")
