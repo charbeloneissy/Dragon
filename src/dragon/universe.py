@@ -32,24 +32,10 @@ def evaluate_costs(strategy: str, path: tuple[str, ...], gross_bps: Decimal, leg
     slippage = sum((x.slippage_bps for x in legs), Decimal("0"))
     gas = sum((x.gas_quote for x in legs), Decimal("0"))
     network = sum((x.network_bps for x in legs), Decimal("0"))
-    result = net_opportunity(
-        gross_bps,
-        fee_bps=fee,
-        slippage_bps=slippage,
-        gas_quote=gas,
-        notional_quote=notional_quote,
-        network_bps=network,
-    )
+    result = net_opportunity(gross_bps, fee_bps=fee, slippage_bps=slippage, gas_quote=gas, notional_quote=notional_quote, network_bps=network)
     if result.net_bps <= 0:
         return None
-    return UniverseOpportunity(
-        strategy=strategy,
-        path=path,
-        gross_bps=gross_bps,
-        net_bps=result.net_bps,
-        cost_bps=result.costs.total_bps,
-        gas_quote=result.gas_quote,
-    )
+    return UniverseOpportunity(strategy=strategy, path=path, gross_bps=gross_bps, net_bps=result.net_bps, cost_bps=result.costs.total_bps, gas_quote=result.gas_quote)
 
 
 def all_strategy_types() -> tuple[str, ...]:
@@ -86,20 +72,7 @@ def _leg_side(symbol: str, src: str, dst: str, symbol_meta: dict[str, tuple[str,
     return None
 
 
-def classify_triangle(
-    triangle,
-    books: dict,
-    symbol_meta: dict[str, tuple[str, str]],
-    now_ms: float,
-    trade_notional: Decimal,
-    *,
-    stale_ms: int,
-    max_slippage_bps: Decimal,
-    net_edge_bps: Decimal,
-    min_net_edge_bps: Decimal,
-    expected_profit_usdt: Decimal,
-    min_expected_profit_usdt: Decimal,
-) -> TriangleUniverseDecision:
+def classify_triangle(triangle, books: dict, symbol_meta: dict[str, tuple[str, str]], now_ms: float, trade_notional: Decimal, *, stale_ms: int, max_slippage_bps: Decimal, net_edge_bps: Decimal, min_net_edge_bps: Decimal, expected_profit_usdt: Decimal, min_expected_profit_usdt: Decimal) -> TriangleUniverseDecision:
     if trade_notional <= 0:
         return TriangleUniverseDecision("D", False, False, Decimal("0"), Decimal("0"), Decimal("0"), "NO_CAPITAL")
 
@@ -120,17 +93,17 @@ def classify_triangle(
         liquidity_factors.append(min(Decimal("1"), top_value / trade_notional))
 
     liquidity = min(liquidity_factors, default=Decimal("0"))
-    # Do not invent a success probability. Persistence is neutral until Dragon
-    # has enough independent observations and realized outcomes to calibrate it.
+    # Neutral persistence until enough independent observations and realized
+    # outcomes exist to calibrate a genuine success-probability model.
     persistence = Decimal("1")
     if net_edge_bps < Decimal("0"):
         return TriangleUniverseDecision("D", False, False, Decimal("0"), liquidity, persistence, "NEGATIVE_NET_EDGE")
 
-    if liquidity >= Decimal("2") and net_edge_bps >= Decimal("10"):
+    if liquidity >= Decimal("0.80") and net_edge_bps >= Decimal("10"):
         tier = "A"
-    elif liquidity >= Decimal("1") and net_edge_bps >= Decimal("7"):
+    elif liquidity >= Decimal("0.50") and net_edge_bps >= Decimal("7"):
         tier = "B"
-    elif liquidity >= Decimal("0.5"):
+    elif liquidity >= Decimal("0.25"):
         tier = "C"
     else:
         tier = "D"
