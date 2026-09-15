@@ -14,6 +14,8 @@ class Config:
     max_slippage_bps: float = 10.0
     fee_bps: float = 10.0
     risk_pct: float = 0.0015
+    capital_allocation_pct: float = 0.25
+    safety_reserve_usdt: float = 5.0
     cooldown_ms: int = 1000
     max_triangles: int = 5000
     stale_ms: int = 750
@@ -46,6 +48,8 @@ class Config:
             max_slippage_bps=float(os.getenv("MAX_SLIPPAGE_BPS", str(cls.max_slippage_bps))),
             fee_bps=float(os.getenv("FEE_BPS", str(cls.fee_bps))),
             risk_pct=float(os.getenv("ARB_RISK_PCT", str(cls.risk_pct))),
+            capital_allocation_pct=float(os.getenv("ARB_CAPITAL_ALLOCATION_PCT", str(cls.capital_allocation_pct))),
+            safety_reserve_usdt=float(os.getenv("ARB_SAFETY_RESERVE_USDT", str(cls.safety_reserve_usdt))),
             cooldown_ms=int(os.getenv("LIVE_ORDER_COOLDOWN_MS", str(cls.cooldown_ms))),
             max_triangles=int(os.getenv("MAX_TRIANGLES", str(cls.max_triangles))),
             stale_ms=int(os.getenv("STALE_MS", str(cls.stale_ms))),
@@ -74,6 +78,10 @@ class Config:
             raise ValueError("MIN_TRADE_NOTIONAL_USDT cannot exceed MAX_NOTIONAL_USDT")
         if self.risk_pct > 0.01:
             raise ValueError("ARB_RISK_PCT cannot exceed 0.01 (1%)")
+        if not 0 < self.capital_allocation_pct <= 1:
+            raise ValueError("ARB_CAPITAL_ALLOCATION_PCT must be between 0 and 1")
+        if self.safety_reserve_usdt < 0:
+            raise ValueError("ARB_SAFETY_RESERVE_USDT cannot be negative")
         if self.min_net_edge_bps < 0 or self.fee_bps < 0 or self.max_slippage_bps < 0:
             raise ValueError("edge, fee, and slippage limits cannot be negative")
         if self.cooldown_ms < 0 or self.stale_ms <= 0 or self.order_timeout_ms <= 0:
