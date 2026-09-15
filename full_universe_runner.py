@@ -12,7 +12,10 @@ from src.dragon.control import analysis_allowed, trading_allowed
 WS_BACKOFF_MIN = 1.0
 WS_BACKOFF_MAX = 60.0
 WS_STALE_SECONDS = 45.0
-WS_SHARD_SIZE = 1000
+# Keep combined-stream URLs comfortably below proxy/server URI limits.
+# Binance permits many streams per connection, but a single giant URL can
+# trigger HTTP 414 before the WebSocket handshake is accepted.
+WS_SHARD_SIZE = 100
 WS_PING_INTERVAL = 20.0
 WS_PING_TIMEOUT = 20.0
 
@@ -32,7 +35,6 @@ def _ws_state(worker_id, **values):
 
 
 async def _feed_worker(cfg, symbols, queue, worker_id):
-    """Maintain one Spot combined stream with bounded recovery."""
     streams = [f"{s.lower()}@depth{cfg.depth_levels}@100ms" for s in symbols]
     if not streams:
         return
@@ -44,14 +46,9 @@ async def _feed_worker(cfg, symbols, queue, worker_id):
         try:
             _ws_state(worker_id, status="connecting", ws_next_retry_at=None)
             async with websockets.connect(
-                url,
-                ping_interval=WS_PING_INTERVAL,
-                ping_timeout=WS_PING_TIMEOUT,
-                close_timeout=5,
-                open_timeout=15,
-                max_size=2**24,
-                max_queue=4096,
-                compression=None,
+                url, ping_interval=WS_PING_INTERVAL, ping_timeout=WS_PING_TIMEOUT,
+                close_timeout=5, open_timeout=15, max_size=2**24,
+                max_queue=4096, compression=None,
             ) as ws:
                 delay = WS_BACKOFF_MIN
                 last_event = time.monotonic()
@@ -93,7 +90,6 @@ async def _feed_worker(cfg, symbols, queue, worker_id):
 
 
 async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
-    """Scan the full Spot triangle universe using sharded combined streams."""
     books = {}
     dirty = set()
     by_symbol = {}
@@ -122,47 +118,36 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
             data = await queue.get()
             symbol = data["s"]
             bids = [(p, q) for p, q in data.get("b", [])[:cfg.depth_levels] if Decimal(str(p)) > 0 and Decimal(str(q)) > 0]
-            asks = [(p, q) for p, q in data.get("a", [])[:cfg.depth_levels] if Decimal(str(p)) > 0 and Decimal(str(q)) > 0]
+            asks = [(p, q) for p, q in data.get("a", [])[:cfg.depth_levels] if Decimal(str(q)) > 0 and Decimal(str(p)) > 0]
             if not bids or not asks:
                 continue
             books[symbol] = {"bids": bids, "asks": asks, "depth_ts": time.monotonic() * 1000}
             dirty.update(by_symbol.get(symbol, ()))
             now = time.monotonic() * 1000
-            candidates = list(dirty)
-            dirty.clear()
+            candidates = list(dirty); dirty.clear()
             with web_runner.LOCK:
                 web_runner.STATE["depth_updates"] += 1
                 web_runner.STATE["scans"] += len(candidates)
             if not analysis_allowed():
                 continue
-
             if now - last_balance_ms >= 1000:
                 try:
                     account = await asyncio.to_thread(client.account)
                     free_usdt = next((Decimal(str(x.get("free", "0"))) for x in account.get("balances", []) if x.get("asset") == "USDT"), Decimal("0"))
-                    last_balance_ms = now
-                    balance_ok = True
+                    last_balance_ms = now; balance_ok = True
                     with web_runner.LOCK:
                         web_runner.STATE["free_usdt"] = str(free_usdt)
                         web_runner.STATE["balance_refreshes"] += 1
                 except Exception as exc:
-                    balance_ok = False
-                    last_balance_ms = now
+                    balance_ok = False; last_balance_ms = now
                     web_runner.event("BALANCE_ERROR", f"balance refresh failed; trading paused until restored: {exc}")
             if not balance_ok:
                 continue
-
-            budget = web_runner.risk_budget(
-                free_usdt,
-                cfg.risk_pct,
-                cfg.max_notional_usdt,
-                Decimal(str(cfg.min_trade_notional_usdt)),
-            )
+            budget = web_runner.risk_budget(free_usdt, cfg.risk_pct, cfg.max_notional_usdt, Decimal(str(cfg.min_trade_notional_usdt)))
             if budget <= 0:
                 with web_runner.LOCK:
-                    web_runner.STATE["min_notional_blocks"] = web_runner.STATE.get("min_notional_blocks", 0) + 1
+                    web_runner.STATE["min_notional_blocks"] += 1
                 continue
-
             for idx in candidates:
                 triangle = triangles[idx]
                 if not all(s in books and now - books[s].get("depth_ts", 0) <= cfg.stale_ms for s in triangle.symbols):
@@ -174,21 +159,13 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                 if net_bps < Decimal(str(cfg.min_net_edge_bps)):
                     continue
                 with web_runner.LOCK:
-                    web_runner.STATE["opportunities"] += 1
-                    web_runner.STATE["last_opportunity"] = time.time()
+                    web_runner.STATE["opportunities"] += 1; web_runner.STATE["last_opportunity"] = time.time()
                 web_runner.event("OPPORTUNITY", f"net={net_bps:.3f} gross={gross_bps:.3f}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps))
                 now_ms = time.monotonic() * 1000
                 if not (cfg.live_trading and not cfg.dry_run) or not trading_allowed("spot") or now_ms - last_order_ms < cfg.cooldown_ms:
                     continue
-                if not web_runner.approved(
-                    net_bps,
-                    cfg.min_net_edge_bps,
-                    budget,
-                    cfg.max_notional_usdt,
-                    min_trade_notional=Decimal(str(cfg.min_trade_notional_usdt)),
-                ):
-                    with web_runner.LOCK:
-                        web_runner.STATE["risk_blocks"] += 1
+                if not web_runner.approved(net_bps, cfg.min_net_edge_bps, budget, cfg.max_notional_usdt, min_trade_notional=Decimal(str(cfg.min_trade_notional_usdt))):
+                    with web_runner.LOCK: web_runner.STATE["risk_blocks"] += 1
                     web_runner.event("RISK", "Trade blocked by risk/notional gate", path=path)
                     continue
                 last_order_ms = now_ms
@@ -199,24 +176,19 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                         raise RuntimeError("execution returned without a completed USDT cycle")
                     web_runner.LEDGER.record(path, budget, execution)
                     with web_runner.LOCK:
-                        web_runner.STATE["executions"] += 1
-                        web_runner.STATE["last_execution"] = time.time()
-                    web_runner._sync_ledger()
-                    failures = 0
+                        web_runner.STATE["executions"] += 1; web_runner.STATE["last_execution"] = time.time()
+                    web_runner._sync_ledger(); failures = 0
                     web_runner.event("FILLED", f"Triangle fully filled; realized={execution['realized_pnl_usdt']} USDT", path=path)
                 except Exception as exc:
                     failures += 1
                     with web_runner.LOCK:
-                        web_runner.STATE["execution_errors"] += 1
-                        web_runner.STATE["last_error"] = str(exc)
-                    if web_runner.LEDGER is not None:
-                        web_runner.LEDGER.record(path, budget, error=exc)
+                        web_runner.STATE["execution_errors"] += 1; web_runner.STATE["last_error"] = str(exc)
+                    if web_runner.LEDGER is not None: web_runner.LEDGER.record(path, budget, error=exc)
                     web_runner.event("ERROR", str(exc), path=path)
                     if failures >= 3:
                         raise RuntimeError("three consecutive execution failures; engine stopped for safety") from exc
     finally:
-        for task in workers:
-            task.cancel()
+        for task in workers: task.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
 
 
@@ -227,7 +199,6 @@ async def run():
 
 def main():
     asyncio.run(run())
-
 
 if __name__ == "__main__":
     main()
