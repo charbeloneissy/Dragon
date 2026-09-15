@@ -50,7 +50,6 @@ class BinanceClient:
                 raise self._credential_encoding_error("BINANCE_API_SECRET", self.secret) from exc
 
         if os.getenv("DRAGON_CRED_DIAGNOSTIC", "").strip().lower() in {"1", "true", "yes", "on"}:
-            # Never print credential contents. Only emit safe structural metadata.
             print(
                 "CREDENTIAL DIAGNOSTIC | "
                 f"key_present={bool(self.key)} key_len={len(self.key)} "
@@ -102,6 +101,10 @@ class BinanceClient:
         midpoint = (local_before + local_after) // 2
         self.time_offset_ms = int(server["serverTime"]) - midpoint
         return self.time_offset_ms
+
+    def ticker_24hr(self):
+        """Return Binance 24h ticker statistics for one-time universe ranking."""
+        return self.public("/api/v3/ticker/24hr")
 
     def signed(self, method: str, path: str, params=None):
         if not self.key or not self.secret:
