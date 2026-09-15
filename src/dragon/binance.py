@@ -19,6 +19,7 @@ class BinanceClient:
         self.base = api_base.rstrip("/")
         self.key = api_key.strip()
         self.secret = api_secret.strip()
+        self.time_offset_ms = 0
         self.http = httpx.Client(
             timeout=timeout,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
@@ -37,11 +38,19 @@ class BinanceClient:
         except (httpx.HTTPError, ValueError) as exc:
             raise BinanceError(f"public request failed: {exc}") from exc
 
+    def sync_time(self):
+        local_before = int(time.time() * 1000)
+        server = self.public("/api/v3/time")
+        local_after = int(time.time() * 1000)
+        midpoint = (local_before + local_after) // 2
+        self.time_offset_ms = int(server["serverTime"]) - midpoint
+        return self.time_offset_ms
+
     def signed(self, method: str, path: str, params=None):
         if not self.key or not self.secret:
             raise BinanceError("Binance credentials missing")
         p = {k: v for k, v in (params or {}).items() if v is not None}
-        p["timestamp"] = int(time.time() * 1000)
+        p["timestamp"] = int(time.time() * 1000) + self.time_offset_ms
         p.setdefault("recvWindow", 5000)
         query = urlencode(p, doseq=True)
         sig = hmac.new(self.secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
