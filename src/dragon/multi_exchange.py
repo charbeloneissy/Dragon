@@ -20,8 +20,6 @@ AAVEUSDT,PEPEUSDT,SHIBUSDT,RENDERUSDT,FETUSDT,TAOUSDT,ENAUSDT,WIFUSDT,
 JUPUSDT,STXUSDT,IMXUSDT,MKRUSDT,RUNEUSDT,GRTUSDT,ALGOUSDT,XLMUSDT,
 VETUSDT,EOSUSDT,XTZUSDT,THETAUSDT,CRVUSDT,LDOUSDT""".replace("\n", "")
 
-# Conservative default taker-fee assumptions for discovery. Override in Render
-# once the actual account fee tiers are known.
 DEFAULT_FEES_BPS = {"BYBIT": 10.0, "OKX": 10.0, "COINBASE": 40.0, "BINANCE": 10.0}
 
 
@@ -64,9 +62,10 @@ class MultiExchangeFeeds:
         self._tasks: list[asyncio.Task] = []
         self.symbols = _symbols()
         self.enabled = os.getenv("CROSS_EXCHANGE_ENABLED", "true").lower() == "true"
-        self.stale_ms = max(250, int(os.getenv("CROSS_STALE_MS", "1500")))
-        self.min_net_bps = float(os.getenv("CROSS_MIN_NET_EDGE_BPS", "1.0"))
+        self.stale_ms = max(500, int(os.getenv("CROSS_STALE_MS", "3000")))
+        self.min_net_bps = float(os.getenv("CROSS_MIN_NET_EDGE_BPS", "0.10"))
         self.max_notional = max(1.0, float(os.getenv("CROSS_MAX_NOTIONAL_USDT", "25")))
+        self.min_display_notional = max(0.0, float(os.getenv("CROSS_MIN_DISPLAY_NOTIONAL_USDT", "0.01")))
 
     def _update(self, venue: str, symbol: str, bid: float, ask: float, bid_qty=0.0, ask_qty=0.0):
         symbol = _normalize_usd_symbol(symbol)
@@ -95,25 +94,32 @@ class MultiExchangeFeeds:
             buy_v, buy_q = min(fresh, key=lambda x: x[1]["ask"])
             sell_v, sell_q = max(fresh, key=lambda x: x[1]["bid"])
             if buy_v == sell_v:
-                return
+                # Try the best distinct venue pair instead of allowing the
+                # cheapest quote to suppress a valid second-best cross.
+                pairs = [
+                    (b, q1, s, q2) for b, q1 in fresh for s, q2 in fresh
+                    if b != s
+                ]
+                if not pairs:
+                    return
+                buy_v, buy_q, sell_v, sell_q = min(
+                    pairs, key=lambda x: x[3]["bid"] / x[1]["ask"]
+                )
+                buy_v, buy_q, sell_v, sell_q = max(
+                    pairs, key=lambda x: x[3]["bid"] / x[1]["ask"]
+                )
 
-            # Size is bounded by both displayed top-of-book quantities and the
-            # configured cap. Zero quantities are treated as non-executable.
             buy_qty = max(0.0, buy_q.get("ask_qty", 0.0))
             sell_qty = max(0.0, sell_q.get("bid_qty", 0.0))
             size_base = min(buy_qty, sell_qty, self.max_notional / buy_q["ask"])
-            if size_base <= 0:
-                return
-
-            buy_notional = size_base * buy_q["ask"]
-            sell_notional = size_base * sell_q["bid"]
             gross_bps = (sell_q["bid"] / buy_q["ask"] - 1.0) * 10000
-            # Both legs pay taker fees. No transfer, withdrawal, latency, or
-            # inventory benefit is assumed, so those remain execution risks.
             fee_bps = _fee_bps(buy_v) + _fee_bps(sell_v)
             net_bps = gross_bps - fee_bps
-            net_pnl = buy_notional * (net_bps / 10000.0)
             age_ms = max((now - buy_q["ts"]) * 1000, (now - sell_q["ts"]) * 1000)
+            buy_notional = max(0.0, size_base * buy_q["ask"])
+            sell_notional = max(0.0, size_base * sell_q["bid"])
+            net_pnl = buy_notional * (net_bps / 10000.0)
+            executable = size_base > 0 and buy_notional >= self.min_display_notional and net_bps >= self.min_net_bps
 
             rows = [x for x in self.state.get("cross_exchange_opportunities", []) if x.get("symbol") != symbol]
             rows.append({
@@ -123,8 +129,9 @@ class MultiExchangeFeeds:
                 "estimated_net_pnl_usdt": round(net_pnl, 6),
                 "buy_ask": buy_q["ask"], "sell_bid": sell_q["bid"],
                 "buy_qty": buy_qty, "sell_qty": sell_qty,
-                "age_ms": round(age_ms, 1), "executable_bbo": net_bps >= self.min_net_bps,
-                "execution_ready": False, "ts": now,
+                "age_ms": round(age_ms, 1), "executable_bbo": executable,
+                "execution_ready": False, "gate": "PASS" if executable else "EDGE_OR_LIQUIDITY",
+                "ts": now,
             })
             rows.sort(key=lambda x: x["net_bps"], reverse=True)
             self.state["cross_exchange_opportunities"] = rows[:20]
@@ -133,6 +140,8 @@ class MultiExchangeFeeds:
                 "market_data_ready": True,
                 "execution_ready": False,
                 "reason": "External order adapters and authenticated two-leg fill coordination are not enabled",
+                "min_net_bps": self.min_net_bps,
+                "stale_ms": self.stale_ms,
                 "last_candidate": rows[0] if rows else None,
             }
             if net_bps >= self.min_net_bps:
@@ -184,10 +193,7 @@ class MultiExchangeFeeds:
                 delay = min(60.0, delay * 2)
 
     def _bybit_messages(self):
-        return [
-            {"op": "subscribe", "args": [f"orderbook.1.{s}" for s in self.symbols[i:i + 10]]}
-            for i in range(0, len(self.symbols), 10)
-        ]
+        return [{"op": "subscribe", "args": [f"orderbook.1.{s}" for s in self.symbols[i:i + 10]]} for i in range(0, len(self.symbols), 10)]
 
     def _bybit_parser(self, msg):
         if msg.get("topic", "").startswith("orderbook."):
@@ -198,8 +204,7 @@ class MultiExchangeFeeds:
                 yield s.upper(), float(b[0][0]), float(a[0][0]), float(b[0][1]), float(a[0][1])
 
     def _okx_messages(self):
-        args = [{"channel": "bbo-tbt", "instId": _okx_id(s)} for s in self.symbols]
-        return [{"op": "subscribe", "args": args}]
+        return [{"op": "subscribe", "args": [{"channel": "bbo-tbt", "instId": _okx_id(s)} for s in self.symbols]}]
 
     def _okx_parser(self, msg):
         if msg.get("arg", {}).get("channel") == "bbo-tbt":
