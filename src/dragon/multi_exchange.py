@@ -46,7 +46,10 @@ class MultiExchangeFeeds:
         self.lock = lock
         self.event = event
         env_symbols = [s.strip().upper() for s in os.getenv("CROSS_SYMBOLS", "").split(",") if s.strip()]
-        self.symbols = env_symbols or symbols or DEFAULT_SYMBOLS
+        # The external scanner follows Dragon's exact universe. Limit it to the
+        # first 1000 live symbols so every external venue has the same bounded set.
+        source_symbols = env_symbols or symbols or DEFAULT_SYMBOLS
+        self.symbols = list(dict.fromkeys(source_symbols))[:1000]
         self.external_feeds = state.setdefault("external_feeds", {})
         self.cross_exchange_opportunities = state.setdefault("cross_exchange_opportunities", [])
         self._books = {v: {} for v in VENUES}
@@ -186,7 +189,7 @@ class MultiExchangeFeeds:
                 yield s.upper(), float(b[0][0]), float(a[0][0]), float(b[0][1]), float(a[0][1])
 
     def _okx_messages(self):
-        return [{"op": "subscribe", "args": [{"channel": "bbo-tbt", "instId": _okx_id(s)} for s in self.symbols]}]
+        return [{"op": "subscribe", "args": [{"channel": "bbo-tbt", "instId": _okx_id(s)} for s in self.symbols[i:i + 100]]} for i in range(0, len(self.symbols), 100)]
 
     def _okx_parser(self, msg):
         if msg.get("arg", {}).get("channel") == "bbo-tbt":
@@ -198,9 +201,9 @@ class MultiExchangeFeeds:
 
     def _coinbase_messages(self):
         return [
-            {"type": "subscribe", "channel": "level2", "product_ids": [_coinbase_id(s) for s in self.symbols]},
-            {"type": "subscribe", "channel": "heartbeats"},
-        ]
+            {"type": "subscribe", "channel": "level2", "product_ids": [_coinbase_id(s) for s in self.symbols[i:i + 100]]}
+            for i in range(0, len(self.symbols), 100)
+        ] + [{"type": "subscribe", "channel": "heartbeats"}]
 
     def _coinbase_parser(self, msg):
         if msg.get("channel") != "l2_data":
