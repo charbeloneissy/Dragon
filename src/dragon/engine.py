@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 
 def main():
@@ -8,6 +9,7 @@ def main():
     from src.dragon.futures_runner import run as run_futures
     from src.dragon.stream_transport import install as install_stream_transport
     import websockets
+    import web_runner
 
     install(dragon_main)
     install_stream_transport(dragon_main)
@@ -40,8 +42,36 @@ def main():
 
     dragon_main.Handler.do_GET = dashboard_root
 
+    async def run_futures_resilient():
+        # Futures is an optional supervisor. It must never be allowed to bring
+        # down the single Dragon web/Spot process when Binance returns 418/429
+        # or another transient Futures-side failure.
+        while True:
+            try:
+                await run_futures()
+                # A normal return is unexpected for the enabled supervisor, so
+                # keep the process alive and retry rather than ending gather().
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                message = str(exc)
+                match = re.search(r"backing off\s+([0-9.]+)s", message, re.IGNORECASE)
+                wait = float(match.group(1)) if match else 30.0
+                wait = max(5.0, wait)
+                try:
+                    with web_runner.LOCK:
+                        web_runner.STATE["futures_errors"] += 1
+                        web_runner.STATE["futures_last_error"] = message
+                    web_runner.event("FUTURES_SUPERVISOR", f"Futures paused: {message}; retry_in={wait:.0f}s")
+                except Exception:
+                    pass
+                await asyncio.sleep(wait)
+
     async def supervisor():
-        await asyncio.gather(dragon_main.run(), run_futures())
+        # Keep exactly one Dragon process. Futures failures are isolated so the
+        # Spot engine and dashboard remain available while Futures backs off.
+        await asyncio.gather(dragon_main.run(), run_futures_resilient())
 
     asyncio.run(supervisor())
 
