@@ -1,4 +1,4 @@
-from __future__
+from __future__ import annotations
 
 import asyncio
 import json
@@ -172,7 +172,6 @@ class MultiExchangeFeeds:
                         await asyncio.sleep(WS_SUBSCRIBE_DELAY)
                     self._emit(f"EXT_WS | {venue} connection-{connection_no} connected")
                     delay = WS_BACKOFF_MIN
-                    last_data = time.monotonic()
                     while True:
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=WS_STALE_SECONDS)
@@ -180,12 +179,8 @@ class MultiExchangeFeeds:
                                 raise ConnectionError("websocket closed")
                             msg = json.loads(raw)
                             self._record_control(venue, msg)
-                            got = False
                             for item in parsers[venue](msg) or ():
                                 self._record_feed(venue, *item)
-                                got = True
-                            if got:
-                                last_data = time.monotonic()
                         except asyncio.TimeoutError:
                             raise ConnectionError(f"stale feed > {WS_STALE_SECONDS:.0f}s")
             except asyncio.CancelledError:
@@ -236,7 +231,6 @@ class MultiExchangeFeeds:
         rows.sort(key=lambda x: x["net_edge_bps"], reverse=True)
         elapsed = (time.monotonic() - start) * 1000
         self._calc_count += 1
-        self._last_calc_mono = time.monotonic()
         with self.lock:
             ext = self.state.setdefault("external", {})
             ext["opportunities"] = rows[:50]
