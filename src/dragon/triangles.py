@@ -10,7 +10,12 @@ class Triangle:
 
 
 def build_triangles(exchange_info: dict, max_triangles: int = 5000):
-    """Build every available USDT triangle direction up to the configured cap."""
+    """Build every available USDT triangle direction.
+
+    max_triangles <= 0 means no application-level cap. Binance/exchange
+    stream limits are handled by the transport layer rather than silently
+    deleting candidates from the opportunity graph.
+    """
     markets = {}
     for s in exchange_info.get("symbols", []):
         if s.get("status") != "TRADING":
@@ -20,6 +25,7 @@ def build_triangles(exchange_info: dict, max_triangles: int = 5000):
     usdt_assets = sorted({base for base, quote in markets if quote == "USDT"})
     out = []
     seen = set()
+    unlimited = max_triangles <= 0
     for a, b in combinations(usdt_assets, 2):
         a_usdt = markets.get((a, "USDT"))
         b_usdt = markets.get((b, "USDT"))
@@ -37,7 +43,7 @@ def build_triangles(exchange_info: dict, max_triangles: int = 5000):
                 continue
             seen.add(tri.symbols)
             out.append(tri)
-            if len(out) >= max_triangles:
+            if not unlimited and len(out) >= max_triangles:
                 return out
     return out
 
