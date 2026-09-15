@@ -96,7 +96,9 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
     shards = [symbols[i:i + WS_SHARD_SIZE] for i in range(0, len(symbols), WS_SHARD_SIZE)]; queue = asyncio.Queue(maxsize=20000)
     workers = [asyncio.create_task(_feed_worker(cfg, shard, queue, i + 1)) for i, shard in enumerate(shards)]
     workers.append(asyncio.create_task(_rest_book_ticker_worker(client, symbols, queue)))
-    external = MultiExchangeFeeds(web_runner.STATE, web_runner.LOCK, web_runner.event)
+    # Use the exact same live dynamic universe for the external venues.
+    # CROSS_SYMBOLS can still intentionally override this for diagnostics.
+    external = MultiExchangeFeeds(web_runner.STATE, web_runner.LOCK, web_runner.event, symbols=symbols)
     external_task = asyncio.create_task(external.run())
     with web_runner.LOCK:
         web_runner.STATE["ws_connected"] = bool(shards); web_runner.STATE["status"] = "running" if workers else "degraded"
@@ -226,15 +228,6 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                 web_runner.STATE["universe_cycle_ms"] = round((time.monotonic() - cycle_start) * 1000, 2)
                 web_runner.STATE["universe_selected"] = min(cycle_ready, max_entries)
     finally:
-        external_task.cancel(); await asyncio.gather(external_task, return_exceptions=True)
+        external_task.cancel()
         for task in workers: task.cancel()
-        await asyncio.gather(*workers, return_exceptions=True)
-
-
-async def run():
-    web_runner.stream_loop = full_universe_stream_loop
-    await web_runner.run()
-
-
-def main(): asyncio.run(run())
-if __name__ == "__main__": main()
+        await asyncio.gather(external_task, *workers, return_exceptions=True)
