@@ -12,11 +12,11 @@ import websockets
 
 VENUES = ("BYBIT", "OKX", "COINBASE")
 DEFAULT_SYMBOLS = [
-    "BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","AVAXUSDT","LINKUSDT","DOTUSDT",
-    "TRXUSDT","LTCUSDT","BCHUSDT","UNIUSDT","NEARUSDT","ATOMUSDT","APTUSDT","ARBUSDT","OPUSDT","FILUSDT",
-    "ETCUSDT","ICPUSDT","INJUSDT","SUIUSDT","SEIUSDT","TONUSDT","HBARUSDT","AAVEUSDT","PEPEUSDT","SHIBUSDT",
-    "RENDERUSDT","FETUSDT","TAOUSDT","ENAUSDT","WIFUSDT","JUPUSDT","STXUSDT","IMXUSDT","MKRUSDT","RUNEUSDT",
-    "GRTUSDT","ALGOUSDT","XLMUSDT","VETUSDT","EOSUSDT","XTZUSDT","THETAUSDT","CRVUSDT","LDOUSDT",
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
+    "TRXUSDT", "LTCUSDT", "BCHUSDT", "UNIUSDT", "NEARUSDT", "ATOMUSDT", "APTUSDT", "ARBUSDT", "OPUSDT", "FILUSDT",
+    "ETCUSDT", "ICPUSDT", "INJUSDT", "SUIUSDT", "SEIUSDT", "TONUSDT", "HBARUSDT", "AAVEUSDT", "PEPEUSDT", "SHIBUSDT",
+    "RENDERUSDT", "FETUSDT", "TAOUSDT", "ENAUSDT", "WIFUSDT", "JUPUSDT", "STXUSDT", "IMXUSDT", "MKRUSDT", "RUNEUSDT",
+    "GRTUSDT", "ALGOUSDT", "XLMUSDT", "VETUSDT", "EOSUSDT", "XTZUSDT", "THETAUSDT", "CRVUSDT", "LDOUSDT",
 ]
 
 WS_BACKOFF_MIN = 1.0
@@ -29,7 +29,7 @@ WS_CLOSE_TIMEOUT = float(os.getenv("CROSS_WS_CLOSE_TIMEOUT", "5"))
 WS_MAX_QUEUE = int(os.getenv("CROSS_WS_MAX_QUEUE", "4096"))
 WS_MAX_SIZE = int(os.getenv("CROSS_WS_MAX_SIZE", str(2**24)))
 WS_SYMBOLS_PER_CONNECTION = max(50, int(os.getenv("CROSS_WS_SYMBOLS_PER_CONNECTION", "250")))
-WS_SUBSCRIBE_DELAY = max(0.0, float(os.getenv("CROSS_WS_SUBSCRIBE_DELAY", "0.05")))
+WS_SUBSCRIBE_DELAY = max(0.0, float(os.getenv("CROSS_WS_SUBSCRIBE_DELAY", "0.10")))
 WS_APP_HEARTBEAT_SECONDS = max(5.0, float(os.getenv("CROSS_WS_APP_HEARTBEAT_SECONDS", "20")))
 
 
@@ -72,7 +72,10 @@ class MultiExchangeFeeds:
         self._last_calc_mono = 0.0
         self._tasks = []
 
-    def _record_feed(self, venue: str, symbol: str, bid: float, ask: float, bid_qty: float, ask_qty: float):
+    def _feed(self, venue):
+        return self.external_feeds.setdefault(venue, {})
+
+    def _record_feed(self, venue, symbol, bid, ask, bid_qty, ask_qty):
         now = time.time()
         mono = time.monotonic()
         try:
@@ -84,11 +87,9 @@ class MultiExchangeFeeds:
         self._books[venue][symbol] = {"bid": bid, "ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty, "ts": now, "mono": mono}
         times = self._update_times[venue]
         times.append(mono)
-        window_start = mono - 10.0
-        recent = [t for t in times if t >= window_start]
-        rate = len(recent) / 10.0
-        feed = self.external_feeds.setdefault(venue, {})
-        feed.update({"status": "connected", "last_update": now, "quote_age_ms": 0, "updates_per_sec": round(rate, 3)})
+        recent = [t for t in times if t >= mono - 10.0]
+        feed = self._feed(venue)
+        feed.update({"status": "connected", "last_update": now, "quote_age_ms": 0, "updates_per_sec": round(len(recent) / 10.0, 3)})
         feed["updates"] = int(feed.get("updates", 0)) + 1
         with self.lock:
             self.state["external_feed_updates"] = int(self.state.get("external_feed_updates", 0)) + 1
@@ -115,7 +116,7 @@ class MultiExchangeFeeds:
                 q = self._books[venue].get(symbol)
                 if not q:
                     continue
-                age = (now - q["ts"]) * 1000
+                age = (now - q["ts"]) * 1000.0
                 if age <= stale_ms:
                     quotes.append((venue, q, age))
                     max_age_ms = max(max_age_ms, age)
@@ -128,16 +129,14 @@ class MultiExchangeFeeds:
                     latency_bps = max(buy_age, sell_age) * latency_bps_per_ms
                     net_bps = gross_bps - fees_bps - slippage_bps - latency_bps
                     executable_notional = min(buy["ask"] * buy["ask_qty"], sell["bid"] * sell["bid_qty"])
-                    passed = net_bps >= min_edge_bps and executable_notional >= min_notional
                     rows.append({
                         "symbol": symbol, "buy_venue": buy_venue, "sell_venue": sell_venue,
                         "gross_bps": round(gross_bps, 4), "fees_bps": round(fees_bps, 4),
                         "slippage_bps": round(slippage_bps, 4), "latency_bps": round(latency_bps, 4), "net_bps": round(net_bps, 4),
-                        "buy_ask": buy["ask"], "sell_bid": sell["bid"],
-                        "buy_qty": buy["ask_qty"], "sell_qty": sell["bid_qty"],
+                        "buy_ask": buy["ask"], "sell_bid": sell["bid"], "buy_qty": buy["ask_qty"], "sell_qty": sell["bid_qty"],
                         "executable_notional_usdt": round(executable_notional, 8),
                         "buy_age_ms": round(buy_age, 1), "sell_age_ms": round(sell_age, 1),
-                        "gate": "PASS" if passed else "EDGE_OR_LIQUIDITY",
+                        "gate": "PASS" if net_bps >= min_edge_bps and executable_notional >= min_notional else "EDGE_OR_LIQUIDITY",
                         "execution_ready": False,
                         "execution_reason": "scanner-only: external two-leg execution disabled",
                     })
@@ -145,7 +144,6 @@ class MultiExchangeFeeds:
         calc_ms = (time.monotonic() - calc_start) * 1000.0
         self._calc_count += 1
         elapsed = max(1.0, time.monotonic() - self._calc_started_mono)
-        calc_rate = self._calc_count / elapsed
         with self.lock:
             self.state["cross_exchange_opportunities"] = rows[:50]
             self.state["cross_exchange_last_update"] = now
@@ -154,21 +152,33 @@ class MultiExchangeFeeds:
             self.state["cross_exchange_symbols"] = len(self.symbols)
             self.state["cross_exchange_calc_samples"] = self._calc_count
             self.state["cross_exchange_last_net_bps"] = rows[0]["net_bps"] if rows else None
-            self.state["cross_exchange_calc_rate_per_sec"] = round(calc_rate, 3)
+            self.state["cross_exchange_calc_rate_per_sec"] = round(self._calc_count / elapsed, 3)
         if rows and rows[0]["gate"] == "PASS":
             top = rows[0]
             self.event("CROSS_OPPORTUNITY", f"{top['symbol']} {top['buy_venue']}->{top['sell_venue']} net_bps={top['net_bps']}")
 
-    async def _heartbeat(self, ws, venue: str):
+    async def _heartbeat(self, ws, venue):
         if venue == "COINBASE":
             return
         while True:
             await asyncio.sleep(WS_APP_HEARTBEAT_SECONDS)
             await ws.send(json.dumps({"op": "ping"}))
 
-    async def _run_venue(self, venue, url, messages, parser, connection_id: int):
+    def _record_control(self, venue, data, connection_id):
+        feed = self._feed(venue)
+        feed["control_messages"] = int(feed.get("control_messages", 0)) + 1
+        feed["last_control"] = data
+        if venue == "BYBIT" and data.get("op") == "subscribe":
+            if data.get("success") is True:
+                feed["subscription_acks"] = int(feed.get("subscription_acks", 0)) + 1
+            else:
+                feed["subscription_errors"] = int(feed.get("subscription_errors", 0)) + 1
+                feed["last_subscription_error"] = data.get("ret_msg") or data.get("retCode") or data
+                self.event("EXT_SUB_ERROR", f"BYBIT connection-{connection_id}: {feed['last_subscription_error']}")
+
+    async def _run_venue(self, venue, url, messages, parser, connection_id):
         delay = WS_BACKOFF_MIN
-        feed = self.external_feeds.setdefault(venue, {})
+        feed = self._feed(venue)
         feed.setdefault("connections", 0)
         feed.setdefault("connected_connections", 0)
         while True:
@@ -178,26 +188,19 @@ class MultiExchangeFeeds:
                 feed["status"] = "connecting"
                 feed["connection_id"] = connection_id
                 self.event("EXT_WS", f"{venue} connection-{connection_id} connecting")
-                async with websockets.connect(
-                    url,
-                    ping_interval=WS_PING_INTERVAL,
-                    ping_timeout=WS_PING_TIMEOUT,
-                    close_timeout=WS_CLOSE_TIMEOUT,
-                    open_timeout=WS_OPEN_TIMEOUT,
-                    max_size=WS_MAX_SIZE,
-                    max_queue=WS_MAX_QUEUE,
-                    compression=None,
-                ) as ws:
+                async with websockets.connect(url, ping_interval=WS_PING_INTERVAL, ping_timeout=WS_PING_TIMEOUT, close_timeout=WS_CLOSE_TIMEOUT, open_timeout=WS_OPEN_TIMEOUT, max_size=WS_MAX_SIZE, max_queue=WS_MAX_QUEUE, compression=None) as ws:
                     connected = True
                     feed["connections"] = max(int(feed.get("connections", 0)), connection_id)
                     feed["connected_connections"] = int(feed.get("connected_connections", 0)) + 1
                     feed["last_connect"] = time.time()
                     feed["last_error"] = None
                     feed["status"] = "connected"
+                    feed["subscriptions_sent"] = 0
                     self.event("EXT_WS", f"{venue} connection-{connection_id} connected")
                     delay = WS_BACKOFF_MIN
                     for msg in messages:
                         await ws.send(json.dumps(msg))
+                        feed["subscriptions_sent"] = int(feed.get("subscriptions_sent", 0)) + len(msg.get("args", msg.get("product_ids", [])))
                         if WS_SUBSCRIBE_DELAY:
                             await asyncio.sleep(WS_SUBSCRIBE_DELAY)
                     heartbeat_task = asyncio.create_task(self._heartbeat(ws, venue))
@@ -207,15 +210,20 @@ class MultiExchangeFeeds:
                             raw = await asyncio.wait_for(ws.recv(), timeout=WS_STALE_SECONDS)
                         except asyncio.TimeoutError as exc:
                             elapsed = time.monotonic() - last_message
-                            raise ConnectionError(f"{venue} connection-{connection_id} silent for {elapsed:.1f}s; forcing websocket reconnect") from exc
+                            raise ConnectionError(f"{venue} market data stale for {elapsed:.1f}s; forcing websocket reconnect") from exc
                         last_message = time.monotonic()
+                        data = json.loads(raw)
+                        self._record_control(venue, data, connection_id)
+                        parsed = False
                         try:
-                            data = json.loads(raw)
                             for symbol, bid, ask, bid_qty, ask_qty in parser(data) or ():
+                                parsed = True
                                 self._record_feed(venue, symbol, bid, ask, bid_qty, ask_qty)
                         except Exception as exc:
                             feed["parse_errors"] = int(feed.get("parse_errors", 0)) + 1
                             self.event("EXT_PARSE_ERROR", f"{venue} connection-{connection_id}: {exc}")
+                        if parsed:
+                            feed["last_data_message"] = time.time()
             except asyncio.CancelledError:
                 feed["status"] = "stopped"
                 raise
@@ -224,8 +232,7 @@ class MultiExchangeFeeds:
                 feed["last_error"] = str(exc)
                 feed["reconnects"] = int(feed.get("reconnects", 0)) + 1
                 self.event("EXT_WS_ERROR", f"{venue} connection-{connection_id}: {exc}")
-                jitter = random.uniform(0.0, min(5.0, delay * 0.25))
-                wait = min(WS_BACKOFF_MAX, delay + jitter)
+                wait = min(WS_BACKOFF_MAX, delay + random.uniform(0.0, min(5.0, delay * 0.25)))
                 feed["next_retry_at"] = time.time() + wait
                 await asyncio.sleep(wait)
                 delay = min(WS_BACKOFF_MAX, delay * 2.0)
@@ -237,15 +244,20 @@ class MultiExchangeFeeds:
                     feed["connected_connections"] = max(0, int(feed.get("connected_connections", 1)) - 1)
 
     def _bybit_messages(self, symbols):
-        return [{"op": "subscribe", "args": [f"orderbook.1.{s}" for s in symbols[i:i + 10]]} for i in range(0, len(symbols), 10)]
+        # Bybit Spot permits max 10 args per subscribe request. Keep the
+        # subscription batches explicit and include a known-good health probe.
+        ordered = list(dict.fromkeys(["BTCUSDT"] + list(symbols)))
+        return [{"op": "subscribe", "args": [f"orderbook.1.{s}" for s in ordered[i:i + 10]]} for i in range(0, len(ordered), 10)]
 
     def _bybit_parser(self, msg):
-        if msg.get("topic", "").startswith("orderbook."):
-            d = msg.get("data", {})
-            s = d.get("s")
-            b, a = d.get("b", []), d.get("a", [])
-            if s and b and a:
-                yield s.upper(), float(b[0][0]), float(a[0][0]), float(b[0][1]), float(a[0][1])
+        topic = msg.get("topic", "")
+        if not topic.startswith("orderbook.1."):
+            return
+        d = msg.get("data") or {}
+        s = d.get("s")
+        bids, asks = d.get("b") or [], d.get("a") or []
+        if s and bids and asks:
+            yield s.upper(), float(bids[0][0]), float(asks[0][0]), float(bids[0][1]), float(asks[0][1])
 
     def _okx_messages(self, symbols):
         return [{"op": "subscribe", "args": [{"channel": "bbo-tbt", "instId": _okx_id(s)} for s in symbols[i:i + 100]]} for i in range(0, len(symbols), 100)]
@@ -253,23 +265,18 @@ class MultiExchangeFeeds:
     def _okx_parser(self, msg):
         if msg.get("arg", {}).get("channel") == "bbo-tbt":
             for d in msg.get("data", []):
-                inst = d.get("instId", "")
                 bids, asks = d.get("bids"), d.get("asks")
                 if bids and asks:
-                    yield _normalize_usd_symbol(inst), float(bids[0][0]), float(asks[0][0]), float(bids[0][1]), float(asks[0][1])
+                    yield _normalize_usd_symbol(d.get("instId", "")), float(bids[0][0]), float(asks[0][0]), float(bids[0][1]), float(asks[0][1])
 
     def _coinbase_messages(self, symbols):
-        return [
-            {"type": "subscribe", "channel": "level2", "product_ids": [_coinbase_id(s) for s in symbols[i:i + 100]]}
-            for i in range(0, len(symbols), 100)
-        ] + [{"type": "subscribe", "channel": "heartbeats"}]
+        return [{"type": "subscribe", "channel": "level2", "product_ids": [_coinbase_id(s) for s in symbols[i:i + 100]]} for i in range(0, len(symbols), 100)] + [{"type": "subscribe", "channel": "heartbeats"}]
 
     def _coinbase_parser(self, msg):
         if msg.get("channel") != "l2_data":
             return
         for event in msg.get("events", []):
-            product_id = event.get("product_id", "")
-            symbol = _normalize_usd_symbol(product_id)
+            symbol = _normalize_usd_symbol(event.get("product_id", ""))
             book = self._coinbase_books.setdefault(symbol, {"bid": {}, "offer": {}})
             for update in event.get("updates", []):
                 side = "bid" if update.get("side") == "bid" else "offer"
@@ -282,8 +289,7 @@ class MultiExchangeFeeds:
                 else:
                     book[side][price] = qty
             if book["bid"] and book["offer"]:
-                bid = max(book["bid"])
-                ask = min(book["offer"])
+                bid, ask = max(book["bid"]), min(book["offer"])
                 if bid < ask:
                     yield symbol, bid, ask, book["bid"][bid], book["offer"][ask]
 
