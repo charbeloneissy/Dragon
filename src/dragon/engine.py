@@ -1,6 +1,9 @@
+import asyncio
+
+
 def main():
-    from web_runner import main as runner_main
-    runner_main()
+    from src.dragon.main import run
+    asyncio.run(run())
 
 
 if __name__ == "__main__":
