@@ -1,5 +1,6 @@
 import asyncio
 import json
+import random
 import time
 from decimal import Decimal
 
@@ -9,30 +10,89 @@ import web_runner
 from src.dragon.control import analysis_allowed, trading_allowed
 
 
+WS_BACKOFF_MIN = 1.0
+WS_BACKOFF_MAX = 60.0
+WS_STALE_SECONDS = 45.0
+
+
+def _ws_state(worker_id, **values):
+    with web_runner.LOCK:
+        for key, value in values.items():
+            web_runner.STATE[key] = value
+        web_runner.STATE.setdefault("ws_reconnects", 0)
+        web_runner.STATE.setdefault("ws_disconnects", 0)
+        web_runner.STATE.setdefault("ws_last_disconnect", None)
+        web_runner.STATE.setdefault("ws_next_retry_at", None)
+        web_runner.STATE.setdefault("ws_shard_status", {})
+        status = dict(web_runner.STATE["ws_shard_status"])
+        status[str(worker_id)] = values.get("status", status.get(str(worker_id), "unknown"))
+        web_runner.STATE["ws_shard_status"] = status
+
+
 async def _feed_worker(cfg, symbols, queue, worker_id):
-    """Maintain one combined Binance Spot stream for a symbol shard."""
+    """Maintain one combined Binance Spot stream with bounded automatic recovery."""
     streams = [f"{s.lower()}@depth{cfg.depth_levels}@100ms" for s in symbols]
     if not streams:
         return
     url = cfg.ws_base.replace("/ws", "/stream", 1) + "?streams=" + "/".join(streams)
-    delay = 1
+    delay = WS_BACKOFF_MIN
+    last_event = 0.0
+
     while True:
         try:
-            async with websockets.connect(url, ping_interval=20, ping_timeout=10, close_timeout=5, max_size=2**23) as ws:
+            _ws_state(worker_id, status="connecting", ws_next_retry_at=None)
+            async with websockets.connect(
+                url,
+                ping_interval=10,
+                ping_timeout=30,
+                close_timeout=5,
+                max_size=2**23,
+            ) as ws:
+                delay = WS_BACKOFF_MIN
+                last_event = time.monotonic()
+                _ws_state(worker_id, status="connected")
                 web_runner.event("WS", f"Market-data shard {worker_id} connected", symbols=len(symbols))
-                delay = 1
-                async for raw in ws:
+
+                while True:
                     try:
-                        msg = json.loads(raw); data = msg.get("data", msg)
+                        raw = await asyncio.wait_for(ws.recv(), timeout=WS_STALE_SECONDS)
+                    except asyncio.TimeoutError as exc:
+                        elapsed = time.monotonic() - last_event
+                        raise ConnectionError(f"market data stale for {elapsed:.1f}s; forcing websocket reconnect") from exc
+
+                    last_event = time.monotonic()
+                    try:
+                        msg = json.loads(raw)
+                        data = msg.get("data", msg)
                         if data.get("s") and data.get("b") is not None and data.get("a") is not None:
                             await queue.put(data)
                     except Exception as exc:
                         web_runner.event("WS_PARSE", str(exc), shard=worker_id)
+
         except asyncio.CancelledError:
+            _ws_state(worker_id, status="stopped", ws_next_retry_at=None)
             raise
         except Exception as exc:
-            web_runner.event("WS_ERROR", str(exc), shard=worker_id)
-            await asyncio.sleep(delay); delay = min(delay * 2, 15)
+            message = str(exc)
+            now = time.time()
+            _ws_state(
+                worker_id,
+                status="reconnecting",
+                ws_disconnects=web_runner.STATE.get("ws_disconnects", 0) + 1,
+                ws_last_disconnect=now,
+            )
+            web_runner.event("WS_ERROR", f"Shard {worker_id} disconnected: {message}", shard=worker_id)
+
+            # Exponential backoff plus jitter prevents a fleet of shards from
+            # reconnecting simultaneously and reduces pressure on Binance.
+            jitter = random.uniform(0.0, min(5.0, delay * 0.25))
+            wait = min(WS_BACKOFF_MAX, delay + jitter)
+            retry_at = time.time() + wait
+            _ws_state(worker_id, ws_next_retry_at=retry_at)
+            web_runner.event("WS", f"Shard {worker_id} reconnect scheduled in {wait:.1f}s", shard=worker_id, retry_in=wait)
+            await asyncio.sleep(wait)
+            delay = min(WS_BACKOFF_MAX, delay * 2.0)
+            _ws_state(worker_id, ws_reconnects=web_runner.STATE.get("ws_reconnects", 0) + 1)
 
 
 async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
@@ -47,6 +107,7 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
     with web_runner.LOCK:
         web_runner.STATE["ws_connected"] = True; web_runner.STATE["status"] = "running"
         web_runner.STATE["symbols"] = len(symbols); web_runner.STATE["triangles"] = len(triangles)
+        web_runner.STATE.setdefault("ws_reconnects", 0); web_runner.STATE.setdefault("ws_disconnects", 0)
     web_runner.event("UNIVERSE", f"Full Spot triangle universe active: {len(symbols)} symbols, {len(triangles)} triangles, {len(shards)} WS shards")
     last_order_ms = 0.0; last_balance_ms = 0.0; free_usdt = Decimal("0"); failures = 0
     try:
