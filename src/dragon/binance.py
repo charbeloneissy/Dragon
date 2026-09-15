@@ -20,6 +20,16 @@ class BinanceClient:
         self.key = api_key.strip()
         self.secret = api_secret.strip()
         self.time_offset_ms = 0
+        if self.key:
+            try:
+                self.key.encode("ascii")
+            except UnicodeEncodeError as exc:
+                raise BinanceError("BINANCE_API_KEY contains non-ASCII characters; replace it with the raw Binance API key") from exc
+        if self.secret:
+            try:
+                self.secret.encode("ascii")
+            except UnicodeEncodeError as exc:
+                raise BinanceError("BINANCE_API_SECRET contains non-ASCII characters; replace it with the raw Binance API secret") from exc
         self.http = httpx.Client(
             timeout=timeout,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
@@ -34,7 +44,7 @@ class BinanceClient:
         try:
             if retry_after:
                 return min(15.0, max(0.5, float(retry_after)))
-        except ValueError:
+        except (ValueError, TypeError):
             pass
         return min(15.0, 1.0 * (2 ** attempt))
 
@@ -91,6 +101,8 @@ class BinanceClient:
                         continue
                     break
             elif method in {"POST", "PUT", "DELETE"}:
+                # Never blindly retry live writes. Binance can return 5XX with
+                # unknown execution status, so the caller must reconcile first.
                 r = self.http.request(method, self.base + path, content=wire, headers=headers)
             else:
                 raise BinanceError(f"unsupported signed HTTP method: {method}")
