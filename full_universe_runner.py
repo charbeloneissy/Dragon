@@ -185,18 +185,37 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                     balance_ok = False
                     last_balance_ms = now
                     web_runner.event("BALANCE_ERROR", f"balance refresh failed; trading paused until restored: {exc}")
-            if not balance_ok:
+            if not balance_ok or free_usdt <= 0:
                 continue
-            budget = web_runner.risk_budget(free_usdt, cfg.risk_pct, cfg.max_notional_usdt, Decimal(str(cfg.min_trade_notional_usdt)))
-            if budget <= 0:
+
+            # Scanning and trade authorization are deliberately separate. A small
+            # balance may be unable to fund the configured risk floor, but Dragon
+            # must still evaluate the full triangle universe and expose real
+            # opportunities on the dashboard without bypassing the live-trade gate.
+            evaluation_notional = min(free_usdt, Decimal(str(cfg.max_notional_usdt)))
+            trade_budget = web_runner.risk_budget(
+                free_usdt,
+                cfg.risk_pct,
+                cfg.max_notional_usdt,
+                Decimal(str(cfg.min_trade_notional_usdt)),
+            )
+            trade_budget_ok = trade_budget > 0
+            if not trade_budget_ok:
                 with web_runner.LOCK:
                     web_runner.STATE["min_notional_blocks"] += 1
-                continue
+
             for idx in candidates:
                 triangle = triangles[idx]
                 if not all(s in books and now - books[s].get("depth_ts", 0) <= cfg.stale_ms for s in triangle.symbols):
                     continue
-                result = web_runner.evaluate_triangle(triangle, books, cfg.fee_bps, cfg.max_slippage_bps, symbol_meta, budget)
+                result = web_runner.evaluate_triangle(
+                    triangle,
+                    books,
+                    cfg.fee_bps,
+                    cfg.max_slippage_bps,
+                    symbol_meta,
+                    evaluation_notional,
+                )
                 if not result:
                     continue
                 net_bps, gross_bps, path, first, second = result
@@ -205,22 +224,38 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                 with web_runner.LOCK:
                     web_runner.STATE["opportunities"] += 1
                     web_runner.STATE["last_opportunity"] = time.time()
-                web_runner.event("OPPORTUNITY", f"net={net_bps:.3f} gross={gross_bps:.3f}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps))
+                web_runner.event(
+                    "OPPORTUNITY",
+                    f"net={net_bps:.3f} gross={gross_bps:.3f}",
+                    path=path,
+                    net_bps=float(net_bps),
+                    gross_bps=float(gross_bps),
+                    evaluation_notional=str(evaluation_notional),
+                )
                 now_ms = time.monotonic() * 1000
+                if not trade_budget_ok:
+                    web_runner.event("RISK", "Opportunity found but live trade budget is below minimum notional", path=path, evaluation_notional=str(evaluation_notional))
+                    continue
                 if not (cfg.live_trading and not cfg.dry_run) or not trading_allowed("spot") or now_ms - last_order_ms < cfg.cooldown_ms:
                     continue
-                if not web_runner.approved(net_bps, cfg.min_net_edge_bps, budget, cfg.max_notional_usdt, min_trade_notional=Decimal(str(cfg.min_trade_notional_usdt))):
+                if not web_runner.approved(
+                    net_bps,
+                    cfg.min_net_edge_bps,
+                    trade_budget,
+                    cfg.max_notional_usdt,
+                    min_trade_notional=Decimal(str(cfg.min_trade_notional_usdt)),
+                ):
                     with web_runner.LOCK:
                         web_runner.STATE["risk_blocks"] += 1
                     web_runner.event("RISK", "Trade blocked by risk/notional gate", path=path)
                     continue
                 last_order_ms = now_ms
                 try:
-                    web_runner.event("LIVE", "Three-leg execution requested", path=path, net_bps=float(net_bps), budget=str(budget))
-                    execution = await asyncio.to_thread(web_runner.execute_triangle, client, path, "USDT", first, budget, filters, False)
+                    web_runner.event("LIVE", "Three-leg execution requested", path=path, net_bps=float(net_bps), budget=str(trade_budget))
+                    execution = await asyncio.to_thread(web_runner.execute_triangle, client, path, "USDT", first, trade_budget, filters, False)
                     if not execution.get("finished") or execution.get("final_asset") != "USDT":
                         raise RuntimeError("execution returned without a completed USDT cycle")
-                    web_runner.LEDGER.record(path, budget, execution)
+                    web_runner.LEDGER.record(path, trade_budget, execution)
                     with web_runner.LOCK:
                         web_runner.STATE["executions"] += 1
                         web_runner.STATE["last_execution"] = time.time()
@@ -233,7 +268,7 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                         web_runner.STATE["execution_errors"] += 1
                         web_runner.STATE["last_error"] = str(exc)
                     if web_runner.LEDGER is not None:
-                        web_runner.LEDGER.record(path, budget, error=exc)
+                        web_runner.LEDGER.record(path, trade_budget, error=exc)
                     web_runner.event("ERROR", str(exc), path=path)
                     if failures >= 3:
                         raise RuntimeError("three consecutive execution failures; engine stopped for safety") from exc
