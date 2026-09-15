@@ -19,9 +19,8 @@ def _net_received(resp: dict, side: str, base: str, quote: str) -> tuple[Decimal
     asset = base if side == "BUY" else quote
     received = base_qty if side == "BUY" else quote_qty
     for f in resp.get("fills", []):
-        commission = Decimal(str(f.get("commission", "0")))
         if f.get("commissionAsset") == asset:
-            received -= commission
+            received -= Decimal(str(f.get("commission", "0")))
     if received <= 0:
         raise ExecutionError(f"no positive net received amount for {base}/{quote} {side}")
     return received, asset
@@ -38,19 +37,15 @@ def execute_triangle(client: BinanceClient, path, first_asset: str, second_asset
         src = "USDT" if idx == 0 else legs[-1]["received_asset"]
         if src == quote:
             side = "BUY"
-            resp = client.signed("POST", "/api/v3/order", {
-                "symbol": symbol, "side": side, "type": "MARKET",
-                "quoteOrderQty": str(amount), "newOrderRespType": "FULL",
-            })
+            if amount <= 0:
+                raise ExecutionError(f"non-positive quote amount for {symbol}")
+            resp = client.signed("POST", "/api/v3/order", {"symbol": symbol, "side": side, "type": "MARKET", "quoteOrderQty": str(amount), "newOrderRespType": "FULL"})
         elif src == base:
             side = "SELL"
             qty = floor_step(amount, Decimal(str(meta["stepSize"])))
             if qty < Decimal(str(meta["minQty"])):
                 raise ExecutionError(f"quantity {qty} below minQty for {symbol}")
-            resp = client.signed("POST", "/api/v3/order", {
-                "symbol": symbol, "side": side, "type": "MARKET",
-                "quantity": format(qty, "f"), "newOrderRespType": "FULL",
-            })
+            resp = client.signed("POST", "/api/v3/order", {"symbol": symbol, "side": side, "type": "MARKET", "quantity": format(qty, "f"), "newOrderRespType": "FULL"})
         else:
             raise ExecutionError(f"path asset mismatch at {symbol}: source={src}")
         if resp.get("status") != "FILLED":
