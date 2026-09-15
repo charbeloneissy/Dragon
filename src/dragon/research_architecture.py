@@ -1,18 +1,15 @@
 """Pure quantitative research layer for Dragon.
 
-This module deliberately contains no order placement, balance mutation, or live
-execution. It turns synchronized market snapshots into measurable research
-features that can be replayed and evaluated before any execution policy is
-considered.
+No order placement or balance mutation occurs here. The module is suitable for
+market-data replay, paper trading, and quantitative diagnostics.
 """
 from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from decimal import Decimal
-from math import log, sqrt
+from math import log
 from statistics import median, pstdev
-from typing import Iterable
 
 D = Decimal
 BPS = D("10000")
@@ -22,8 +19,9 @@ BPS = D("10000")
 class LegMeasurement:
     symbol: str
     side: str
-    input_quote: D
-    output_base: D
+    input_amount: D
+    gross_output: D
+    net_output: D
     vwap: D
     slippage_bps: D
     fee_quote: D
@@ -100,33 +98,36 @@ def _consume(levels: list[tuple[D, D]], quantity: D) -> tuple[D, D]:
     return value / filled, filled
 
 
-def measure_leg(symbol: str, side: str, input_quote: D, book: dict, fee_bps: D) -> LegMeasurement:
-    if input_quote <= 0:
-        raise ValueError("input quote must be positive")
+def measure_leg(symbol: str, side: str, input_amount: D, book: dict, fee_bps: D) -> LegMeasurement:
+    if input_amount <= 0:
+        raise ValueError("input amount must be positive")
     levels = _book(book, side)
     if not levels:
         raise ValueError("empty order book")
     best = levels[0][0]
-    quantity = input_quote / best
-    vwap, _ = _consume(levels, quantity)
     if side == "buy":
-        output = input_quote / vwap
-        slip = max(D("0"), (vwap - best) / best * BPS)
-        fee = input_quote * fee_bps / BPS
+        base_qty = input_amount / best
+        vwap, _ = _consume(levels, base_qty)
+        gross_output = input_amount / vwap
+        fee_quote = input_amount * fee_bps / BPS
+        net_output = gross_output * (D("1") - fee_bps / BPS)
+    elif side == "sell":
+        vwap, _ = _consume(levels, input_amount)
+        gross_output = input_amount * vwap
+        fee_quote = gross_output * fee_bps / BPS
+        net_output = gross_output - fee_quote
     else:
-        output = quantity * vwap
-        slip = max(D("0"), (best - vwap) / best * BPS)
-        fee = output * fee_bps / BPS
-    impact = slip
-    return LegMeasurement(symbol, side, input_quote, output - fee / vwap if vwap else D("0"), vwap, slip, fee, impact)
+        raise ValueError("side must be buy or sell")
+    slip = max(D("0"), ((vwap - best) / best if side == "buy" else (best - vwap) / best) * BPS)
+    return LegMeasurement(symbol, side, input_amount, gross_output, net_output, vwap, slip, fee_quote, slip)
 
 
 def measure_triangle(path: tuple[str, ...], symbols: tuple[str, ...], assets: tuple[str, ...], books: dict[str, dict], symbol_meta: dict[str, tuple[str, str]], starting_usdt: D, fee_bps: D) -> TriangleMeasurement:
     if starting_usdt <= 0 or len(symbols) != 3 or len(assets) != 3:
         raise ValueError("triangle inputs are invalid")
     current = starting_usdt
-    legs: list[LegMeasurement] = []
     gross_current = starting_usdt
+    legs: list[LegMeasurement] = []
     for i, symbol in enumerate(symbols):
         src, dst = assets[i], assets[(i + 1) % 3]
         base, quote = symbol_meta[symbol]
@@ -138,16 +139,14 @@ def measure_triangle(path: tuple[str, ...], symbols: tuple[str, ...], assets: tu
             raise ValueError("triangle leg does not match symbol metadata")
         leg = measure_leg(symbol, side, current, books[symbol], fee_bps)
         legs.append(leg)
-        current = leg.output_base
-        gross_leg = leg.output_base + leg.fee_quote / leg.vwap
-        gross_current = gross_current * (gross_leg / (leg.input_quote or D("1")))
+        gross_current = gross_current * (leg.gross_output / leg.input_amount)
+        current = leg.net_output
     net_pnl = current - starting_usdt
     gross_pnl = gross_current - starting_usdt
-    gross_edge = gross_pnl / starting_usdt * BPS
     fees = sum((x.fee_quote for x in legs), D("0"))
     slippage = sum((x.slippage_bps for x in legs), D("0"))
     impact = max((x.impact_bps for x in legs), default=D("0"))
-    return TriangleMeasurement(path, starting_usdt, gross_current, current, gross_pnl, net_pnl, gross_edge, fees / starting_usdt * BPS, slippage, impact, tuple(legs))
+    return TriangleMeasurement(path, starting_usdt, gross_current, current, gross_pnl, net_pnl, gross_pnl / starting_usdt * BPS, fees / starting_usdt * BPS, slippage, impact, tuple(legs))
 
 
 class TimeSeries:
@@ -169,17 +168,13 @@ def spread_stats(series: TimeSeries, window_seconds: float = 30.0) -> SpreadStat
     if not values:
         return SpreadStats(0, D("0"), D("0"), D("0"), D("0"), D("0"), D("0"))
     avg = sum(values, D("0")) / D(len(values))
-    med = D(str(median(values)))
     sigma = D(str(pstdev([float(v) for v in values]))) if len(values) > 1 else D("0")
-    persistence = D(sum(1 for v in values if v > 0)) / D(len(values))
-    return SpreadStats(len(values), avg, med, min(values), max(values), sigma, persistence)
+    return SpreadStats(len(values), avg, D(str(median(values))), min(values), max(values), sigma, D(sum(v > 0 for v in values)) / D(len(values)))
 
 
 def volatility_stats(prices: TimeSeries) -> VolatilityStats:
     def vol(window: float) -> D:
         values = prices.window(window)
-        if len(values) < 2:
-            return D("0")
         returns = [log(float(values[i] / values[i - 1])) for i in range(1, len(values)) if values[i - 1] > 0 and values[i] > 0]
         return D(str(pstdev(returns))) if len(returns) > 1 else D("0")
     return VolatilityStats(len(prices.values), vol(1), vol(5), vol(15), vol(60), vol(300), vol(900))
@@ -220,7 +215,6 @@ def tier(score: D) -> str:
 
 @dataclass
 class OutcomeTracker:
-    """Empirical outcomes for paper/replay observations only."""
     outcomes: dict[str, deque[bool]] = field(default_factory=lambda: defaultdict(lambda: deque(maxlen=500)))
 
     def record(self, key: str, profitable: bool) -> None:
@@ -228,19 +222,11 @@ class OutcomeTracker:
 
     def probability(self, key: str) -> D:
         values = self.outcomes[key]
-        wins = sum(values)
-        return empirical_probability(wins, len(values) - wins)
+        return empirical_probability(sum(values), len(values) - sum(values))
 
     def count(self, key: str) -> int:
         return len(self.outcomes[key])
 
 
 def hard_gate_map(*, data_fresh: bool, synchronized: bool, sufficient_depth: bool, net_edge_positive: bool, expected_profit_positive: bool, risk_ok: bool) -> dict[str, bool]:
-    return {
-        "fresh_data": data_fresh,
-        "synchronized": synchronized,
-        "sufficient_depth": sufficient_depth,
-        "net_edge_positive": net_edge_positive,
-        "expected_profit_positive": expected_profit_positive,
-        "risk_ok": risk_ok,
-    }
+    return {"fresh_data": data_fresh, "synchronized": synchronized, "sufficient_depth": sufficient_depth, "net_edge_positive": net_edge_positive, "expected_profit_positive": expected_profit_positive, "risk_ok": risk_ok}
