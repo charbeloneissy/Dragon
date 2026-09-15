@@ -28,15 +28,31 @@ class BinanceClient:
     def close(self):
         self.http.close()
 
-    def public(self, path: str, params=None):
+    @staticmethod
+    def _retry_delay(response, attempt: int) -> float:
+        retry_after = response.headers.get("Retry-After") if response is not None else None
         try:
-            r = self.http.get(self.base + path, params=params or {})
-            r.raise_for_status()
-            return r.json()
-        except httpx.HTTPStatusError as exc:
-            raise BinanceError(f"public request failed: {exc.response.text[:500]}", status_code=exc.response.status_code) from exc
-        except (httpx.HTTPError, ValueError) as exc:
-            raise BinanceError(f"public request failed: {exc}") from exc
+            if retry_after:
+                return min(15.0, max(0.5, float(retry_after)))
+        except ValueError:
+            pass
+        return min(15.0, 1.0 * (2 ** attempt))
+
+    def public(self, path: str, params=None):
+        for attempt in range(5):
+            try:
+                r = self.http.get(self.base + path, params=params or {})
+                if r.status_code in (418, 429) or 500 <= r.status_code < 600:
+                    if attempt < 4:
+                        time.sleep(self._retry_delay(r, attempt))
+                        continue
+                r.raise_for_status()
+                return r.json()
+            except httpx.HTTPStatusError as exc:
+                raise BinanceError(f"public request failed: {exc.response.text[:500]}", status_code=exc.response.status_code) from exc
+            except (httpx.HTTPError, ValueError) as exc:
+                raise BinanceError(f"public request failed: {exc}") from exc
+        raise BinanceError("public request retry limit exceeded")
 
     def sync_time(self):
         local_before = int(time.time() * 1000)
@@ -50,10 +66,8 @@ class BinanceClient:
         if not self.key or not self.secret:
             raise BinanceError("Binance credentials missing")
 
+        method = method.upper()
         p = {k: v for k, v in (params or {}).items() if v is not None}
-        # Binance requires the signature to be calculated over the exact
-        # parameter string that is transmitted. Build that string once and
-        # send it unchanged instead of letting the HTTP client re-encode it.
         p["timestamp"] = int(time.time() * 1000) + self.time_offset_ms
         p.setdefault("recvWindow", 5000)
         query = urlencode(p, doseq=True)
@@ -69,9 +83,13 @@ class BinanceClient:
         }
 
         try:
-            method = method.upper()
             if method == "GET":
-                r = self.http.get(self.base + path + "?" + wire, headers=headers)
+                for attempt in range(4):
+                    r = self.http.get(self.base + path + "?" + wire, headers=headers)
+                    if r.status_code in (418, 429) and attempt < 3:
+                        time.sleep(self._retry_delay(r, attempt))
+                        continue
+                    break
             elif method in {"POST", "PUT", "DELETE"}:
                 r = self.http.request(method, self.base + path, content=wire, headers=headers)
             else:
