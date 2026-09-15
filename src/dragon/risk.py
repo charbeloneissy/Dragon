@@ -23,17 +23,29 @@ def risk_budget(
     risk_pct: float,
     max_notional: float,
     min_trade_notional: Decimal | None = None,
+    *,
+    capital_allocation_pct: float | None = None,
+    safety_reserve_usdt: Decimal = Decimal("0"),
 ) -> Decimal:
-    """Return the risk-capped trade budget, or zero when it cannot meet the floor.
+    """Calculate executable arbitrage capital independently from directional risk.
 
-    A triangular arbitrage trade must not bypass the configured risk ceiling merely
-    to satisfy an exchange minimum notional. Returning zero makes that condition
-    explicit to the caller and prevents accidental oversized orders on small accounts.
+    Triangular arbitrage sizing is capital allocation, not a stop-loss risk
+    percentage. ``capital_allocation_pct`` therefore takes precedence when
+    supplied. The legacy ``risk_pct`` remains the fallback for compatibility.
     """
     if free_usdt <= 0:
         return Decimal("0")
-    pct = max(Decimal("0.0005"), min(Decimal(str(risk_pct)), Decimal("0.01")))
-    budget = min(free_usdt * pct, Decimal(str(max_notional)))
+    reserve = max(Decimal("0"), safety_reserve_usdt)
+    available = max(Decimal("0"), free_usdt - reserve)
+    if available <= 0:
+        return Decimal("0")
+    if capital_allocation_pct is None:
+        pct = max(Decimal("0"), min(Decimal(str(risk_pct)), Decimal("0.01")))
+    else:
+        pct = max(Decimal("0"), min(Decimal(str(capital_allocation_pct)), Decimal("1")))
+    if pct <= 0:
+        return Decimal("0")
+    budget = min(available * pct, Decimal(str(max_notional)))
     if min_trade_notional is not None and budget < min_trade_notional:
         return Decimal("0")
     return budget
