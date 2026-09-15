@@ -16,7 +16,7 @@ class Config:
     cooldown_ms: int = 1000
     max_triangles: int = 5000
     stale_ms: int = 750
-    poll_interval_seconds: float = 0.02
+    poll_interval_seconds: float = 0.05
     order_timeout_ms: int = 5000
     depth_levels: int = 20
     health_fail_open: bool = False
