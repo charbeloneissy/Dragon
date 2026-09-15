@@ -1,7 +1,7 @@
 """Public multi-exchange market-data feeds for cross-exchange opportunity discovery.
 
-DATA ONLY. Binance remains the execution venue. These public feeds provide
-independent order-book prices so Dragon can detect real cross-venue spreads.
+DATA ONLY. Binance remains the execution venue. External venues provide
+independent public order-book prices for cross-venue discovery and telemetry.
 """
 
 import asyncio
@@ -39,19 +39,20 @@ def _normalize_usd_symbol(symbol: str) -> str:
 
 
 class MultiExchangeFeeds:
-    """Resilient public Bybit/OKX/Coinbase order-book collectors."""
+    """Resilient public Bybit/OKX/Coinbase BBO collectors."""
 
     def __init__(self, state, lock, event):
         self.state = state
         self.lock = lock
         self.event = event
         self.books: dict[str, dict[str, dict[str, float]]] = defaultdict(dict)
+        self._coinbase_books: dict[str, dict[str, dict[float, float]]] = defaultdict(lambda: {"bid": {}, "offer": {}})
         self._tasks: list[asyncio.Task] = []
         self.symbols = _symbols()
 
     def _update(self, venue: str, symbol: str, bid: float, ask: float, bid_qty=0.0, ask_qty=0.0):
         symbol = _normalize_usd_symbol(symbol)
-        if bid <= 0 or ask <= 0:
+        if bid <= 0 or ask <= 0 or ask < bid:
             return
         now = time.time()
         self.books[venue][symbol] = {
@@ -157,13 +158,30 @@ class MultiExchangeFeeds:
             return
         for event in msg.get("events", []):
             product = event.get("product_id", "")
+            symbol = _normalize_usd_symbol(product)
+            book = self._coinbase_books[symbol]
             updates = event.get("updates", [])
-            bids = [u for u in updates if u.get("side") == "bid" and float(u.get("price_level", 0)) > 0]
-            asks = [u for u in updates if u.get("side") == "offer" and float(u.get("price_level", 0)) > 0]
-            if bids and asks:
-                b = max(bids, key=lambda x: float(x["price_level"]))
-                a = min(asks, key=lambda x: float(x["price_level"]))
-                yield _normalize_usd_symbol(product), float(b["price_level"]), float(a["price_level"]), float(b.get("new_quantity", 0)), float(a.get("new_quantity", 0))
+            for update in updates:
+                side = update.get("side")
+                if side not in ("bid", "offer"):
+                    continue
+                try:
+                    price = float(update.get("price_level", 0))
+                    qty = float(update.get("new_quantity", 0))
+                except (TypeError, ValueError):
+                    continue
+                if price <= 0:
+                    continue
+                if qty <= 0:
+                    book[side].pop(price, None)
+                else:
+                    book[side][price] = qty
+            if not book["bid"] or not book["offer"]:
+                continue
+            bid = max(book["bid"])
+            ask = min(book["offer"])
+            if ask > bid:
+                yield symbol, bid, ask, book["bid"][bid], book["offer"][ask]
 
     async def run(self):
         self._tasks = [
