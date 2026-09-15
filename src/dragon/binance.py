@@ -18,8 +18,8 @@ class BinanceError(RuntimeError):
 class BinanceClient:
     def __init__(self, api_base: str, api_key: str = "", api_secret: str = "", timeout: float = 5.0):
         self.base = api_base.rstrip("/")
-        self.key = api_key.strip()
-        self.secret = api_secret.strip()
+        self.key = self._normalize_credential(api_key)
+        self.secret = self._normalize_credential(api_secret)
         self.time_offset_ms = 0
         self._last_time_sync = 0.0
         self._time_sync_interval = float(os.getenv("BINANCE_TIME_SYNC_SECONDS", "30"))
@@ -30,6 +30,14 @@ class BinanceClient:
             timeout=timeout,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
+
+    @staticmethod
+    def _normalize_credential(value: str) -> str:
+        """Normalize Render/env-var pasted credentials without ever logging their values."""
+        value = (value or "").strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1].strip()
+        return value
 
     @staticmethod
     def _credential_encoding_error(name: str, value: str) -> BinanceError:
@@ -191,6 +199,10 @@ class BinanceClient:
 
     def account(self):
         return self.signed("GET", "/api/v3/account")
+
+    def api_restrictions(self):
+        """Return Binance API-key permissions for diagnostics and startup gating."""
+        return self.signed("GET", "/sapi/v1/account/apiRestrictions")
 
     def exchange_info(self):
         return self.public("/api/v3/exchangeInfo")
