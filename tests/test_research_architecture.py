@@ -12,6 +12,7 @@ from src.dragon.research_architecture import (
     tier,
     volatility_stats,
 )
+from src.dragon.engine_guard import EngineHealth, build_system_health, validate_quant_inputs
 
 
 def test_measure_leg_buy_uses_depth_and_fee():
@@ -67,3 +68,24 @@ def test_hard_gates_are_independent():
     gates = hard_gate_map(data_fresh=True, synchronized=False, sufficient_depth=True, net_edge_positive=True, expected_profit_positive=True, risk_ok=True)
     assert gates["fresh_data"] is True
     assert gates["synchronized"] is False
+
+
+def test_engine_guard_requires_all_enabled_engines_healthy():
+    health = build_system_health(
+        market=EngineHealth("market", True, True),
+        quant=EngineHealth("quant", True, True),
+        risk=EngineHealth("risk", True, False, "risk feed unavailable"),
+        telemetry=EngineHealth("telemetry", True, True),
+        research=EngineHealth("research", True, True),
+    )
+    assert health.healthy is False
+    assert health.degraded is True
+
+
+def test_quant_input_gates_are_independent():
+    gates = validate_quant_inputs(
+        net_edge_bps=Decimal("8"), expected_pnl_usdt=Decimal("0.01"),
+        liquidity_utilization=Decimal("0.20"), latency_penalty_bps=Decimal("1"),
+        max_liquidity_utilization=Decimal("0.25"), max_latency_penalty_bps=Decimal("5"),
+    )
+    assert all(gates.values())
