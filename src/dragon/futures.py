@@ -21,32 +21,38 @@ def _floor(value: Decimal, step: Decimal) -> Decimal:
 
 
 class FuturesClient:
-    """USDⓈ-M Futures client with rate-limit aware reads and non-retrying live writes."""
+    """USDⓈ-M Futures client with centralized rate limiting and safe backoff."""
     def __init__(self, api_base="https://fapi.binance.com", api_key="", api_secret="", timeout=5.0):
         self.base = api_base.rstrip("/")
         self.key = api_key.strip()
         self.secret = api_secret.strip()
         self.offset_ms = 0
-        self.http = httpx.Client(timeout=timeout, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5))
+        self.http = httpx.Client(timeout=timeout, limits=httpx.Limits(max_connections=4, max_keepalive_connections=2))
         self._next_allowed = 0.0
         self._backoff = 1.0
+        self._last_request = 0.0
+        self._min_interval = 0.25
 
     def close(self):
         self.http.close()
 
     def _throttle(self):
-        delay = self._next_allowed - time.monotonic()
-        if delay > 0:
-            time.sleep(min(delay, 300.0))
+        now = time.monotonic()
+        wait = max(self._next_allowed - now, self._min_interval - (now - self._last_request))
+        if wait > 0:
+            time.sleep(min(wait, 300.0))
+        self._last_request = time.monotonic()
 
     def _response_error(self, response, label):
         if response.status_code in (418, 429):
             retry = response.headers.get("Retry-After")
             try:
                 wait = max(float(retry), self._backoff) if retry else self._backoff
-            except ValueError:
+            except (TypeError, ValueError):
                 wait = self._backoff
-            self._next_allowed = time.monotonic() + min(wait, 86400.0)
+            # Respect Binance's server-provided ban/rate-limit delay. Never
+            # hammer the endpoint while a ban is active.
+            self._next_allowed = max(self._next_allowed, time.monotonic() + min(wait, 86400.0))
             self._backoff = min(max(self._backoff * 2.0, wait), 300.0)
             raise FuturesError(f"{label}: Binance rate limit HTTP {response.status_code}; backing off {wait:.1f}s")
         if response.status_code >= 400:
