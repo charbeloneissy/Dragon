@@ -52,7 +52,8 @@ class MultiExchangeFeeds:
         self._books = {v: {} for v in VENUES}
         self._coinbase_books = {s: {"bid": {}, "offer": {}} for s in self.symbols}
         self._update_times = {v: deque(maxlen=300) for v in VENUES}
-        self._calc_times = deque(maxlen=300)
+        self._calc_count = 0
+        self._calc_started_mono = time.monotonic()
         self._last_calc_mono = 0.0
         self._tasks = []
 
@@ -127,15 +128,16 @@ class MultiExchangeFeeds:
                     })
         rows.sort(key=lambda r: (r["net_bps"], r["executable_notional_usdt"]), reverse=True)
         calc_ms = (time.monotonic() - calc_start) * 1000.0
-        self._calc_times.append(calc_ms)
-        calc_rate = len(self._calc_times) / max(1.0, min(300.0, (self._calc_times[-1] - self._calc_times[0]) if len(self._calc_times) > 1 else 1.0))
+        self._calc_count += 1
+        elapsed = max(1.0, time.monotonic() - self._calc_started_mono)
+        calc_rate = self._calc_count / elapsed
         with self.lock:
             self.state["cross_exchange_opportunities"] = rows[:50]
             self.state["cross_exchange_last_update"] = now
             self.state["cross_exchange_calc_ms"] = round(calc_ms, 3)
             self.state["cross_exchange_max_quote_age_ms"] = round(max_age_ms, 1)
             self.state["cross_exchange_symbols"] = len(self.symbols)
-            self.state["cross_exchange_calc_samples"] = len(self._calc_times)
+            self.state["cross_exchange_calc_samples"] = self._calc_count
             self.state["cross_exchange_last_net_bps"] = rows[0]["net_bps"] if rows else None
             self.state["cross_exchange_calc_rate_per_sec"] = round(calc_rate, 3)
         if rows and rows[0]["gate"] == "PASS":
@@ -192,7 +194,7 @@ class MultiExchangeFeeds:
                 inst = d.get("instId", "")
                 bids, asks = d.get("bids"), d.get("asks")
                 if bids and asks:
-                    yield _normalize_usd_symbol(inst), float(bids[0][0]), float(bids[0][1]), float(bids[0][1]), float(asks[0][1])
+                    yield _normalize_usd_symbol(inst), float(bids[0][0]), float(asks[0][0]), float(bids[0][1]), float(asks[0][1])
 
     def _coinbase_messages(self):
         return [
