@@ -28,8 +28,10 @@ def _spot_filters(info):
         fs = {f["filterType"]: f for f in s.get("filters", [])}
         lot = fs.get("LOT_SIZE", {})
         market = fs.get("MARKET_LOT_SIZE", lot)
-        out[s["symbol"]] = {"step": Decimal(str(market.get("stepSize", lot.get("stepSize", "0.000001")))),
-                             "min": Decimal(str(market.get("minQty", lot.get("minQty", "0"))))}
+        out[s["symbol"]] = {
+            "step": Decimal(str(market.get("stepSize", lot.get("stepSize", "0.000001")))),
+            "min": Decimal(str(market.get("minQty", lot.get("minQty", "0")))),
+        }
     return out
 
 
@@ -40,8 +42,10 @@ def _futures_filters(info):
             continue
         fs = {f["filterType"]: f for f in s.get("filters", [])}
         lot = fs.get("LOT_SIZE", {})
-        out[s["symbol"]] = {"step": Decimal(str(lot.get("stepSize", "0.001"))),
-                             "min": Decimal(str(lot.get("minQty", "0"))))}
+        out[s["symbol"]] = {
+            "step": Decimal(str(lot.get("stepSize", "0.001"))),
+            "min": Decimal(str(lot.get("minQty", "0"))),
+        }
     return out
 
 
