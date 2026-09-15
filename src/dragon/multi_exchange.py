@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
 import time
 from collections import deque
 from typing import Callable
@@ -17,6 +18,16 @@ DEFAULT_SYMBOLS = [
     "RENDERUSDT","FETUSDT","TAOUSDT","ENAUSDT","WIFUSDT","JUPUSDT","STXUSDT","IMXUSDT","MKRUSDT","RUNEUSDT",
     "GRTUSDT","ALGOUSDT","XLMUSDT","VETUSDT","EOSUSDT","XTZUSDT","THETAUSDT","CRVUSDT","LDOUSDT",
 ]
+
+WS_BACKOFF_MIN = 1.0
+WS_BACKOFF_MAX = 60.0
+WS_STALE_SECONDS = float(os.getenv("CROSS_WS_STALE_SECONDS", "45"))
+WS_PING_INTERVAL = float(os.getenv("CROSS_WS_PING_INTERVAL", "15"))
+WS_PING_TIMEOUT = float(os.getenv("CROSS_WS_PING_TIMEOUT", "10"))
+WS_OPEN_TIMEOUT = float(os.getenv("CROSS_WS_OPEN_TIMEOUT", "15"))
+WS_CLOSE_TIMEOUT = float(os.getenv("CROSS_WS_CLOSE_TIMEOUT", "5"))
+WS_MAX_QUEUE = int(os.getenv("CROSS_WS_MAX_QUEUE", "4096"))
+WS_MAX_SIZE = int(os.getenv("CROSS_WS_MAX_SIZE", str(2**24)))
 
 
 def _okx_id(symbol: str) -> str:
@@ -46,8 +57,6 @@ class MultiExchangeFeeds:
         self.lock = lock
         self.event = event
         env_symbols = [s.strip().upper() for s in os.getenv("CROSS_SYMBOLS", "").split(",") if s.strip()]
-        # The external scanner follows Dragon's exact universe. Limit it to the
-        # first 1000 live symbols so every external venue has the same bounded set.
         source_symbols = env_symbols or symbols or DEFAULT_SYMBOLS
         self.symbols = list(dict.fromkeys(source_symbols))[:1000]
         self.external_feeds = state.setdefault("external_feeds", {})
@@ -148,25 +157,46 @@ class MultiExchangeFeeds:
             self.event("CROSS_OPPORTUNITY", f"{top['symbol']} {top['buy_venue']}->{top['sell_venue']} net_bps={top['net_bps']}")
 
     async def _run_venue(self, venue, url, messages, parser):
-        delay = 1.0
+        delay = WS_BACKOFF_MIN
         while True:
             try:
-                async with websockets.connect(url, ping_interval=20, ping_timeout=20, open_timeout=15, max_size=2**24) as ws:
-                    self.external_feeds.setdefault(venue, {})["status"] = "connected"
+                self.external_feeds.setdefault(venue, {})["status"] = "connecting"
+                self.event("EXT_WS", f"{venue} connecting")
+                async with websockets.connect(
+                    url,
+                    ping_interval=WS_PING_INTERVAL,
+                    ping_timeout=WS_PING_TIMEOUT,
+                    close_timeout=WS_CLOSE_TIMEOUT,
+                    open_timeout=WS_OPEN_TIMEOUT,
+                    max_size=WS_MAX_SIZE,
+                    max_queue=WS_MAX_QUEUE,
+                    compression=None,
+                ) as ws:
+                    feed = self.external_feeds.setdefault(venue, {})
+                    feed["status"] = "connected"
+                    feed["last_connect"] = time.time()
+                    feed["last_error"] = None
                     self.event("EXT_WS", f"{venue} connected")
-                    delay = 1.0
+                    delay = WS_BACKOFF_MIN
                     for msg in messages:
                         await ws.send(json.dumps(msg))
-                    async for raw in ws:
+                    last_data = time.monotonic()
+                    while True:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=WS_STALE_SECONDS)
+                        except asyncio.TimeoutError as exc:
+                            elapsed = time.monotonic() - last_data
+                            raise ConnectionError(f"{venue} market data stale for {elapsed:.1f}s; forcing websocket reconnect") from exc
+                        last_data = time.monotonic()
                         try:
                             data = json.loads(raw)
                             for symbol, bid, ask, bid_qty, ask_qty in parser(data) or ():
                                 self._record_feed(venue, symbol, bid, ask, bid_qty, ask_qty)
                         except Exception as exc:
-                            feed = self.external_feeds.setdefault(venue, {})
                             feed["parse_errors"] = int(feed.get("parse_errors", 0)) + 1
                             self.event("EXT_PARSE_ERROR", f"{venue}: {exc}")
             except asyncio.CancelledError:
+                self.external_feeds.setdefault(venue, {})["status"] = "stopped"
                 raise
             except Exception as exc:
                 feed = self.external_feeds.setdefault(venue, {})
@@ -174,8 +204,11 @@ class MultiExchangeFeeds:
                 feed["last_error"] = str(exc)
                 feed["reconnects"] = int(feed.get("reconnects", 0)) + 1
                 self.event("EXT_WS_ERROR", f"{venue}: {exc}")
-                await asyncio.sleep(delay)
-                delay = min(60.0, delay * 2)
+                jitter = random.uniform(0.0, min(5.0, delay * 0.25))
+                wait = min(WS_BACKOFF_MAX, delay + jitter)
+                feed["next_retry_at"] = time.time() + wait
+                await asyncio.sleep(wait)
+                delay = min(WS_BACKOFF_MAX, delay * 2.0)
 
     def _bybit_messages(self):
         return [{"op": "subscribe", "args": [f"orderbook.1.{s}" for s in self.symbols[i:i + 10]]} for i in range(0, len(self.symbols), 10)]
