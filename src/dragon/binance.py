@@ -21,6 +21,10 @@ class BinanceClient:
         self.key = api_key.strip()
         self.secret = api_secret.strip()
         self.time_offset_ms = 0
+        self._last_time_sync = 0.0
+        self._time_sync_interval = float(os.getenv("BINANCE_TIME_SYNC_SECONDS", "30"))
+        self.recv_window_ms = int(os.getenv("BINANCE_RECV_WINDOW_MS", "5000"))
+        self.recv_window_ms = max(1000, min(60000, self.recv_window_ms))
         self._validate_credentials()
         self.http = httpx.Client(
             timeout=timeout,
@@ -34,7 +38,7 @@ class BinanceClient:
         suffix = "" if len(bad) <= 8 else f" (+{len(bad) - 8} more)"
         return BinanceError(
             f"{name} contains non-ASCII characters; length={len(value)}, "
-            f"invalid_positions=[{positions}]{suffix}. Replace it with the raw Binance credential."
+            f"invalid_positions=[{positions}]. Replace it with the raw Binance credential."
         )
 
     def _validate_credentials(self):
@@ -53,17 +57,9 @@ class BinanceClient:
             print(
                 "CREDENTIAL DIAGNOSTIC | "
                 f"key_present={bool(self.key)} key_len={len(self.key)} "
-                f"secret_present={bool(self.secret)} secret_len={len(self.secret)} "
-                f"key_ascii={self._is_ascii(self.key)} secret_ascii={self._is_ascii(self.secret)}"
+                f"secret_present={bool(self.secret)} secret_len={len(self.secret)}",
+                flush=True,
             )
-
-    @staticmethod
-    def _is_ascii(value: str) -> bool:
-        try:
-            value.encode("ascii")
-            return True
-        except UnicodeEncodeError:
-            return False
 
     def close(self):
         self.http.close()
@@ -89,7 +85,10 @@ class BinanceClient:
                 r.raise_for_status()
                 return r.json()
             except httpx.HTTPStatusError as exc:
-                raise BinanceError(f"public request failed: {exc.response.text[:500]}", status_code=exc.response.status_code) from exc
+                raise BinanceError(
+                    f"public request failed: {exc.response.text[:500]}",
+                    status_code=exc.response.status_code,
+                ) from exc
             except (httpx.HTTPError, ValueError) as exc:
                 raise BinanceError(f"public request failed: {exc}") from exc
         raise BinanceError("public request retry limit exceeded")
@@ -100,10 +99,15 @@ class BinanceClient:
         local_after = int(time.time() * 1000)
         midpoint = (local_before + local_after) // 2
         self.time_offset_ms = int(server["serverTime"]) - midpoint
+        self._last_time_sync = time.monotonic()
+        print(f"DRAGON TIME | Binance clock offset={self.time_offset_ms}ms", flush=True)
         return self.time_offset_ms
 
+    def _ensure_time_sync(self):
+        if time.monotonic() - self._last_time_sync >= self._time_sync_interval:
+            self.sync_time()
+
     def ticker_24hr(self):
-        """Return Binance 24h ticker statistics for one-time universe ranking."""
         return self.public("/api/v3/ticker/24hr")
 
     def signed(self, method: str, path: str, params=None):
@@ -111,14 +115,13 @@ class BinanceClient:
             raise BinanceError("Binance credentials missing")
 
         method = method.upper()
+        self._ensure_time_sync()
         p = {k: v for k, v in (params or {}).items() if v is not None}
         p["timestamp"] = int(time.time() * 1000) + self.time_offset_ms
-        p.setdefault("recvWindow", 5000)
+        p["recvWindow"] = p.get("recvWindow", self.recv_window_ms)
         query = urlencode(p, doseq=True)
         signature = hmac.new(
-            self.secret.encode("ascii"),
-            query.encode("utf-8"),
-            hashlib.sha256,
+            self.secret.encode("ascii"), query.encode("utf-8"), hashlib.sha256
         ).hexdigest()
         wire = f"{query}&signature={signature}"
         headers = {
@@ -135,8 +138,6 @@ class BinanceClient:
                         continue
                     break
             elif method in {"POST", "PUT", "DELETE"}:
-                # Never blindly retry live writes. Binance can return 5XX with
-                # unknown execution status, so the caller must reconcile first.
                 r = self.http.request(method, self.base + path, content=wire, headers=headers)
             else:
                 raise BinanceError(f"unsupported signed HTTP method: {method}")
@@ -151,6 +152,35 @@ class BinanceClient:
                 message = payload.get("msg", r.text[:500])
             except ValueError:
                 message = r.text[:500]
+
+            # Binance -1021 means the host clock is outside recvWindow.
+            # Re-sync once and retry GET/user-data requests only. Never blindly
+            # retry live writes because execution status can be unknown.
+            if code == -1021 and method == "GET":
+                self.sync_time()
+                p["timestamp"] = int(time.time() * 1000) + self.time_offset_ms
+                p["recvWindow"] = self.recv_window_ms
+                query = urlencode(p, doseq=True)
+                signature = hmac.new(
+                    self.secret.encode("ascii"), query.encode("utf-8"), hashlib.sha256
+                ).hexdigest()
+                try:
+                    retry = self.http.get(
+                        self.base + path + "?" + query + "&signature=" + signature,
+                        headers=headers,
+                    )
+                    if retry.status_code < 400:
+                        return retry.json()
+                    try:
+                        payload = retry.json()
+                        code = payload.get("code")
+                        message = payload.get("msg", retry.text[:500])
+                    except ValueError:
+                        message = retry.text[:500]
+                    raise BinanceError(message, status_code=retry.status_code, code=code, response=retry.text)
+                except httpx.HTTPError as exc:
+                    raise BinanceError(f"signed retry failed: {exc}") from exc
+
             raise BinanceError(message, status_code=r.status_code, code=code, response=r.text)
 
         try:
