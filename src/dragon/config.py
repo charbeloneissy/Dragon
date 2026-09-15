@@ -17,6 +17,9 @@ class Config:
     max_triangles: int = 5000
     stale_ms: int = 750
     poll_interval_seconds: float = 0.02
+    order_timeout_ms: int = 5000
+    depth_levels: int = 20
+    health_fail_open: bool = False
 
     @staticmethod
     def _bool(name: str, default: bool) -> bool:
@@ -41,6 +44,9 @@ class Config:
             max_triangles=int(os.getenv("MAX_TRIANGLES", str(cls.max_triangles))),
             stale_ms=int(os.getenv("STALE_MS", str(cls.stale_ms))),
             poll_interval_seconds=float(os.getenv("POLL_INTERVAL_SECONDS", str(cls.poll_interval_seconds))),
+            order_timeout_ms=int(os.getenv("ORDER_TIMEOUT_MS", str(cls.order_timeout_ms))),
+            depth_levels=int(os.getenv("DEPTH_LEVELS", str(cls.depth_levels))),
+            health_fail_open=cls._bool("HEALTH_FAIL_OPEN", cls.health_fail_open),
         )
 
     @property
@@ -54,7 +60,13 @@ class Config:
             raise ValueError("BINANCE_WS_BASE must be a WebSocket URL")
         if self.max_notional_usdt <= 0 or self.risk_pct <= 0:
             raise ValueError("max notional and risk percentage must be positive")
+        if self.risk_pct > 0.01:
+            raise ValueError("ARB_RISK_PCT cannot exceed 0.01 (1%)")
         if self.min_net_edge_bps < 0 or self.fee_bps < 0 or self.max_slippage_bps < 0:
             raise ValueError("edge, fee, and slippage limits cannot be negative")
+        if self.cooldown_ms < 0 or self.stale_ms <= 0 or self.order_timeout_ms <= 0:
+            raise ValueError("timing values are invalid")
+        if not 1 <= self.depth_levels <= 100:
+            raise ValueError("DEPTH_LEVELS must be between 1 and 100")
         if self.live_trading and self.dry_run:
             raise ValueError("LIVE_TRADING=true cannot be combined with DRY_RUN=true")
