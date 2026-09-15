@@ -28,6 +28,9 @@ WS_OPEN_TIMEOUT = float(os.getenv("CROSS_WS_OPEN_TIMEOUT", "15"))
 WS_CLOSE_TIMEOUT = float(os.getenv("CROSS_WS_CLOSE_TIMEOUT", "5"))
 WS_MAX_QUEUE = int(os.getenv("CROSS_WS_MAX_QUEUE", "4096"))
 WS_MAX_SIZE = int(os.getenv("CROSS_WS_MAX_SIZE", str(2**24)))
+WS_SYMBOLS_PER_CONNECTION = max(50, int(os.getenv("CROSS_WS_SYMBOLS_PER_CONNECTION", "250")))
+WS_SUBSCRIBE_DELAY = max(0.0, float(os.getenv("CROSS_WS_SUBSCRIBE_DELAY", "0.05")))
+WS_APP_HEARTBEAT_SECONDS = max(5.0, float(os.getenv("CROSS_WS_APP_HEARTBEAT_SECONDS", "20")))
 
 
 def _okx_id(symbol: str) -> str:
@@ -156,12 +159,25 @@ class MultiExchangeFeeds:
             top = rows[0]
             self.event("CROSS_OPPORTUNITY", f"{top['symbol']} {top['buy_venue']}->{top['sell_venue']} net_bps={top['net_bps']}")
 
-    async def _run_venue(self, venue, url, messages, parser):
-        delay = WS_BACKOFF_MIN
+    async def _heartbeat(self, ws, venue: str):
+        if venue == "COINBASE":
+            return
         while True:
+            await asyncio.sleep(WS_APP_HEARTBEAT_SECONDS)
+            await ws.send(json.dumps({"op": "ping"}))
+
+    async def _run_venue(self, venue, url, messages, parser, connection_id: int):
+        delay = WS_BACKOFF_MIN
+        feed = self.external_feeds.setdefault(venue, {})
+        feed.setdefault("connections", 0)
+        feed.setdefault("connected_connections", 0)
+        while True:
+            heartbeat_task = None
+            connected = False
             try:
-                self.external_feeds.setdefault(venue, {})["status"] = "connecting"
-                self.event("EXT_WS", f"{venue} connecting")
+                feed["status"] = "connecting"
+                feed["connection_id"] = connection_id
+                self.event("EXT_WS", f"{venue} connection-{connection_id} connecting")
                 async with websockets.connect(
                     url,
                     ping_interval=WS_PING_INTERVAL,
@@ -172,46 +188,56 @@ class MultiExchangeFeeds:
                     max_queue=WS_MAX_QUEUE,
                     compression=None,
                 ) as ws:
-                    feed = self.external_feeds.setdefault(venue, {})
-                    feed["status"] = "connected"
+                    connected = True
+                    feed["connections"] = max(int(feed.get("connections", 0)), connection_id)
+                    feed["connected_connections"] = int(feed.get("connected_connections", 0)) + 1
                     feed["last_connect"] = time.time()
                     feed["last_error"] = None
-                    self.event("EXT_WS", f"{venue} connected")
+                    feed["status"] = "connected"
+                    self.event("EXT_WS", f"{venue} connection-{connection_id} connected")
                     delay = WS_BACKOFF_MIN
                     for msg in messages:
                         await ws.send(json.dumps(msg))
-                    last_data = time.monotonic()
+                        if WS_SUBSCRIBE_DELAY:
+                            await asyncio.sleep(WS_SUBSCRIBE_DELAY)
+                    heartbeat_task = asyncio.create_task(self._heartbeat(ws, venue))
+                    last_message = time.monotonic()
                     while True:
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=WS_STALE_SECONDS)
                         except asyncio.TimeoutError as exc:
-                            elapsed = time.monotonic() - last_data
-                            raise ConnectionError(f"{venue} market data stale for {elapsed:.1f}s; forcing websocket reconnect") from exc
-                        last_data = time.monotonic()
+                            elapsed = time.monotonic() - last_message
+                            raise ConnectionError(f"{venue} connection-{connection_id} silent for {elapsed:.1f}s; forcing websocket reconnect") from exc
+                        last_message = time.monotonic()
                         try:
                             data = json.loads(raw)
                             for symbol, bid, ask, bid_qty, ask_qty in parser(data) or ():
                                 self._record_feed(venue, symbol, bid, ask, bid_qty, ask_qty)
                         except Exception as exc:
                             feed["parse_errors"] = int(feed.get("parse_errors", 0)) + 1
-                            self.event("EXT_PARSE_ERROR", f"{venue}: {exc}")
+                            self.event("EXT_PARSE_ERROR", f"{venue} connection-{connection_id}: {exc}")
             except asyncio.CancelledError:
-                self.external_feeds.setdefault(venue, {})["status"] = "stopped"
+                feed["status"] = "stopped"
                 raise
             except Exception as exc:
-                feed = self.external_feeds.setdefault(venue, {})
                 feed["status"] = "reconnecting"
                 feed["last_error"] = str(exc)
                 feed["reconnects"] = int(feed.get("reconnects", 0)) + 1
-                self.event("EXT_WS_ERROR", f"{venue}: {exc}")
+                self.event("EXT_WS_ERROR", f"{venue} connection-{connection_id}: {exc}")
                 jitter = random.uniform(0.0, min(5.0, delay * 0.25))
                 wait = min(WS_BACKOFF_MAX, delay + jitter)
                 feed["next_retry_at"] = time.time() + wait
                 await asyncio.sleep(wait)
                 delay = min(WS_BACKOFF_MAX, delay * 2.0)
+            finally:
+                if heartbeat_task:
+                    heartbeat_task.cancel()
+                    await asyncio.gather(heartbeat_task, return_exceptions=True)
+                if connected:
+                    feed["connected_connections"] = max(0, int(feed.get("connected_connections", 1)) - 1)
 
-    def _bybit_messages(self):
-        return [{"op": "subscribe", "args": [f"orderbook.1.{s}" for s in self.symbols[i:i + 10]]} for i in range(0, len(self.symbols), 10)]
+    def _bybit_messages(self, symbols):
+        return [{"op": "subscribe", "args": [f"orderbook.1.{s}" for s in symbols[i:i + 10]]} for i in range(0, len(symbols), 10)]
 
     def _bybit_parser(self, msg):
         if msg.get("topic", "").startswith("orderbook."):
@@ -221,8 +247,8 @@ class MultiExchangeFeeds:
             if s and b and a:
                 yield s.upper(), float(b[0][0]), float(a[0][0]), float(b[0][1]), float(a[0][1])
 
-    def _okx_messages(self):
-        return [{"op": "subscribe", "args": [{"channel": "bbo-tbt", "instId": _okx_id(s)} for s in self.symbols[i:i + 100]]} for i in range(0, len(self.symbols), 100)]
+    def _okx_messages(self, symbols):
+        return [{"op": "subscribe", "args": [{"channel": "bbo-tbt", "instId": _okx_id(s)} for s in symbols[i:i + 100]]} for i in range(0, len(symbols), 100)]
 
     def _okx_parser(self, msg):
         if msg.get("arg", {}).get("channel") == "bbo-tbt":
@@ -232,10 +258,10 @@ class MultiExchangeFeeds:
                 if bids and asks:
                     yield _normalize_usd_symbol(inst), float(bids[0][0]), float(asks[0][0]), float(bids[0][1]), float(asks[0][1])
 
-    def _coinbase_messages(self):
+    def _coinbase_messages(self, symbols):
         return [
-            {"type": "subscribe", "channel": "level2", "product_ids": [_coinbase_id(s) for s in self.symbols[i:i + 100]]}
-            for i in range(0, len(self.symbols), 100)
+            {"type": "subscribe", "channel": "level2", "product_ids": [_coinbase_id(s) for s in symbols[i:i + 100]]}
+            for i in range(0, len(symbols), 100)
         ] + [{"type": "subscribe", "channel": "heartbeats"}]
 
     def _coinbase_parser(self, msg):
@@ -262,12 +288,16 @@ class MultiExchangeFeeds:
                     yield symbol, bid, ask, book["bid"][bid], book["offer"][ask]
 
     async def run(self):
-        configs = [
-            ("BYBIT", "wss://stream.bybit.com/v5/public/spot", self._bybit_messages(), self._bybit_parser),
-            ("OKX", "wss://ws.okx.com:8443/ws/v5/public", self._okx_messages(), self._okx_parser),
-            ("COINBASE", "wss://advanced-trade-ws.coinbase.com", self._coinbase_messages(), self._coinbase_parser),
-        ]
+        shards = [self.symbols[i:i + WS_SYMBOLS_PER_CONNECTION] for i in range(0, len(self.symbols), WS_SYMBOLS_PER_CONNECTION)] or [[]]
+        configs = []
+        for idx, shard in enumerate(shards, 1):
+            configs.append(("BYBIT", "wss://stream.bybit.com/v5/public/spot", self._bybit_messages(shard), self._bybit_parser, idx))
+            configs.append(("OKX", "wss://ws.okx.com:8443/ws/v5/public", self._okx_messages(shard), self._okx_parser, idx))
+            configs.append(("COINBASE", "wss://advanced-trade-ws.coinbase.com", self._coinbase_messages(shard), self._coinbase_parser, idx))
         self._tasks = [asyncio.create_task(self._run_venue(*cfg)) for cfg in configs]
+        with self.lock:
+            self.state["external_ws_connections_target"] = len(configs)
+            self.state["external_ws_symbols_per_connection"] = WS_SYMBOLS_PER_CONNECTION
         try:
             await asyncio.gather(*self._tasks)
         finally:
