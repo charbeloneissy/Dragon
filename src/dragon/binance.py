@@ -7,7 +7,11 @@ import httpx
 
 
 class BinanceError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code=None, code=None, response=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.response = response
 
 
 class BinanceClient:
@@ -15,7 +19,10 @@ class BinanceClient:
         self.base = api_base.rstrip("/")
         self.key = api_key.strip()
         self.secret = api_secret.strip()
-        self.http = httpx.Client(timeout=timeout, limits=httpx.Limits(max_connections=20, max_keepalive_connections=10))
+        self.http = httpx.Client(
+            timeout=timeout,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
 
     def close(self):
         self.http.close()
@@ -25,7 +32,9 @@ class BinanceClient:
             r = self.http.get(self.base + path, params=params or {})
             r.raise_for_status()
             return r.json()
-        except httpx.HTTPError as exc:
+        except httpx.HTTPStatusError as exc:
+            raise BinanceError(f"public request failed: {exc.response.text[:500]}", status_code=exc.response.status_code) from exc
+        except (httpx.HTTPError, ValueError) as exc:
             raise BinanceError(f"public request failed: {exc}") from exc
 
     def signed(self, method: str, path: str, params=None):
@@ -40,9 +49,16 @@ class BinanceClient:
         try:
             r = self.http.request(method, self.base + path, params={**p, "signature": sig}, headers=headers)
         except httpx.HTTPError as exc:
-            raise BinanceError(f"signed request failed: {exc}") from exc
+            raise BinanceError(f"signed request failed before response: {exc}") from exc
         if r.status_code >= 400:
-            raise BinanceError(r.text)
+            code = None
+            try:
+                payload = r.json()
+                code = payload.get("code")
+                message = payload.get("msg", r.text[:500])
+            except ValueError:
+                message = r.text[:500]
+            raise BinanceError(message, status_code=r.status_code, code=code, response=r.text)
         try:
             return r.json()
         except ValueError as exc:
@@ -56,6 +72,21 @@ class BinanceClient:
 
     def order(self, symbol: str, order_id: int):
         return self.signed("GET", "/api/v3/order", {"symbol": symbol, "orderId": order_id})
+
+    def new_market_order(self, symbol: str, side: str, *, quantity=None, quote_order_qty=None):
+        params = {
+            "symbol": symbol,
+            "side": side.upper(),
+            "type": "MARKET",
+            "newOrderRespType": "FULL",
+        }
+        if quantity is not None:
+            params["quantity"] = format(quantity, "f")
+        elif quote_order_qty is not None:
+            params["quoteOrderQty"] = format(quote_order_qty, "f")
+        else:
+            raise BinanceError("market order requires quantity or quote_order_qty")
+        return self.signed("POST", "/api/v3/order", params)
 
     def cancel_order(self, symbol: str, order_id: int):
         return self.signed("DELETE", "/api/v3/order", {"symbol": symbol, "orderId": order_id})
