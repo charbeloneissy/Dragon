@@ -14,7 +14,7 @@ from src.dragon.executor import execute_triangle
 from src.dragon.risk import approved, risk_budget
 from src.dragon.triangles import build_triangles, evaluate_triangle
 
-STATE = {"started_at": None, "ws_connected": False, "triangles": 0, "symbols": 0, "quote_updates": 0, "depth_updates": 0, "scans": 0, "opportunities": 0, "executions": 0, "execution_errors": 0, "risk_blocks": 0, "reconnects": 0, "last_opportunity": None, "last_execution": None, "last_error": None, "recent": [], "live": False, "dry_run": True}
+STATE = {"started_at": None, "ws_connected": False, "triangles": 0, "symbols": 0, "quote_updates": 0, "depth_updates": 0, "scans": 0, "opportunities": 0, "executions": 0, "execution_errors": 0, "risk_blocks": 0, "reconnects": 0, "last_opportunity": None, "last_execution": None, "last_error": None, "recent": [], "live": False, "dry_run": True, "binance_authenticated": False}
 LOCK = Lock()
 
 
@@ -44,7 +44,7 @@ def start_health_server():
     return server
 
 
-DASHBOARD = r'''<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dragon Arbitrage</title><style>body{margin:0;background:#0b0d10;color:#eee;font:14px system-ui}main{max-width:1100px;margin:auto;padding:20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.card{background:#14181e;border:1px solid #252b34;border-radius:12px;padding:14px;margin-bottom:12px}.v{font-size:25px;font-weight:700}.muted{color:#8f98a3}.good{color:#55d68a}.warn{color:#f0c75e}.bad{color:#ff6874}.row{padding:8px 0;border-bottom:1px solid #252b34;font-size:12px}.mono{font-family:monospace}</style><main><h1>🐉 Dragon Arbitrage</h1><div id=s class=card>Loading...</div><div id=c class=grid></div><div class=card><b>Live activity</b><div id=f></div></div></main><script>async function tick(){try{let j=await(await fetch('/health?'+Date.now())).json(),s=j.state;document.getElementById('s').innerHTML='<b class="'+(s.ws_connected?'good':'bad')+'">'+(s.ws_connected?'● BINANCE WS CONNECTED':'● BINANCE WS DISCONNECTED')+'</b> &nbsp; <b class="'+(s.live&&!s.dry_run?'good':'warn')+'">'+(s.live&&!s.dry_run?'LIVE EXECUTION':'PAPER/SAFE')+'</b> &nbsp; <span class=muted>quotes '+s.quote_updates+' / depth '+s.depth_updates+'</span>';let a=[['Triangles',s.triangles],['Symbols',s.symbols],['Scans',s.scans],['Opportunities',s.opportunities],['Executions',s.executions],['Errors',s.execution_errors],['Risk blocks',s.risk_blocks],['Reconnects',s.reconnects]];document.getElementById('c').innerHTML=a.map(x=>'<div class=card><span class=muted>'+x[0]+'</span><div class=v>'+x[1]+'</div></div>').join('');document.getElementById('f').innerHTML=(s.recent||[]).slice().reverse().map(e=>'<div class=row><span class=muted>'+new Date(e.ts*1000).toLocaleTimeString()+'</span> <b>'+e.kind+'</b> '+e.message+(e.path?' <span class=mono>'+e.path.join(' → ')+'</span>':'')+(e.net_bps!=null?' <b>'+Number(e.net_bps).toFixed(3)+' bps</b>':'')).join('')||'<span class=muted>Waiting...</span>'}catch(e){document.getElementById('s').innerHTML='<b class=bad>Dashboard error</b>'}}tick();setInterval(tick,2000)</script>'''
+DASHBOARD = r'''<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dragon Arbitrage</title><style>body{margin:0;background:#0b0d10;color:#eee;font:14px system-ui}main{max-width:1100px;margin:auto;padding:20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.card{background:#14181e;border:1px solid #252b34;border-radius:12px;padding:14px;margin-bottom:12px}.v{font-size:25px;font-weight:700}.muted{color:#8f98a3}.good{color:#55d68a}.warn{color:#f0c75e}.bad{color:#ff6874}.row{padding:8px 0;border-bottom:1px solid #252b34;font-size:12px}.mono{font-family:monospace}</style><main><h1>🐉 Dragon Arbitrage</h1><div id=s class=card>Loading...</div><div id=c class=grid></div><div class=card><b>Live activity</b><div id=f></div></div></main><script>async function tick(){try{let j=await(await fetch('/health?'+Date.now())).json(),s=j.state;document.getElementById('s').innerHTML='<b class="'+(s.ws_connected?'good':'bad')+'">'+(s.ws_connected?'● BINANCE WS CONNECTED':'● BINANCE WS DISCONNECTED')+'</b> &nbsp; <b class="'+(s.binance_authenticated?'good':'bad')+'">'+(s.binance_authenticated?'● BINANCE API AUTHENTICATED':'● BINANCE API NOT AUTHENTICATED')+'</b> &nbsp; <b class="'+(s.live&&!s.dry_run?'good':'warn')+'">'+(s.live&&!s.dry_run?'LIVE EXECUTION':'PAPER/SAFE')+'</b> &nbsp; <span class=muted>quotes '+s.quote_updates+' / depth '+s.depth_updates+'</span>';let a=[['Triangles',s.triangles],['Symbols',s.symbols],['Scans',s.scans],['Opportunities',s.opportunities],['Executions',s.executions],['Errors',s.execution_errors],['Risk blocks',s.risk_blocks],['Reconnects',s.reconnects]];document.getElementById('c').innerHTML=a.map(x=>'<div class=card><span class=muted>'+x[0]+'</span><div class=v>'+x[1]+'</div></div>').join('');document.getElementById('f').innerHTML=(s.recent||[]).slice().reverse().map(e=>'<div class=row><span class=muted>'+new Date(e.ts*1000).toLocaleTimeString()+'</span> <b>'+e.kind+'</b> '+e.message+(e.path?' <span class=mono>'+e.path.join(' → ')+'</span>':'')+(e.net_bps!=null?' <b>'+Number(e.net_bps).toFixed(3)+' bps</b>':'')).join('')||'<span class=muted>Waiting...</span>'}catch(e){document.getElementById('s').innerHTML='<b class=bad>Dashboard error</b>'}}tick();setInterval(tick,2000)</script>'''
 
 
 def _symbol_meta(info):
@@ -113,7 +113,18 @@ async def stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
 
 async def run():
     cfg = Config.from_env(); cfg.validate(); STATE["started_at"] = time.time(); STATE["live"] = cfg.live_trading; STATE["dry_run"] = cfg.dry_run; start_health_server()
-    client = BinanceClient(cfg.api_base, os.getenv("BINANCE_API_KEY", ""), os.getenv("BINANCE_API_SECRET", "")); info = client.exchange_info(); filters = make_filters(info); symbol_meta = _symbol_meta(info)
+    api_key = os.getenv("BINANCE_API_KEY", "").strip()
+    api_secret = os.getenv("BINANCE_API_SECRET", "").strip()
+    client = BinanceClient(cfg.api_base, api_key, api_secret)
+    if cfg.live_trading and not cfg.dry_run:
+        if not api_key or not api_secret:
+            raise RuntimeError("LIVE_TRADING is enabled but BINANCE_API_KEY/BINANCE_API_SECRET are not configured in the runtime environment")
+        account = client.account()
+        STATE["binance_authenticated"] = True
+        free_usdt = next((x.get("free", "0") for x in account.get("balances", []) if x.get("asset") == "USDT"), "0")
+        event("AUTH", "Binance API authenticated successfully", usdt_free=str(free_usdt))
+        print("BINANCE API AUTHENTICATED | live trading enabled", flush=True)
+    info = client.exchange_info(); filters = make_filters(info); symbol_meta = _symbol_meta(info)
     triangles = build_triangles(info, cfg.max_triangles); symbols = sorted({s for t in triangles for s in t.symbols}); STATE["triangles"] = len(triangles); STATE["symbols"] = len(symbols)
     event("START", f"Dragon ultra triangular engine started: triangles={len(triangles)} symbols={len(symbols)}"); print(f"DRAGON STARTED | triangles={len(triangles)} symbols={len(symbols)} dry_run={cfg.dry_run} live={cfg.live_trading}", flush=True)
     await stream_loop(cfg, client, filters, triangles, symbols, symbol_meta)
