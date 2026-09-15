@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import random
 import time
 from decimal import Decimal
@@ -17,6 +18,8 @@ WS_SHARD_SIZE = 100
 WS_PING_INTERVAL = 20.0
 WS_PING_TIMEOUT = 20.0
 REST_FALLBACK_SECONDS = 3.0
+DISPLAY_MIN_NET_BPS = Decimal(os.getenv("DASHBOARD_MIN_NET_EDGE_BPS", "10"))
+DISPLAY_MAX_NET_BPS = Decimal(os.getenv("DASHBOARD_MAX_NET_EDGE_BPS", "40"))
 
 
 def _ws_state(worker_id, **values):
@@ -99,7 +102,7 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
         web_runner.STATE["symbols"] = len(symbols); web_runner.STATE["triangles"] = len(triangles); web_runner.STATE["ws_shards"] = len(shards); web_runner.STATE["ws_shard_size"] = WS_SHARD_SIZE
         web_runner.STATE.setdefault("rest_fallback_updates", 0); web_runner.STATE.setdefault("cross_exchange_opportunities", [])
     web_runner.event("UNIVERSE", f"Full Spot universe active: {len(symbols)} symbols, {len(triangles)} triangles, {len(shards)} WS shards", shard_size=WS_SHARD_SIZE)
-    web_runner.event("SCAN", "Opportunity scanner armed with Binance WebSocket + REST fallback + Bybit/OKX/Coinbase public feeds")
+    web_runner.event("SCAN", f"Opportunity scanner armed; dashboard net-edge filter={DISPLAY_MIN_NET_BPS:g}-{DISPLAY_MAX_NET_BPS:g} bps")
 
     last_order_ms = 0.0; last_balance_ms = 0.0; free_usdt = Decimal("0"); balance_ok = False; failures = 0
     try:
@@ -109,10 +112,8 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
             # Coalesce queued market updates so a high-frequency stream cannot
             # starve the evaluator behind thousands of stale depth messages.
             for _ in range(min(queue.qsize(), 1000)):
-                try:
-                    batch.append(queue.get_nowait())
-                except asyncio.QueueEmpty:
-                    break
+                try: batch.append(queue.get_nowait())
+                except asyncio.QueueEmpty: break
             for item in batch:
                 symbol = item.get("s")
                 if not symbol: continue
@@ -144,7 +145,8 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                 if not result: continue
                 net_bps, gross_bps, path, first, second = result
                 eligible = net_bps >= Decimal(str(cfg.min_net_edge_bps)) and trade_budget_ok
-                web_runner.record_opportunity(path, net_bps, gross_bps, evaluation_notional, eligible=eligible, trade_budget=trade_budget)
+                if DISPLAY_MIN_NET_BPS <= net_bps <= DISPLAY_MAX_NET_BPS:
+                    web_runner.record_opportunity(path, net_bps, gross_bps, evaluation_notional, eligible=eligible, trade_budget=trade_budget)
                 if not eligible:
                     web_runner.event("CANDIDATE", f"net={net_bps:.3f} gross={gross_bps:.3f} gate={'EDGE' if net_bps < Decimal(str(cfg.min_net_edge_bps)) else 'MIN_NOTIONAL'}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps), evaluation_notional=str(evaluation_notional), trade_budget=str(trade_budget))
                 if net_bps < Decimal(str(cfg.min_net_edge_bps)): continue
