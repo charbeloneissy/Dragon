@@ -27,3 +27,16 @@ def test_stream_universe_never_splits_a_triangle():
     chosen, symbols = _select_stream_universe([triangle], {}, 2)
     assert chosen == [triangle]
     assert len(symbols) == 3
+
+
+def test_stream_universe_zero_cap_means_full_universe():
+    triangles = [
+        Triangle(("AAAUSDT", "AAABBB", "BBBUSDT"), ("USDT", "AAA", "BBB")),
+        Triangle(("CCCUSDT", "CCCDDD", "DDDUSDT"), ("USDT", "CCC", "DDD")),
+    ]
+    chosen, symbols = _select_stream_universe(triangles, {}, 0)
+    assert chosen == triangles
+    assert symbols == [
+        "AAAUSDT", "AAABBB", "BBBUSDT",
+        "CCCUSDT", "CCCDDD", "DDDUSDT",
+    ]
