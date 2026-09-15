@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import os
 import time
 from urllib.parse import urlencode
 
@@ -20,20 +21,50 @@ class BinanceClient:
         self.key = api_key.strip()
         self.secret = api_secret.strip()
         self.time_offset_ms = 0
-        if self.key:
-            try:
-                self.key.encode("ascii")
-            except UnicodeEncodeError as exc:
-                raise BinanceError("BINANCE_API_KEY contains non-ASCII characters; replace it with the raw Binance API key") from exc
-        if self.secret:
-            try:
-                self.secret.encode("ascii")
-            except UnicodeEncodeError as exc:
-                raise BinanceError("BINANCE_API_SECRET contains non-ASCII characters; replace it with the raw Binance API secret") from exc
+        self._validate_credentials()
         self.http = httpx.Client(
             timeout=timeout,
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
         )
+
+    @staticmethod
+    def _credential_encoding_error(name: str, value: str) -> BinanceError:
+        bad = [(i, f"U+{ord(ch):04X}") for i, ch in enumerate(value) if ord(ch) > 127]
+        positions = ", ".join(f"{i}:{code}" for i, code in bad[:8])
+        suffix = "" if len(bad) <= 8 else f" (+{len(bad) - 8} more)"
+        return BinanceError(
+            f"{name} contains non-ASCII characters; length={len(value)}, "
+            f"invalid_positions=[{positions}]{suffix}. Replace it with the raw Binance credential."
+        )
+
+    def _validate_credentials(self):
+        if self.key:
+            try:
+                self.key.encode("ascii")
+            except UnicodeEncodeError as exc:
+                raise self._credential_encoding_error("BINANCE_API_KEY", self.key) from exc
+        if self.secret:
+            try:
+                self.secret.encode("ascii")
+            except UnicodeEncodeError as exc:
+                raise self._credential_encoding_error("BINANCE_API_SECRET", self.secret) from exc
+
+        if os.getenv("DRAGON_CRED_DIAGNOSTIC", "").strip().lower() in {"1", "true", "yes", "on"}:
+            # Never print credential contents. Only emit safe structural metadata.
+            print(
+                "CREDENTIAL DIAGNOSTIC | "
+                f"key_present={bool(self.key)} key_len={len(self.key)} "
+                f"secret_present={bool(self.secret)} secret_len={len(self.secret)} "
+                f"key_ascii={self._is_ascii(self.key)} secret_ascii={self._is_ascii(self.secret)}"
+            )
+
+    @staticmethod
+    def _is_ascii(value: str) -> bool:
+        try:
+            value.encode("ascii")
+            return True
+        except UnicodeEncodeError:
+            return False
 
     def close(self):
         self.http.close()
@@ -82,7 +113,7 @@ class BinanceClient:
         p.setdefault("recvWindow", 5000)
         query = urlencode(p, doseq=True)
         signature = hmac.new(
-            self.secret.encode("utf-8"),
+            self.secret.encode("ascii"),
             query.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
