@@ -24,6 +24,7 @@ STATE = {
     "live": False, "dry_run": True, "binance_authenticated": False,
     "free_usdt": "0", "realized_pnl_usdt": 0.0, "ledger_filled": 0,
     "market_streams": 0, "subscription_acks": 0, "balance_refreshes": 0,
+    "min_notional_blocks": 0,
 }
 LOCK = Lock()
 SERVER = None
@@ -47,7 +48,7 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 payload = {"status": STATE["status"], "service": "dragon", "state": dict(STATE)}
             body = json.dumps(payload, default=str).encode()
-            self.send_response(200 if payload["status"] in ("running", "starting") else 503)
+            self.send_response(200 if payload["status"] in ("running", "starting", "degraded") else 503)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
@@ -72,7 +73,7 @@ def start_health_server():
     return SERVER
 
 
-DASHBOARD = r'''<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dragon Arbitrage</title><style>body{margin:0;background:#0b0d10;color:#eee;font:14px system-ui}main{max-width:1100px;margin:auto;padding:20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.card{background:#14181e;border:1px solid #252b34;border-radius:12px;padding:14px;margin-bottom:12px}.v{font-size:25px;font-weight:700}.muted{color:#8f98a3}.good{color:#55d68a}.warn{color:#f0c75e}.bad{color:#ff6874}.row{padding:8px 0;border-bottom:1px solid #252b34;font-size:12px}.mono{font-family:monospace}</style><main><h1>🐉 Dragon Arbitrage</h1><div id=s class=card>Loading...</div><div id=c class=grid></div><div class=card><b>Live activity</b><div id=f></div></div></main><script>async function tick(){try{let j=await(await fetch('/health?'+Date.now())).json(),s=j.state;document.getElementById('s').innerHTML='<b class="'+(s.ws_connected?'good':'bad')+'">'+(s.ws_connected?'● BINANCE WS CONNECTED':'● BINANCE WS DISCONNECTED')+'</b> &nbsp; <b class="'+(s.binance_authenticated?'good':'bad')+'">'+(s.binance_authenticated?'● BINANCE API AUTHENTICATED':'● BINANCE API NOT AUTHENTICATED')+'</b> &nbsp; <b class="'+(s.live&&!s.dry_run?'good':'warn')+'">'+(s.live&&!s.dry_run?'LIVE EXECUTION':'PAPER/SAFE')+'</b> &nbsp; <span class=muted>USDT '+s.free_usdt+' | P&L '+Number(s.realized_pnl_usdt||0).toFixed(6)+'</span>';let a=[['Triangles',s.triangles],['Symbols',s.symbols],['Streams',s.market_streams],['Depth updates',s.depth_updates],['Scans',s.scans],['Opportunities',s.opportunities],['Executions',s.executions],['Errors',s.execution_errors],['Risk blocks',s.risk_blocks],['Reconnects',s.reconnects],['Filled ledger',s.ledger_filled]];document.getElementById('c').innerHTML=a.map(x=>'<div class=card><span class=muted>'+x[0]+'</span><div class=v>'+x[1]+'</div></div>').join('');document.getElementById('f').innerHTML=(s.recent||[]).slice().reverse().map(e=>'<div class=row><span class=muted>'+new Date(e.ts*1000).toLocaleTimeString()+'</span> <b>'+e.kind+'</b> '+e.message+(e.path?' <span class=mono>'+e.path.join(' → ')+'</span>':'')+(e.net_bps!=null?' <b>'+Number(e.net_bps).toFixed(3)+' bps</b>':'')).join('')||'<span class=muted>Waiting...</span>'}catch(e){document.getElementById('s').innerHTML='<b class=bad>Dashboard error</b>'}}tick();setInterval(tick,2000)</script>'''
+DASHBOARD = r'''<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dragon Arbitrage</title><style>body{margin:0;background:#0b0d10;color:#eee;font:14px system-ui}main{max-width:1100px;margin:auto;padding:20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.card{background:#14181e;border:1px solid #252b34;border-radius:12px;padding:14px;margin-bottom:12px}.v{font-size:25px;font-weight:700}.muted{color:#8f98a3}.good{color:#55d68a}.warn{color:#f0c75e}.bad{color:#ff6874}.row{padding:8px 0;border-bottom:1px solid #252b34;font-size:12px}.mono{font-family:monospace}</style><main><h1>🐉 Dragon Arbitrage</h1><div id=s class=card>Loading...</div><div id=c class=grid></div><div class=card><b>Live activity</b><div id=f></div></div></main><script>async function tick(){try{let j=await(await fetch('/health?'+Date.now())).json(),s=j.state;document.getElementById('s').innerHTML='<b class="'+(s.ws_connected?'good':'bad')+'">'+(s.ws_connected?'● BINANCE WS CONNECTED':'● BINANCE WS DISCONNECTED')+'</b> &nbsp; <b class="'+(s.binance_authenticated?'good':'bad')+'">'+(s.binance_authenticated?'● BINANCE API AUTHENTICATED':'● BINANCE API NOT AUTHENTICATED')+'</b> &nbsp; <b class="'+(s.live&&!s.dry_run?'good':'warn')+'">'+(s.live&&!s.dry_run?'LIVE EXECUTION':'PAPER/SAFE')+'</b> &nbsp; <span class=muted>USDT '+s.free_usdt+' | P&L '+Number(s.realized_pnl_usdt||0).toFixed(6)+'</span>';let a=[['Triangles',s.triangles],['Symbols',s.symbols],['Streams',s.market_streams],['Depth updates',s.depth_updates],['Scans',s.scans],['Opportunities',s.opportunities],['Executions',s.executions],['Errors',s.execution_errors],['Risk blocks',s.risk_blocks],['Min-notional blocks',s.min_notional_blocks],['Reconnects',s.reconnects],['Filled ledger',s.ledger_filled]];document.getElementById('c').innerHTML=a.map(x=>'<div class=card><span class=muted>'+x[0]+'</span><div class=v>'+x[1]+'</div></div>').join('');document.getElementById('f').innerHTML=(s.recent||[]).slice().reverse().map(e=>'<div class=row><span class=muted>'+new Date(e.ts*1000).toLocaleTimeString()+'</span> <b>'+e.kind+'</b> '+e.message+(e.path?' <span class=mono>'+e.path.join(' → ')+'</span>':'')+(e.net_bps!=null?' <b>'+Number(e.net_bps).toFixed(3)+' bps</b>':'')).join('')||'<span class=muted>Waiting...</span>'}catch(e){document.getElementById('s').innerHTML='<b class=bad>Dashboard error</b>'}}tick();setInterval(tick,2000)</script>'''
 
 
 def _symbol_meta(info):
@@ -135,7 +136,17 @@ def _ticker_volumes(client):
 
 
 def _select_stream_universe(triangles, volumes, cap):
-    """Keep complete, liquid triangles instead of alphabetically truncating symbols."""
+    """Select complete triangles without misinterpreting 0 as a 3-symbol cap.
+
+    cap <= 0 means no application-level stream cap. Positive caps rank complete
+    triangles by combined 24h quote volume and never split a triangle.
+    """
+    if not triangles:
+        return [], []
+    if int(cap) <= 0:
+        symbols = sorted({s for triangle in triangles for s in triangle.symbols})
+        return list(triangles), symbols
+
     cap = max(3, int(cap))
     ranked = sorted(
         triangles,
@@ -144,17 +155,17 @@ def _select_stream_universe(triangles, volumes, cap):
     )
     selected_symbols = set()
     selected_triangles = []
-    for t in ranked:
-        additions = set(t.symbols) - selected_symbols
+    for triangle in ranked:
+        additions = set(triangle.symbols) - selected_symbols
         if len(selected_symbols) + len(additions) > cap:
             continue
-        selected_symbols.update(t.symbols)
-        selected_triangles.append(t)
+        selected_symbols.update(triangle.symbols)
+        selected_triangles.append(triangle)
         if len(selected_symbols) >= cap:
             break
     if not selected_triangles:
-        selected_triangles = triangles[:1]
-        selected_symbols = set(selected_triangles[0].symbols)
+        selected_triangles = [ranked[0]]
+        selected_symbols = set(ranked[0].symbols)
     return selected_triangles, sorted(selected_symbols)
 
 
@@ -194,9 +205,6 @@ async def stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
                     STATE["status"] = "running"
                     STATE["market_streams"] = len(symbols)
                 event("WS", f"Binance market WebSocket connected; streams={len(symbols)}")
-
-                # Depth already contains best bid/ask, so bookTicker is redundant.
-                # One depth stream per symbol halves stream count and message volume.
                 params = [f"{s.lower()}@depth{cfg.depth_levels}@100ms" for s in symbols]
                 for i in range(0, len(params), 180):
                     request_id = i // 180 + 1
@@ -210,21 +218,21 @@ async def stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
                         with LOCK:
                             STATE["subscription_acks"] += 1
                         continue
-
                     d = _depth_payload(msg, cfg.depth_levels)
                     if not d:
                         continue
                     s, dv = d
                     books.setdefault(s, {}).update(dv)
                     dirty.update(by_symbol.get(s, ()))
-                    STATE["depth_updates"] += 1
-
+                    with LOCK:
+                        STATE["depth_updates"] += 1
                     if not dirty:
                         continue
                     now = time.monotonic() * 1000
                     candidates = list(dirty)
                     dirty.clear()
-                    STATE["scans"] += len(candidates)
+                    with LOCK:
+                        STATE["scans"] += len(candidates)
 
                     if now - last_balance_ms >= 10000:
                         try:
@@ -235,61 +243,59 @@ async def stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
                             balance_ok = False
                             event("BALANCE_ERROR", f"balance refresh failed; trading paused until restored: {exc}")
                             last_balance_ms = now
-
                     if not balance_ok:
                         continue
-                    budget = risk_budget(free_usdt, cfg.risk_pct, cfg.max_notional_usdt)
+                    budget = risk_budget(
+                        free_usdt,
+                        cfg.risk_pct,
+                        cfg.max_notional_usdt,
+                        Decimal(str(cfg.min_trade_notional_usdt)),
+                    )
                     if budget <= 0:
+                        with LOCK:
+                            STATE["min_notional_blocks"] += 1
                         continue
-
                     for idx in candidates:
                         t = triangles[idx]
-                        if not all(
-                            s in books and now - books[s].get("depth_ts", 0) <= cfg.stale_ms
-                            for s in t.symbols
-                        ):
+                        if not all(s in books and now - books[s].get("depth_ts", 0) <= cfg.stale_ms for s in t.symbols):
                             continue
-                        result = evaluate_triangle(
-                            t, books, cfg.fee_bps, cfg.max_slippage_bps, symbol_meta, budget
-                        )
+                        result = evaluate_triangle(t, books, cfg.fee_bps, cfg.max_slippage_bps, symbol_meta, budget)
                         if not result:
                             continue
                         net_bps, gross_bps, path, first, second = result
                         if net_bps < Decimal(str(cfg.min_net_edge_bps)):
                             continue
-
-                        STATE["opportunities"] += 1
-                        STATE["last_opportunity"] = time.time()
-                        event(
-                            "OPPORTUNITY",
-                            f"net={net_bps:.3f} gross={gross_bps:.3f}",
-                            path=path,
-                            net_bps=float(net_bps),
-                            gross_bps=float(gross_bps),
-                        )
+                        with LOCK:
+                            STATE["opportunities"] += 1
+                            STATE["last_opportunity"] = time.time()
+                        event("OPPORTUNITY", f"net={net_bps:.3f} gross={gross_bps:.3f}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps))
                         now_ms = time.monotonic() * 1000
                         if not (cfg.live_trading and not cfg.dry_run) or now_ms - last_order_ms < cfg.cooldown_ms:
                             continue
-                        if not approved(net_bps, cfg.min_net_edge_bps, budget, cfg.max_notional_usdt):
-                            STATE["risk_blocks"] += 1
+                        if not approved(
+                            net_bps,
+                            cfg.min_net_edge_bps,
+                            budget,
+                            cfg.max_notional_usdt,
+                            min_trade_notional=Decimal(str(cfg.min_trade_notional_usdt)),
+                        ):
+                            with LOCK:
+                                STATE["risk_blocks"] += 1
                             event("RISK", "Trade blocked by risk/notional gate", path=path)
                             continue
-
                         last_order_ms = now_ms
                         try:
                             event("LIVE", "Three-leg execution requested", path=path, net_bps=float(net_bps), budget=str(budget))
-                            execution = await asyncio.to_thread(
-                                execute_triangle, client, path, "USDT", first, budget, filters, False
-                            )
+                            execution = await asyncio.to_thread(execute_triangle, client, path, "USDT", first, budget, filters, False)
                             if not execution.get("finished") or execution.get("final_asset") != "USDT":
                                 raise RuntimeError("execution returned without a completed USDT cycle")
                             LEDGER.record(path, budget, execution)
-                            STATE["executions"] += 1
-                            STATE["last_execution"] = time.time()
-                            failures = 0
+                            with LOCK:
+                                STATE["executions"] += 1
+                                STATE["last_execution"] = time.time()
                             _sync_ledger()
+                            failures = 0
                             event("FILLED", f"Triangle fully filled; realized={execution['realized_pnl_usdt']} USDT", path=path)
-                            # Reconcile immediately after a live cycle, rather than polling every 500 ms.
                             try:
                                 free_usdt = await _refresh_balance(client)
                                 last_balance_ms = time.monotonic() * 1000
@@ -299,8 +305,9 @@ async def stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
                                 event("BALANCE_ERROR", f"post-trade balance reconciliation failed: {exc}")
                         except Exception as exc:
                             failures += 1
-                            STATE["execution_errors"] += 1
-                            STATE["last_error"] = str(exc)
+                            with LOCK:
+                                STATE["execution_errors"] += 1
+                                STATE["last_error"] = str(exc)
                             if LEDGER is not None:
                                 LEDGER.record(path, budget, error=exc)
                             event("ERROR", str(exc), path=path)
@@ -318,22 +325,19 @@ async def stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
 
 
 async def run():
-    global LEDGER
-    event("BOOT", "Dragon engine booting")
     cfg = Config.from_env()
     cfg.validate()
-    event("CONFIG", "Configuration validated")
     start_health_server()
     with LOCK:
         STATE["started_at"] = time.time()
         STATE["live"] = cfg.live_trading
         STATE["dry_run"] = cfg.dry_run
         STATE["status"] = "starting"
-    LEDGER = Ledger()
-
+    LEDGER = globals().get("LEDGER")
+    if LEDGER is None:
+        globals()["LEDGER"] = Ledger()
     api_key = os.getenv("BINANCE_API_KEY", "").strip()
     api_secret = os.getenv("BINANCE_API_SECRET", "").strip()
-    event("CREDENTIAL", f"Credential presence checked; key_present={bool(api_key)} secret_present={bool(api_secret)}")
     client = BinanceClient(cfg.api_base, api_key, api_secret)
     try:
         client.sync_time()
@@ -344,22 +348,17 @@ async def run():
             account = client.account()
             with LOCK:
                 STATE["binance_authenticated"] = True
-            free = next((x.get("free", "0") for x in account.get("balances", []) if x.get("asset") == "USDT"), "0")
-            with LOCK:
-                STATE["free_usdt"] = str(free)
-            event("AUTH", "Binance API authenticated successfully", usdt_free=str(free))
+                STATE["free_usdt"] = next((x.get("free", "0") for x in account.get("balances", []) if x.get("asset") == "USDT"), "0")
+            event("AUTH", "Binance API authenticated successfully", usdt_free=STATE["free_usdt"])
         else:
             event("SAFE", "Live execution disabled")
-
-        event("EXCHANGE", "Loading Binance exchange information")
         info = client.exchange_info()
         filters = make_filters(info)
         symbol_meta = _symbol_meta(info)
         triangles = build_triangles(info, cfg.max_triangles)
         event("TRIANGLES", f"Candidate triangle graph built: {len(triangles)}")
-
         volumes = _ticker_volumes(client)
-        triangles, symbols = _select_stream_universe(triangles, volumes, int(os.getenv("STREAM_SYMBOL_CAP", "500")))
+        triangles, symbols = _select_stream_universe(triangles, volumes, int(os.getenv("STREAM_SYMBOL_CAP", "0")))
         with LOCK:
             STATE["triangles"] = len(triangles)
             STATE["symbols"] = len(symbols)
