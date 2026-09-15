@@ -1,0 +1,35 @@
+name: Fix dashboard root route
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.event.head_commit.message != 'Fix dashboard root route implementation'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Redirect root to dashboard
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/dragon/main.py')
+          s = p.read_text()
+          old = '        if self.path in ("/", "/health", "/healthz") or self.path.startswith("/health?"):'
+          new = '        if self.path == "/":\n            self.send_response(302)\n            self.send_header("Location", "/dashboard")\n            self.end_headers(); return\n        if self.path in ("/health", "/healthz") or self.path.startswith("/health?"):'
+          if old not in s:
+              raise SystemExit('dashboard root route pattern not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+      - name: Commit fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/dragon/main.py
+          git diff --cached --quiet && exit 0
+          git commit -m 'Fix dashboard root route implementation'
+          git push
