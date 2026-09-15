@@ -1,5 +1,6 @@
 from decimal import Decimal, ROUND_DOWN
 import time
+
 from .binance import BinanceClient, BinanceError
 
 
@@ -57,6 +58,37 @@ def _find_recovery_symbol(filters, asset):
     return direct[0] if direct else (None, None)
 
 
+def _order_filled_or_reconcile(client, symbol, order_id, initial_response):
+    status = initial_response.get("status")
+    if status == "FILLED":
+        return initial_response
+    if not order_id:
+        raise ExecutionError(f"order status unknown for {symbol}: missing orderId")
+    try:
+        latest = client.order(symbol, int(order_id))
+    except BinanceError as exc:
+        raise ExecutionError(f"order status unknown for {symbol} order {order_id}: {exc}") from exc
+    if latest.get("status") != "FILLED":
+        raise ExecutionError(
+            f"{symbol} order not fully filled: status={latest.get('status')}, "
+            f"executedQty={latest.get('executedQty', '0')}, orderId={order_id}"
+        )
+    return latest
+
+
+def _account_balances(client, assets):
+    try:
+        account = client.account()
+    except BinanceError as exc:
+        raise ExecutionError(f"cannot reconcile account balances: {exc}") from exc
+    wanted = set(assets)
+    return {
+        item["asset"]: Decimal(str(item.get("free", "0")))
+        for item in account.get("balances", [])
+        if item.get("asset") in wanted
+    }
+
+
 def _recover_to_usdt(client, filters, asset, amount):
     if asset == "USDT" or amount <= 0:
         return {"recovered": True, "asset": asset, "amount": str(amount)}
@@ -73,34 +105,40 @@ def _recover_to_usdt(client, filters, asset, amount):
             resp = client.new_market_order(symbol, "BUY", quote_order_qty=quote_amount)
     except BinanceError as exc:
         raise ExecutionError(f"recovery order rejected {symbol} {side}: {exc}") from exc
-    if resp.get("status") != "FILLED":
-        order_id = resp.get("orderId")
-        if order_id:
-            try:
-                resp = client.order(symbol, int(order_id))
-            except BinanceError as exc:
-                raise ExecutionError(f"recovery status unknown for {symbol} order {order_id}: {exc}") from exc
-    if resp.get("status") != "FILLED":
-        raise ExecutionError(f"recovery not fully filled: {symbol} orderId={resp.get('orderId')} status={resp.get('status')}")
+    resp = _order_filled_or_reconcile(client, symbol, resp.get("orderId"), resp)
     received, received_asset = _net_received(resp, side, meta["baseAsset"], meta["quoteAsset"])
     if received_asset != "USDT":
         raise ExecutionError(f"recovery did not finish in USDT: received {received_asset}")
     return {"recovered": True, "symbol": symbol, "side": side, "amount_usdt": str(received), "order_id": resp.get("orderId")}
 
 
-def _order_filled_or_reconcile(client, symbol, order_id, initial_response):
-    status = initial_response.get("status")
-    if status == "FILLED":
-        return initial_response
-    if not order_id:
-        raise ExecutionError(f"order status unknown for {symbol}: missing orderId")
-    try:
-        latest = client.order(symbol, int(order_id))
-    except BinanceError as exc:
-        raise ExecutionError(f"order status unknown for {symbol} order {order_id}: {exc}") from exc
-    if latest.get("status") != "FILLED":
-        raise ExecutionError(f"{symbol} order not fully filled: status={latest.get('status')}, orderId={order_id}")
-    return latest
+def _reconcile_and_recover(client, filters, baseline, assets):
+    """Flatten only assets whose free balance increased during this cycle.
+
+    This is important for partial fills: a failed leg can leave both the
+    original source asset and the newly acquired target asset in the account.
+    Comparing against a pre-cycle balance avoids selling unrelated inventory.
+    """
+    current = _account_balances(client, assets)
+    deltas = {asset: current.get(asset, Decimal("0")) - baseline.get(asset, Decimal("0")) for asset in assets}
+    recoveries = []
+    for asset, delta in deltas.items():
+        if asset == "USDT" or delta <= 0:
+            continue
+        try:
+            recoveries.append(_recover_to_usdt(client, filters, asset, delta))
+        except ExecutionError as exc:
+            recoveries.append({"recovered": False, "asset": asset, "amount": str(delta), "error": str(exc)})
+
+    remaining = _account_balances(client, assets)
+    residual = {
+        asset: remaining.get(asset, Decimal("0")) - baseline.get(asset, Decimal("0"))
+        for asset in assets if asset != "USDT"
+    }
+    unresolved = {asset: str(delta) for asset, delta in residual.items() if delta > 0}
+    if unresolved:
+        raise ExecutionError(f"exposure reconciliation incomplete: {unresolved}; recoveries={recoveries}")
+    return recoveries
 
 
 def execute_triangle(client: BinanceClient, path, start_asset, first_asset, start_usdt, filters, dry_run=False):
@@ -113,6 +151,12 @@ def execute_triangle(client: BinanceClient, path, start_asset, first_asset, star
     source_asset = start_asset or "USDT"
     legs = []
     started = time.time()
+    assets = {"USDT"}
+    for symbol in path:
+        if symbol in filters:
+            assets.add(filters[symbol]["baseAsset"])
+            assets.add(filters[symbol]["quoteAsset"])
+    baseline = _account_balances(client, assets)
 
     try:
         for symbol in path:
@@ -166,10 +210,12 @@ def execute_triangle(client: BinanceClient, path, start_asset, first_asset, star
             "timestamp": time.time(),
         }
     except ExecutionError as exc:
-        # At this point every completed leg has already been recorded locally.
-        # Flatten the currently held intermediate asset so a failed later leg
-        # does not silently leave the account exposed to market direction.
-        if source_asset != "USDT" and amount > 0:
-            recovery = _recover_to_usdt(client, filters, source_asset, amount)
-            raise ExecutionError(f"{exc}; exposure recovered: {recovery}") from exc
-        raise
+        recovery_error = None
+        try:
+            recoveries = _reconcile_and_recover(client, filters, baseline, assets)
+        except ExecutionError as rec_exc:
+            recovery_error = str(rec_exc)
+            recoveries = None
+        if recovery_error:
+            raise ExecutionError(f"{exc}; recovery failed: {recovery_error}") from exc
+        raise ExecutionError(f"{exc}; exposure reconciled: {recoveries}") from exc
