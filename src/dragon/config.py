@@ -35,7 +35,9 @@ class Config:
     max_slippage_bps: float = 15.0
     fee_bps: float = 10.0
     risk_pct: float = 0.0015
-    capital_allocation_pct: float = 0.50
+    # With the fixed $10 starting capital, $5 reserve, and $5 minimum trade,
+    # the default allocation must expose the full $5 deployable budget.
+    capital_allocation_pct: float = 1.0
     safety_reserve_usdt: float = FIXED_SAFETY_RESERVE_USDT
     cooldown_ms: int = 1000
     max_triangles: int = 0

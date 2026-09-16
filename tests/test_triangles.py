@@ -16,8 +16,22 @@ def test_triangle_uses_direct_and_inverse_conversions():
     net_bps, gross_bps, path, first, second = result
     assert path == t.symbols
     assert first == "ETH" and second == "BTC"
-    assert gross_bps > Decimal("0")
+    assert Decimal("99") < gross_bps < Decimal("100")
     assert net_bps < gross_bps
+
+
+def test_triangle_gross_edge_is_before_fees():
+    t = Triangle(("ETHUSDT", "ETHBTC", "BTCUSDT"), ("USDT", "ETH", "BTC"))
+    books = {
+        "ETHUSDT": {"bids": [[100, 5]], "asks": [[101, 5]], "ts": 1},
+        "ETHBTC": {"bids": [[0.0102, 5]], "asks": [[0.0103, 5]], "ts": 1},
+        "BTCUSDT": {"bids": [[10000, 5]], "asks": [[10001, 5]], "ts": 1},
+    }
+    no_fee = evaluate_triangle(t, books, fee_bps=0, slippage_bps=0, notional_usdt=10)
+    with_fee = evaluate_triangle(t, books, fee_bps=10, slippage_bps=0, notional_usdt=10)
+    assert no_fee is not None and with_fee is not None
+    assert no_fee[1] == with_fee[1]
+    assert with_fee[0] < no_fee[0]
 
 
 def test_triangle_returns_none_without_complete_book():
