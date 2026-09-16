@@ -4,6 +4,7 @@ from collections import deque
 from typing import Callable
 from urllib.request import Request,urlopen
 import websockets
+
 VENUES=("BYBIT","OKX","COINBASE")
 DEFAULT_SYMBOLS=["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","AVAXUSDT","LINKUSDT","DOTUSDT"]
 WS_BACKOFF_MIN=1.0
@@ -38,8 +39,7 @@ class MultiExchangeFeeds:
         self.symbols=list(dict.fromkeys(requested))[:1000]
         self.venue_symbols={v:set() for v in VENUES};self._books={v:{} for v in VENUES};self._coinbase_books={}
         self._update_times={v:deque(maxlen=100) for v in VENUES};self._reconnects={v:0 for v in VENUES};self._last_updates={v:0.0 for v in VENUES};self._active_connections={v:0 for v in VENUES}
-        self._calc_count=0;self._calc_started_mono=time.monotonic()
-        self._gross=deque(maxlen=500);self._ages=deque(maxlen=500);self._depth=deque(maxlen=500)
+        self._calc_count=0;self._calc_started_mono=time.monotonic();self._gross=deque(maxlen=500);self._ages=deque(maxlen=500);self._depth=deque(maxlen=500)
         self._adaptive={"min_net_edge_bps":float(os.getenv("CROSS_MIN_NET_EDGE_BPS","0.10")),"slippage_bps":float(os.getenv("CROSS_SLIPPAGE_BPS","0.50")),"max_sync_skew_ms":float(os.getenv("CROSS_MAX_SYNC_SKEW_MS","500"))}
     def _emit(self,m):
         if not self.event:return
@@ -48,19 +48,19 @@ class MultiExchangeFeeds:
             if len(parts)==2:self.event(parts[0],parts[1])
             else:self.event("EXT",text)
         except Exception:pass
+    async def _discover_one(self,v):
+        urls={"BYBIT":"https://api.bybit.com/v5/market/instruments-info?category=spot&limit=1000","OKX":"https://www.okx.com/api/v5/public/instruments?instType=SPOT","COINBASE":"https://api.exchange.coinbase.com/products"}
+        try:
+            d=await asyncio.to_thread(_http_json,urls[v])
+            if v=="BYBIT":
+                self.venue_symbols[v]={x.get("symbol","").upper() for x in d.get("result",{}).get("list",[]) if x.get("quoteCoin")=="USDT" and x.get("status")=="Trading"}
+            elif v=="OKX":
+                self.venue_symbols[v]={x.get("baseCcy","").upper()+"USDT" for x in d.get("data",[]) if x.get("quoteCcy")=="USDT" and x.get("state")=="live"}
+            else:
+                self.venue_symbols[v]={x.get("base_currency","").upper()+"USDT" for x in d if x.get("quote_currency")=="USD" and x.get("status")=="online"}
+        except Exception as e:self._emit(f"EXT_SYMBOL_ERROR | {v} | {type(e).__name__}: {e}")
     async def _discover(self):
-        try:
-            b=await asyncio.to_thread(_http_json,"https://api.bybit.com/v5/market/instruments-info?category=spot&limit=1000")
-            self.venue_symbols["BYBIT"]={x.get("symbol","").upper() for x in b.get("result",{}).get("list",[]) if x.get("quoteCoin")=="USDT" and x.get("status")=="Trading"}
-        except Exception as e:self._emit(f"EXT_SYMBOL_ERROR | BYBIT | {e}")
-        try:
-            o=await asyncio.to_thread(_http_json,"https://www.okx.com/api/v5/public/instruments?instType=SPOT")
-            self.venue_symbols["OKX"]={x.get("baseCcy","").upper()+"USDT" for x in o.get("data",[]) if x.get("quoteCcy")=="USDT" and x.get("state")=="live"}
-        except Exception as e:self._emit(f"EXT_SYMBOL_ERROR | OKX | {e}")
-        try:
-            c=await asyncio.to_thread(_http_json,"https://api.exchange.coinbase.com/products")
-            self.venue_symbols["COINBASE"]={x.get("base_currency","").upper()+"USDT" for x in c if x.get("quote_currency")=="USD" and x.get("status")=="online"}
-        except Exception as e:self._emit(f"EXT_SYMBOL_ERROR | COINBASE | {e}")
+        await asyncio.gather(*(self._discover_one(v) for v in VENUES))
         for v in VENUES:
             self.venue_symbols[v]&=set(self.symbols);self._emit(f"EXT_SYMBOLS | {v} supported={len(self.venue_symbols[v])}")
     def _record_feed(self,v,s,bid,ask,bq,aq):
@@ -76,7 +76,10 @@ class MultiExchangeFeeds:
         x=list(dict.fromkeys(s));return [{"op":"subscribe","args":[f"orderbook.1.{z}" for z in x[i:i+10]]} for i in range(0,len(x),10)]
     def _okx_messages(self,s):return [{"op":"subscribe","args":[{"channel":"bbo-tbt","instId":f"{z[:-4]}-USDT"} for z in s[i:i+100]]} for i in range(0,len(s),100)]
     def _coinbase_messages(self,s):
-        p=[f"{z[:-4]}-USD" for z in s];return [{"type":"subscribe","product_ids":p[i:i+100],"channel":"level2"} for i in range(0,len(p),100)]
+        p=[f"{z[:-4]}-USD" for z in s]
+        msgs=[{"type":"subscribe","product_ids":p[i:i+100],"channel":"level2"} for i in range(0,len(p),100)]
+        if p:msgs.append({"type":"subscribe","channel":"heartbeats"})
+        return msgs
     def _bybit_parser(self,m):
         if not m.get("topic","").startswith("orderbook.1."):return
         d=m.get("data") or {};s=d.get("s");b=d.get("b") or [];a=d.get("a") or []
@@ -94,7 +97,7 @@ class MultiExchangeFeeds:
                 if not p.endswith("-USD"):continue
                 price,qty=float(u.get("price",0) or 0),float(u.get("new_quantity",0) or 0)
                 if price<=0:continue
-                s=p[:-4]+"USDT";side="bid" if u.get("side")=="bid" else "ask";lv=self._coinbase_books.setdefault(s,{"bid":{},"ask":{}});lv[side][price]=qty
+                s=p[:-4]+"USDT";side="bid" if str(u.get("side","")).lower()=="bid" else "ask";lv=self._coinbase_books.setdefault(s,{"bid":{},"ask":{}});lv[side][price]=qty
                 if qty<=0:lv[side].pop(price,None)
                 if lv["bid"] and lv["ask"]:
                     bp,ap=max(lv["bid"]),min(lv["ask"])
@@ -102,8 +105,7 @@ class MultiExchangeFeeds:
     def _adapt(self):
         if len(self._gross)<20:return
         base=float(os.getenv("CROSS_MIN_NET_EDGE_BPS","0.10"));slip=float(os.getenv("CROSS_SLIPPAGE_BPS","0.50"));sync=float(os.getenv("CROSS_MAX_SYNC_SKEW_MS","500"));evaluation=float(os.getenv("CROSS_EVALUATION_NOTIONAL_USDT","5"))
-        p25=_pct(self._gross,.25);age=_pct(self._ages,.5);depth=_pct(self._depth,.5)
-        amin=_clamp(max(base,p25*.10),.10,5.0);af=_clamp(age/1000,0,2);df=_clamp(evaluation/max(depth,evaluation),0,1)
+        p25=_pct(self._gross,.25);age=_pct(self._ages,.5);depth=_pct(self._depth,.5);amin=_clamp(max(base,p25*.10),.10,5.0);af=_clamp(age/1000,0,2);df=_clamp(evaluation/max(depth,evaluation),0,1)
         self._adaptive={"min_net_edge_bps":amin,"slippage_bps":_clamp(slip*(1+.75*af+.75*df),slip,3.0),"max_sync_skew_ms":_clamp(sync*(1-.25*af),100.0,sync)}
     async def _run_venue(self,v,symbols,n):
         urls={"BYBIT":"wss://stream.bybit.com/v5/public/spot","OKX":"wss://ws.okx.com:8443/ws/v5/public","COINBASE":"wss://advanced-trade-ws.coinbase.com"};builders={"BYBIT":self._bybit_messages,"OKX":self._okx_messages,"COINBASE":self._coinbase_messages};parsers={"BYBIT":self._bybit_parser,"OKX":self._okx_parser,"COINBASE":self._coinbase_parser};delay=WS_BACKOFF_MIN
@@ -121,13 +123,11 @@ class MultiExchangeFeeds:
                             if raw is None:raise ConnectionError("websocket closed")
                             m=json.loads(raw);self._record_control(v,m)
                             for item in parsers[v](m) or ():self._record_feed(v,*item)
-                    finally:
-                        self._active_connections[v]=max(0,self._active_connections[v]-1)
+                    finally:self._active_connections[v]=max(0,self._active_connections[v]-1)
             except asyncio.CancelledError:raise
             except Exception as e:
                 self._reconnects[v]+=1;self._emit(f"EXT_WS_ERROR | {v} connection-{n} | {type(e).__name__}: {e} | reconnect #{self._reconnects[v]}")
-                wait=min(WS_BACKOFF_MAX,delay)*(1+random.uniform(-WS_RECONNECT_JITTER,WS_RECONNECT_JITTER));self._emit(f"EXT_WS_RETRY | {v} connection-{n} | retry in {wait:.1f}s")
-                await asyncio.sleep(max(0.25,wait));delay=min(delay*2,WS_BACKOFF_MAX)
+                wait=min(WS_BACKOFF_MAX,delay)*(1+random.uniform(-WS_RECONNECT_JITTER,WS_RECONNECT_JITTER));self._emit(f"EXT_WS_RETRY | {v} connection-{n} | retry in {wait:.1f}s");await asyncio.sleep(max(.25,wait));delay=min(delay*2,WS_BACKOFF_MAX)
     def _update_hub_health(self):
         now=time.monotonic();stale=float(os.getenv("CROSS_WS_STALE_SECONDS",str(WS_STALE_SECONDS)))
         with self.lock:
@@ -153,11 +153,11 @@ class MultiExchangeFeeds:
         with self.lock:
             e=self.state.setdefault("external",{});e["opportunities"]=rows[:50];e["calculation_ms"]=elapsed;e["calculations_per_sec"]=self._calc_count/max(time.monotonic()-self._calc_started_mono,1e-6);e["reconnects"]=dict(self._reconnects);e["supported_symbols"]={v:len(self.venue_symbols[v]) for v in VENUES};e["adaptive_params"]=dict(self._adaptive);e["adaptive_samples"]={"gross_edges":len(self._gross),"quote_age":len(self._ages),"depth":len(self._depth)};e["external_scan_status"]="RUNNING"
     async def _calculator(self):
-        while True:self._update_opportunities();self._update_hub_health();await asyncio.sleep(max(.05,float(os.getenv("CROSS_RECALC_MIN_MS","100"))/1000))
+        while True:
+            self._update_opportunities();self._update_hub_health();await asyncio.sleep(max(.05,float(os.getenv("CROSS_RECALC_MIN_MS","100"))/1000))
     async def run(self):
-        await self._discover()
-        tasks=[]
+        await self._discover();tasks=[]
         for v in VENUES:
-            syms=sorted(self.venue_symbols[v]);
+            syms=sorted(self.venue_symbols[v])
             for i in range(0,len(syms),WS_SYMBOLS_PER_CONNECTION):tasks.append(asyncio.create_task(self._run_venue(v,syms[i:i+WS_SYMBOLS_PER_CONNECTION],i//WS_SYMBOLS_PER_CONNECTION+1)))
         tasks.append(asyncio.create_task(self._calculator()));await asyncio.gather(*tasks)
