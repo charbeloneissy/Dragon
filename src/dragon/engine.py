@@ -1,5 +1,7 @@
 import asyncio
+import os
 import re
+from decimal import Decimal
 
 
 def main():
@@ -41,6 +43,33 @@ def main():
         return original_get(self)
 
     dragon_main.Handler.do_GET = dashboard_root
+
+    # The dashboard already exposes a decision funnel. Keep its counters fed
+    # from the same evaluator used by the live scanner, without changing the
+    # economic formula or execution path. A None result means the executable
+    # depth simulation could not produce a complete path; a returned result
+    # below the configured net-edge floor is a true edge rejection.
+    original_evaluate = dragon_main.evaluate_triangle
+
+    def instrumented_evaluate(*args, **kwargs):
+        result = original_evaluate(*args, **kwargs)
+        try:
+            with dragon_main.LOCK:
+                dragon_main.STATE.setdefault("rejection", {})
+                dragon_main.STATE.setdefault("rejection_total", 0)
+                dragon_main.STATE["rejection_total"] += 1
+                if result is None:
+                    key = "NO_LIQUIDITY"
+                else:
+                    net_bps = Decimal(str(result[0]))
+                    cfg = dragon_main.Config.from_env()
+                    key = "NET_EDGE_REJECTED" if net_bps < Decimal(str(cfg.min_net_edge_bps)) else "NET_EDGE_PASSED"
+                dragon_main.STATE["rejection"][key] = dragon_main.STATE["rejection"].get(key, 0) + 1
+        except Exception:
+            pass
+        return result
+
+    dragon_main.evaluate_triangle = instrumented_evaluate
 
     async def run_futures_resilient():
         # Futures is an optional supervisor. It must never be allowed to bring
