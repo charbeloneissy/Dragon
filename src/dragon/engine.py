@@ -1,7 +1,6 @@
 import asyncio
 import os
 import re
-from decimal import Decimal
 
 
 def main():
@@ -9,16 +8,17 @@ def main():
     from src.dragon.hardening import install
     from src.dragon.dashboard import HTML as DASHBOARD_HTML
     from src.dragon.futures_runner import run as run_futures
-    from src.dragon.stream_transport import install as install_stream_transport
     import websockets
     import web_runner
 
     install(dragon_main)
-    install_stream_transport(dragon_main)
     dragon_main.DASHBOARD = DASHBOARD_HTML
 
-    # Binance can occasionally stop delivering enough traffic for the default
-    # websocket keepalive window. Give the connection more recovery headroom.
+    # Keep the production stream on the native /ws endpoint. The transport
+    # telemetry shim previously rebuilt Config with only a subset of fields,
+    # silently dropping capital allocation, safety reserve, expected-profit,
+    # and other newer risk controls. The live scanner must receive the exact
+    # Config produced by Config.from_env().
     original_connect = websockets.connect
 
     def resilient_connect(*args, **kwargs):
@@ -44,11 +44,10 @@ def main():
 
     dragon_main.Handler.do_GET = dashboard_root
 
-    # The dashboard already exposes a decision funnel. Keep its counters fed
-    # from the same evaluator used by the live scanner, without changing the
-    # economic formula or execution path. A None result means the executable
-    # depth simulation could not produce a complete path; a returned result
-    # below the configured net-edge floor is a true edge rejection.
+    # Feed the dashboard with rejection telemetry from the same evaluator used
+    # by the live scanner, without changing the economic formula or execution
+    # path. A None result means executable depth could not complete the path;
+    # a returned result below the configured net-edge floor is an edge reject.
     original_evaluate = dragon_main.evaluate_triangle
 
     def instrumented_evaluate(*args, **kwargs):
@@ -61,6 +60,7 @@ def main():
                 if result is None:
                     key = "NO_LIQUIDITY"
                 else:
+                    from decimal import Decimal
                     net_bps = Decimal(str(result[0]))
                     cfg = dragon_main.Config.from_env()
                     key = "NET_EDGE_REJECTED" if net_bps < Decimal(str(cfg.min_net_edge_bps)) else "NET_EDGE_PASSED"
@@ -78,8 +78,6 @@ def main():
         while True:
             try:
                 await run_futures()
-                # A normal return is unexpected for the enabled supervisor, so
-                # keep the process alive and retry rather than ending gather().
                 await asyncio.sleep(5)
             except asyncio.CancelledError:
                 raise
@@ -98,8 +96,6 @@ def main():
                 await asyncio.sleep(wait)
 
     async def supervisor():
-        # Keep exactly one Dragon process. Futures failures are isolated so the
-        # Spot engine and dashboard remain available while Futures backs off.
         await asyncio.gather(dragon_main.run(), run_futures_resilient())
 
     asyncio.run(supervisor())
