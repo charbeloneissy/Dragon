@@ -9,14 +9,16 @@ DEFAULT_SYMBOLS=["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","DOGEUSDT","A
 WS_BACKOFF_MIN=1.0
 WS_BACKOFF_MAX=60.0
 WS_STALE_SECONDS=float(os.getenv("CROSS_WS_STALE_SECONDS","45"))
-WS_PING_INTERVAL=float(os.getenv("CROSS_WS_PING_INTERVAL","15"))
-WS_PING_TIMEOUT=float(os.getenv("CROSS_WS_PING_TIMEOUT","10"))
-WS_OPEN_TIMEOUT=float(os.getenv("CROSS_WS_OPEN_TIMEOUT","15"))
+WS_PING_INTERVAL=float(os.getenv("CROSS_WS_PING_INTERVAL","20"))
+WS_PING_TIMEOUT=float(os.getenv("CROSS_WS_PING_TIMEOUT","15"))
+WS_OPEN_TIMEOUT=float(os.getenv("CROSS_WS_OPEN_TIMEOUT","20"))
 WS_CLOSE_TIMEOUT=float(os.getenv("CROSS_WS_CLOSE_TIMEOUT","5"))
-WS_MAX_QUEUE=int(os.getenv("CROSS_WS_MAX_QUEUE","4096"))
+WS_MAX_QUEUE=int(os.getenv("CROSS_WS_MAX_QUEUE","8192"))
 WS_MAX_SIZE=int(os.getenv("CROSS_WS_MAX_SIZE",str(2**24)))
-WS_SYMBOLS_PER_CONNECTION=max(50,int(os.getenv("CROSS_WS_SYMBOLS_PER_CONNECTION","250")))
-WS_SUBSCRIBE_DELAY=max(0.0,float(os.getenv("CROSS_WS_SUBSCRIBE_DELAY","0.10")))
+WS_SYMBOLS_PER_CONNECTION=max(50,int(os.getenv("CROSS_WS_SYMBOLS_PER_CONNECTION","100")))
+WS_SUBSCRIBE_DELAY=max(0.0,float(os.getenv("CROSS_WS_SUBSCRIBE_DELAY","0.15")))
+WS_RECONNECT_JITTER=float(os.getenv("CROSS_WS_RECONNECT_JITTER","0.25"))
+
 
 def _http_json(url,timeout=10.0):
     req=Request(url,headers={"User-Agent":"Dragon/1.0"})
@@ -28,7 +30,7 @@ def _pct(values,q,default=0.0):
     return x[i]+(x[j]-x[i])*(p-i)
 
 class MultiExchangeFeeds:
-    """Observation-only cross-venue scanner with adaptive bounded sensitivity."""
+    """Observation-only cross-venue scanner with isolated, self-healing connection hubs."""
     def __init__(self,state,lock,event:Callable|None=None,symbols=None):
         self.state,self.lock,self.event=state,lock,event
         requested=symbols or DEFAULT_SYMBOLS
@@ -36,7 +38,7 @@ class MultiExchangeFeeds:
         if override:requested=[x.strip().upper() for x in override.split(",") if x.strip()]
         self.symbols=list(dict.fromkeys(requested))[:1000]
         self.venue_symbols={v:set() for v in VENUES};self._books={v:{} for v in VENUES};self._coinbase_books={}
-        self._update_times={v:deque(maxlen=100) for v in VENUES};self._reconnects={v:0 for v in VENUES}
+        self._update_times={v:deque(maxlen=100) for v in VENUES};self._reconnects={v:0 for v in VENUES};self._last_updates={v:0.0 for v in VENUES}
         self._calc_count=0;self._calc_started_mono=time.monotonic()
         self._gross=deque(maxlen=500);self._ages=deque(maxlen=500);self._depth=deque(maxlen=500)
         self._adaptive={"min_net_edge_bps":float(os.getenv("CROSS_MIN_NET_EDGE_BPS","0.10")),"slippage_bps":float(os.getenv("CROSS_SLIPPAGE_BPS","0.50")),"max_sync_skew_ms":float(os.getenv("CROSS_MAX_SYNC_SKEW_MS","500"))}
@@ -66,7 +68,7 @@ class MultiExchangeFeeds:
         try:bid,ask,bq,aq=map(float,(bid,ask,bq,aq))
         except (TypeError,ValueError):return
         if min(bid,ask,bq,aq)<=0 or ask<bid:return
-        now=time.monotonic();self._books[v][s]={"bid":bid,"ask":ask,"bid_qty":bq,"ask_qty":aq,"ts":now}
+        now=time.monotonic();self._books[v][s]={"bid":bid,"ask":ask,"bid_qty":bq,"ask_qty":aq,"ts":now};self._last_updates[v]=now
         t=self._update_times[v];t.append(now);ups=(len(t)-1)/max(t[-1]-t[0],1e-6) if len(t)>1 else 0.0
         with self.lock:self.state.setdefault("external",{}).setdefault("feeds",{}).setdefault(v,{})[s]={"bid":bid,"ask":ask,"bid_qty":bq,"ask_qty":aq,"quote_age_ms":0.0,"updates_per_sec":ups,"last_update":time.time()}
     def _record_control(self,v,msg):
@@ -120,7 +122,13 @@ class MultiExchangeFeeds:
                         for item in parsers[v](m) or ():self._record_feed(v,*item)
             except asyncio.CancelledError:raise
             except Exception as e:
-                self._reconnects[v]+=1;self._emit(f"EXT_WS_ERROR | {v} connection-{n} | {type(e).__name__}: {e} | reconnect #{self._reconnects[v]}");await asyncio.sleep(min(delay,WS_BACKOFF_MAX)*(.8+random.random()*.4));delay=min(delay*2,WS_BACKOFF_MAX)
+                self._reconnects[v]+=1;self._emit(f"EXT_WS_ERROR | {v} connection-{n} | {type(e).__name__}: {e} | reconnect #{self._reconnects[v]}")
+                wait=min(WS_BACKOFF_MAX,delay)*(1+random.uniform(-WS_RECONNECT_JITTER,WS_RECONNECT_JITTER));self._emit(f"EXT_WS_RETRY | {v} connection-{n} | retry in {wait:.1f}s")
+                await asyncio.sleep(max(0.25,wait));delay=min(delay*2,WS_BACKOFF_MAX)
+    def _update_hub_health(self):
+        now=time.monotonic();stale=float(os.getenv("CROSS_WS_STALE_SECONDS",str(WS_STALE_SECONDS)))
+        with self.lock:
+            e=self.state.setdefault("external",{});e["hub_health"]={v:{"connections":sum(1 for t in asyncio.all_tasks() if not t.done()) if False else 0,"last_update":time.time() if self._last_updates[v] else None,"age_ms":(now-self._last_updates[v])*1000 if self._last_updates[v] else None,"reconnects":self._reconnects[v],"healthy":bool(self._last_updates[v] and now-self._last_updates[v]<=stale)} for v in VENUES}
     def _update_opportunities(self):
         stale=float(os.getenv("CROSS_STALE_MS","1500"));lat_rate=float(os.getenv("CROSS_LATENCY_BPS_PER_MS","0.005"));evaluation=float(os.getenv("CROSS_EVALUATION_NOTIONAL_USDT","5"));fees={v:float(os.getenv(f"CROSS_FEE_BPS_{v}","10")) for v in VENUES};self._adapt();now=time.monotonic();rows=[];started=now
         for s in self.symbols:
@@ -142,7 +150,7 @@ class MultiExchangeFeeds:
         with self.lock:
             e=self.state.setdefault("external",{});e["opportunities"]=rows[:50];e["calculation_ms"]=elapsed;e["calculations_per_sec"]=self._calc_count/max(time.monotonic()-self._calc_started_mono,1e-6);e["reconnects"]=dict(self._reconnects);e["supported_symbols"]={v:len(self.venue_symbols[v]) for v in VENUES};e["adaptive_params"]=dict(self._adaptive);e["adaptive_samples"]={"gross_edges":len(self._gross),"quote_age":len(self._ages),"depth":len(self._depth)};e["external_scan_status"]="RUNNING"
     async def _calculator(self):
-        while True:self._update_opportunities();await asyncio.sleep(max(.05,float(os.getenv("CROSS_RECALC_MIN_MS","100"))/1000))
+        while True:self._update_opportunities();self._update_hub_health();await asyncio.sleep(max(.05,float(os.getenv("CROSS_RECALC_MIN_MS","100"))/1000))
     async def run(self):
         await self._discover();tasks=[asyncio.create_task(self._calculator())]
         for v in VENUES:
