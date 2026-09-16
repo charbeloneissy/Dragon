@@ -179,7 +179,6 @@ def evaluate_triangle(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=Non
         used.append(symbol)
 
     gross_bps = (gross_amount / start - Decimal("1")) * Decimal("10000")
-    fee_drag_bps = (Decimal("1") - (net_amount / gross_amount)) * Decimal("10000")
     safety_bps = _dynamic_safety_bps(t, books, symbol_meta, start, slippage_bps)
     net_bps = (net_amount / start - Decimal("1")) * Decimal("10000") - safety_bps
     return net_bps, gross_bps, tuple(used), t.assets[1], t.assets[2]
