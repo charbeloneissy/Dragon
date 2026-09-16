@@ -136,25 +136,14 @@ def _ticker_volumes(client):
 
 
 def _select_stream_universe(triangles, volumes, cap):
-    """Select complete triangles without misinterpreting 0 as a 3-symbol cap.
-
-    cap <= 0 means no application-level stream cap. Positive caps rank complete
-    triangles by combined 24h quote volume and never split a triangle.
-    """
     if not triangles:
         return [], []
     if int(cap) <= 0:
         symbols = sorted({s for triangle in triangles for s in triangle.symbols})
         return list(triangles), symbols
-
     cap = max(3, int(cap))
-    ranked = sorted(
-        triangles,
-        key=lambda t: sum((volumes.get(s, Decimal("0")) for s in t.symbols), Decimal("0")),
-        reverse=True,
-    )
-    selected_symbols = set()
-    selected_triangles = []
+    ranked = sorted(triangles, key=lambda t: sum((volumes.get(s, Decimal("0")) for s in t.symbols), Decimal("0")), reverse=True)
+    selected_symbols, selected_triangles = set(), []
     for triangle in ranked:
         additions = set(triangle.symbols) - selected_symbols
         if len(selected_symbols) + len(additions) > cap:
@@ -193,13 +182,7 @@ async def stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
 
     while True:
         try:
-            async with websockets.connect(
-                cfg.ws_base,
-                ping_interval=20,
-                ping_timeout=10,
-                close_timeout=5,
-                max_size=2**23,
-            ) as ws:
+            async with websockets.connect(cfg.ws_base, ping_interval=20, ping_timeout=10, close_timeout=5, max_size=2**23) as ws:
                 with LOCK:
                     STATE["ws_connected"] = True
                     STATE["status"] = "running"
@@ -250,6 +233,8 @@ async def stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
                         cfg.risk_pct,
                         cfg.max_notional_usdt,
                         Decimal(str(cfg.min_trade_notional_usdt)),
+                        capital_allocation_pct=cfg.capital_allocation_pct,
+                        safety_reserve_usdt=Decimal(str(cfg.safety_reserve_usdt)),
                     )
                     if budget <= 0:
                         with LOCK:
@@ -272,13 +257,7 @@ async def stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
                         now_ms = time.monotonic() * 1000
                         if not (cfg.live_trading and not cfg.dry_run) or now_ms - last_order_ms < cfg.cooldown_ms:
                             continue
-                        if not approved(
-                            net_bps,
-                            cfg.min_net_edge_bps,
-                            budget,
-                            cfg.max_notional_usdt,
-                            min_trade_notional=Decimal(str(cfg.min_trade_notional_usdt)),
-                        ):
+                        if not approved(net_bps, cfg.min_net_edge_bps, budget, cfg.max_notional_usdt, min_trade_notional=Decimal(str(cfg.min_trade_notional_usdt))):
                             with LOCK:
                                 STATE["risk_blocks"] += 1
                             event("RISK", "Trade blocked by risk/notional gate", path=path)
