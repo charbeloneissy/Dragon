@@ -20,7 +20,8 @@ WS_PING_INTERVAL = 20.0
 WS_PING_TIMEOUT = 20.0
 REST_FALLBACK_SECONDS = 3.0
 DISPLAY_MIN_NET_BPS = Decimal(os.getenv("DASHBOARD_MIN_NET_EDGE_BPS", "0"))
-DISPLAY_MAX_NET_BPS = Decimal(os.getenv("DASHBOARD_MAX_NET_EDGE_BPS", "100000"))\n
+DISPLAY_MAX_NET_BPS = Decimal(os.getenv("DASHBOARD_MAX_NET_EDGE_BPS", "100000"))
+
 
 def _ws_state(worker_id, **values):
     with web_runner.LOCK:
@@ -141,8 +142,6 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                     balance_ok = False; last_balance_ms = now; web_runner.event("BALANCE_ERROR", f"balance refresh failed; trading paused until restored: {exc}")
             if not balance_ok or free_usdt <= 0: continue
 
-            # Use the same reserve/allocation budget for scanning, qualification,
-            # and execution. Never turn raw free USDT into an executable budget.
             trade_budget = web_runner.risk_budget(
                 free_usdt,
                 cfg.risk_pct,
@@ -156,10 +155,8 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
             with web_runner.LOCK:
                 web_runner.STATE["universe_max_entries"] = max_entries
                 web_runner.STATE["trade_budget"] = str(trade_budget)
-
             if trade_budget <= 0:
-                with web_runner.LOCK:
-                    web_runner.STATE["min_notional_blocks"] += 1
+                with web_runner.LOCK: web_runner.STATE["min_notional_blocks"] += 1
                 continue
 
             cycle_start = time.monotonic(); cycle_top = []; cycle_qualified = 0; cycle_ready = 0; cycle_rejected = 0; cycle_reasons = {}
@@ -171,15 +168,7 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                 net_bps, gross_bps, path, first, second = result
                 expected_profit = evaluation_notional * net_bps / Decimal("10000")
                 edge_ok = net_bps >= Decimal(str(cfg.min_net_edge_bps))
-                decision = classify_triangle(
-                    triangle, books, symbol_meta, now, evaluation_notional,
-                    stale_ms=cfg.stale_ms,
-                    max_slippage_bps=Decimal(str(cfg.max_slippage_bps)),
-                    net_edge_bps=net_bps,
-                    min_net_edge_bps=Decimal(str(cfg.min_net_edge_bps)),
-                    expected_profit_usdt=expected_profit,
-                    min_expected_profit_usdt=Decimal(str(cfg.min_expected_profit_usdt)),
-                )
+                decision = classify_triangle(triangle, books, symbol_meta, now, evaluation_notional, stale_ms=cfg.stale_ms, max_slippage_bps=Decimal(str(cfg.max_slippage_bps)), net_edge_bps=net_bps, min_net_edge_bps=Decimal(str(cfg.min_net_edge_bps)), expected_profit_usdt=expected_profit, min_expected_profit_usdt=Decimal(str(cfg.min_expected_profit_usdt)))
                 eligible = edge_ok and decision.qualified
                 ready = edge_ok and decision.execution_ready and trade_budget >= Decimal(str(cfg.min_trade_notional_usdt)) and max_entries > 0
                 if eligible: cycle_qualified += 1
@@ -189,15 +178,12 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                     reason = decision.rejection or ("NET_EDGE" if not edge_ok else "CAPITAL")
                     cycle_reasons[reason] = cycle_reasons.get(reason, 0) + 1
                 cycle_top.append({"path": path, "tier": decision.tier, "score": float(decision.score), "net_bps": float(net_bps), "gross_bps": float(gross_bps), "liquidity_factor": float(decision.liquidity_factor), "expected_profit_usdt": str(expected_profit), "qualified": eligible, "execution_ready": ready, "rejection": decision.rejection})
-
                 web_runner.record_opportunity(path, net_bps, gross_bps, evaluation_notional, eligible=eligible, trade_budget=trade_budget)
                 gate = "PASS" if ready else (decision.rejection or ("NET_EDGE" if not edge_ok else "CAPITAL"))
                 web_runner.event("CANDIDATE", f"tier={decision.tier} score={decision.score:.3f} net={net_bps:.3f} gross={gross_bps:.3f} expected=${expected_profit:.6f} gate={gate}", path=path, tier=decision.tier, score=float(decision.score), net_bps=float(net_bps), gross_bps=float(gross_bps), expected_profit_usdt=str(expected_profit), evaluation_notional=str(evaluation_notional), trade_budget=str(trade_budget), rejection_reason=gate)
-
                 if not ready: continue
                 with web_runner.LOCK: web_runner.STATE["opportunities"] += 1; web_runner.STATE["last_opportunity"] = time.time()
                 web_runner.event("OPPORTUNITY", f"tier={decision.tier} score={decision.score:.3f} net={net_bps:.3f} gross={gross_bps:.3f} expected=${expected_profit:.6f}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps), expected_profit_usdt=str(expected_profit), evaluation_notional=str(evaluation_notional), universe_score=float(decision.score))
-
                 now_ms = time.monotonic() * 1000
                 if not (cfg.live_trading and not cfg.dry_run) or not trading_allowed("spot") or now_ms - last_order_ms < cfg.cooldown_ms: continue
                 if not web_runner.approved(net_bps, cfg.min_net_edge_bps, trade_budget, cfg.max_notional_usdt, min_trade_notional=Decimal(str(cfg.min_trade_notional_usdt))):
