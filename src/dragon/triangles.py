@@ -128,13 +128,22 @@ def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Deci
 
 
 def evaluate_triangle(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
-    """Evaluate the exact three-leg path using live depth and fees."""
+    """Evaluate an exact three-leg path using live depth.
+
+    Gross edge is deliberately calculated before trading fees. Each leg is
+    priced from executable order-book depth, so the gross result already
+    reflects the actual VWAP/depth available for the requested notional.
+    Fees are then compounded separately across all three legs to produce the
+    post-fee executable result. The configured slippage value is an additional
+    latency/repricing safety buffer, not book impact already captured by _walk.
+    """
     symbol_meta = symbol_meta or {}
     start = Decimal(str(notional_usdt))
     if start <= 0 or not all(s in books for s in t.symbols):
         return None
 
-    amount = start
+    gross_amount = start
+    net_amount = start
     used = []
     fee_factor = Decimal("1") - Decimal(str(fee_bps)) / Decimal("10000")
     if fee_factor <= 0:
@@ -153,15 +162,24 @@ def evaluate_triangle(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=Non
             side = "sell"
         else:
             return None
-        amount = _walk(symbol, side, amount, books)
-        if amount is None:
+
+        # Gross path: executable depth only, with no fee deduction.
+        gross_amount = _walk(symbol, side, gross_amount, books)
+        if gross_amount is None or gross_amount <= 0:
             return None
-        amount *= fee_factor
-        if amount <= 0:
+
+        # Net path: the same executable depth, with the fee applied after
+        # each completed leg so the three-leg fee is compounded correctly.
+        net_amount = _walk(symbol, side, net_amount, books)
+        if net_amount is None or net_amount <= 0:
+            return None
+        net_amount *= fee_factor
+        if net_amount <= 0:
             return None
         used.append(symbol)
 
-    gross_bps = (amount / start - Decimal("1")) * Decimal("10000")
+    gross_bps = (gross_amount / start - Decimal("1")) * Decimal("10000")
+    fee_drag_bps = (Decimal("1") - (net_amount / gross_amount)) * Decimal("10000")
     safety_bps = _dynamic_safety_bps(t, books, symbol_meta, start, slippage_bps)
-    net_bps = gross_bps - safety_bps
+    net_bps = (net_amount / start - Decimal("1")) * Decimal("10000") - safety_bps
     return net_bps, gross_bps, tuple(used), t.assets[1], t.assets[2]
