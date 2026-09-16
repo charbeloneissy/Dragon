@@ -19,7 +19,6 @@ WS_SYMBOLS_PER_CONNECTION=max(50,int(os.getenv("CROSS_WS_SYMBOLS_PER_CONNECTION"
 WS_SUBSCRIBE_DELAY=max(0.0,float(os.getenv("CROSS_WS_SUBSCRIBE_DELAY","0.15")))
 WS_RECONNECT_JITTER=float(os.getenv("CROSS_WS_RECONNECT_JITTER","0.25"))
 
-
 def _http_json(url,timeout=10.0):
     req=Request(url,headers={"User-Agent":"Dragon/1.0"})
     with urlopen(req,timeout=timeout) as r:return json.loads(r.read().decode("utf-8"))
@@ -38,14 +37,14 @@ class MultiExchangeFeeds:
         if override:requested=[x.strip().upper() for x in override.split(",") if x.strip()]
         self.symbols=list(dict.fromkeys(requested))[:1000]
         self.venue_symbols={v:set() for v in VENUES};self._books={v:{} for v in VENUES};self._coinbase_books={}
-        self._update_times={v:deque(maxlen=100) for v in VENUES};self._reconnects={v:0 for v in VENUES};self._last_updates={v:0.0 for v in VENUES}
+        self._update_times={v:deque(maxlen=100) for v in VENUES};self._reconnects={v:0 for v in VENUES};self._last_updates={v:0.0 for v in VENUES};self._active_connections={v:0 for v in VENUES}
         self._calc_count=0;self._calc_started_mono=time.monotonic()
         self._gross=deque(maxlen=500);self._ages=deque(maxlen=500);self._depth=deque(maxlen=500)
         self._adaptive={"min_net_edge_bps":float(os.getenv("CROSS_MIN_NET_EDGE_BPS","0.10")),"slippage_bps":float(os.getenv("CROSS_SLIPPAGE_BPS","0.50")),"max_sync_skew_ms":float(os.getenv("CROSS_MAX_SYNC_SKEW_MS","500"))}
     def _emit(self,m):
         if not self.event:return
         try:
-            text=str(m); parts=text.split(" | ",1)
+            text=str(m);parts=text.split(" | ",1)
             if len(parts)==2:self.event(parts[0],parts[1])
             else:self.event("EXT",text)
         except Exception:pass
@@ -74,7 +73,7 @@ class MultiExchangeFeeds:
     def _record_control(self,v,msg):
         if v=="BYBIT" and msg.get("op")=="subscribe":self._emit(f"EXT_SUB_{'OK' if msg.get('success') else 'ERROR'} | BYBIT | {msg.get('ret_msg','')}")
     def _bybit_messages(self,s):
-        x=list(dict.fromkeys(["BTCUSDT"]+list(s)));return [{"op":"subscribe","args":[f"orderbook.1.{z}" for z in x[i:i+10]]} for i in range(0,len(x),10)]
+        x=list(dict.fromkeys(s));return [{"op":"subscribe","args":[f"orderbook.1.{z}" for z in x[i:i+10]]} for i in range(0,len(x),10)]
     def _okx_messages(self,s):return [{"op":"subscribe","args":[{"channel":"bbo-tbt","instId":f"{z[:-4]}-USDT"} for z in s[i:i+100]]} for i in range(0,len(s),100)]
     def _coinbase_messages(self,s):
         p=[f"{z[:-4]}-USD" for z in s];return [{"type":"subscribe","product_ids":p[i:i+100],"channel":"level2"} for i in range(0,len(p),100)]
@@ -112,14 +111,18 @@ class MultiExchangeFeeds:
             try:
                 self._emit(f"EXT_WS | {v} connection-{n} connecting")
                 async with websockets.connect(urls[v],ping_interval=WS_PING_INTERVAL,ping_timeout=WS_PING_TIMEOUT,close_timeout=WS_CLOSE_TIMEOUT,open_timeout=WS_OPEN_TIMEOUT,max_size=WS_MAX_SIZE,max_queue=WS_MAX_QUEUE,compression=None) as ws:
-                    msgs=builders[v](symbols)
-                    for m in msgs:await ws.send(json.dumps(m));await asyncio.sleep(WS_SUBSCRIBE_DELAY)
-                    self._emit(f"EXT_WS | {v} connection-{n} connected subscriptions={len(msgs)} symbols={len(symbols)}");delay=WS_BACKOFF_MIN
-                    while True:
-                        raw=await asyncio.wait_for(ws.recv(),timeout=WS_STALE_SECONDS)
-                        if raw is None:raise ConnectionError("websocket closed")
-                        m=json.loads(raw);self._record_control(v,m)
-                        for item in parsers[v](m) or ():self._record_feed(v,*item)
+                    self._active_connections[v]+=1
+                    try:
+                        msgs=builders[v](symbols)
+                        for m in msgs:await ws.send(json.dumps(m));await asyncio.sleep(WS_SUBSCRIBE_DELAY)
+                        self._emit(f"EXT_WS | {v} connection-{n} connected subscriptions={len(msgs)} symbols={len(symbols)}");delay=WS_BACKOFF_MIN
+                        while True:
+                            raw=await asyncio.wait_for(ws.recv(),timeout=WS_STALE_SECONDS)
+                            if raw is None:raise ConnectionError("websocket closed")
+                            m=json.loads(raw);self._record_control(v,m)
+                            for item in parsers[v](m) or ():self._record_feed(v,*item)
+                    finally:
+                        self._active_connections[v]=max(0,self._active_connections[v]-1)
             except asyncio.CancelledError:raise
             except Exception as e:
                 self._reconnects[v]+=1;self._emit(f"EXT_WS_ERROR | {v} connection-{n} | {type(e).__name__}: {e} | reconnect #{self._reconnects[v]}")
@@ -128,7 +131,7 @@ class MultiExchangeFeeds:
     def _update_hub_health(self):
         now=time.monotonic();stale=float(os.getenv("CROSS_WS_STALE_SECONDS",str(WS_STALE_SECONDS)))
         with self.lock:
-            e=self.state.setdefault("external",{});e["hub_health"]={v:{"connections":sum(1 for t in asyncio.all_tasks() if not t.done()) if False else 0,"last_update":time.time() if self._last_updates[v] else None,"age_ms":(now-self._last_updates[v])*1000 if self._last_updates[v] else None,"reconnects":self._reconnects[v],"healthy":bool(self._last_updates[v] and now-self._last_updates[v]<=stale)} for v in VENUES}
+            e=self.state.setdefault("external",{});e["hub_health"]={v:{"connections":self._active_connections[v],"last_update":time.time() if self._last_updates[v] else None,"age_ms":(now-self._last_updates[v])*1000 if self._last_updates[v] else None,"reconnects":self._reconnects[v],"healthy":bool(self._last_updates[v] and now-self._last_updates[v]<=stale)} for v in VENUES}
     def _update_opportunities(self):
         stale=float(os.getenv("CROSS_STALE_MS","1500"));lat_rate=float(os.getenv("CROSS_LATENCY_BPS_PER_MS","0.005"));evaluation=float(os.getenv("CROSS_EVALUATION_NOTIONAL_USDT","5"));fees={v:float(os.getenv(f"CROSS_FEE_BPS_{v}","10")) for v in VENUES};self._adapt();now=time.monotonic();rows=[];started=now
         for s in self.symbols:
@@ -152,10 +155,9 @@ class MultiExchangeFeeds:
     async def _calculator(self):
         while True:self._update_opportunities();self._update_hub_health();await asyncio.sleep(max(.05,float(os.getenv("CROSS_RECALC_MIN_MS","100"))/1000))
     async def run(self):
-        await self._discover();tasks=[asyncio.create_task(self._calculator())]
+        await self._discover()
+        tasks=[]
         for v in VENUES:
-            s=sorted(self.venue_symbols[v])
-            for i in range(0,len(s),WS_SYMBOLS_PER_CONNECTION):
-                shard=s[i:i+WS_SYMBOLS_PER_CONNECTION]
-                if shard:tasks.append(asyncio.create_task(self._run_venue(v,shard,i//WS_SYMBOLS_PER_CONNECTION+1)))
-        await asyncio.gather(*tasks)
+            syms=sorted(self.venue_symbols[v]);
+            for i in range(0,len(syms),WS_SYMBOLS_PER_CONNECTION):tasks.append(asyncio.create_task(self._run_venue(v,syms[i:i+WS_SYMBOLS_PER_CONNECTION],i//WS_SYMBOLS_PER_CONNECTION+1)))
+        tasks.append(asyncio.create_task(self._calculator()));await asyncio.gather(*tasks)
