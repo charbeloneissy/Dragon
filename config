@@ -1,1 +1,5 @@
+# In your Dragon repo, replace the original config.py:
+cp dragon_config.py src/config.py
 
+# Or if it's in the root:
+cp dragon_config.py config.py
