@@ -47,9 +47,9 @@ def env_decimal(name,default):
 
 def env_bool(name,default=False): return os.getenv(name,str(default)).strip().lower() in {"1","true","yes","on"}
 
-def record_rejections(stats):
+def merge_rejections(stats):
     with LOCK:
-        for key,value in stats.items(): STATE["rejections"][key]=STATE["rejections"].get(key,0)+int(value)
+        for key,value in stats.items(): STATE["rejections"][key]=int(value)
 
 async def main():
     logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"),format="%(asctime)s %(levelname)s %(message)s")
@@ -75,11 +75,8 @@ async def main():
         else:
             executor=None; taker=taker_config; fee_bps=configured_fee
         if not flash_enabled and configured_fee!=0: raise ValueError("FLASH_LOAN_FEE_BPS requires FLASH_LOAN_ENABLED=true")
-        available=set(adapter.sources(chain_id))
-        configured=tuple(x.strip() for x in os.getenv("DEX_SOURCES","").split(",") if x.strip())
-        requested=configured or ("Uniswap_V3","Aerodrome","SushiSwap","Uniswap_V2","PancakeSwapV3")
-        sources=tuple(x for x in requested if x in available)
-        unsupported=tuple(x for x in requested if x not in available)
+        available=set(adapter.sources(chain_id)); configured=tuple(x.strip() for x in os.getenv("DEX_SOURCES","").split(",") if x.strip()); requested=configured or ("Uniswap_V3","Aerodrome","SushiSwap","Uniswap_V2","PancakeSwapV3")
+        sources=tuple(x for x in requested if x in available); unsupported=tuple(x for x in requested if x not in available)
         if unsupported: logging.warning("Ignoring unsupported DEX sources on chain %s: %s",chain_id,unsupported)
         if len(sources)<2: raise RuntimeError(f"fewer than two usable DEX sources found on chain {chain_id}: requested={requested}, available={sorted(available)}, usable={sources}")
         sources=sources[:4]
@@ -88,19 +85,18 @@ async def main():
         while True:
             try:
                 if live:
-                    actual=Decimal(executor.available_liquidity_units(quote_token))/(Decimal(10)**quote_decimals)
-                    max_quote=actual; fee_bps=executor.flash_loan_fee_bps(); engine.flash_loan_fee_bps=fee_bps
+                    actual=Decimal(executor.available_liquidity_units(quote_token))/(Decimal(10)**quote_decimals); max_quote=actual; fee_bps=executor.flash_loan_fee_bps(); engine.flash_loan_fee_bps=fee_bps
                     if max_quote<=0: raise RuntimeError("no flash-loan liquidity available for the quote token")
                     with LOCK: STATE["flash_liquidity"]=str(max_quote)
                 else: max_quote=flash_cap
                 opportunities=await asyncio.to_thread(engine.scan_max_profitable,chain_id=chain_id,quote_token=quote_token,base_token=base_token,max_quote_amount=max_quote,taker=taker,slippage_bps=slippage)
+                merge_rejections(engine.last_rejections)
                 with LOCK: STATE["scans"]+=1; STATE["opportunities"]+=len(opportunities); STATE["last_scan"]=time.time(); STATE["last_error"]=None; STATE["quote_amount"]=str(opportunities[0].quote_amount/(Decimal(10)**quote_decimals)) if opportunities else None
                 if opportunities and live:
                     best=opportunities[0]; max_block=executor.w3.eth.block_number+max(1,int(os.getenv("DEX_MAX_BLOCKS_AHEAD","2")))
                     tx_hash=await asyncio.to_thread(executor.build_and_send,best,max_block_number=max_block); receipt=await asyncio.to_thread(executor.wait_for_success,tx_hash,int(os.getenv("DEX_TX_RECEIPT_TIMEOUT","30")))
                     with LOCK: STATE["last_tx_hash"]=tx_hash
-                    logging.info("ATOMIC FLASH TX CONFIRMED hash=%s gas_used=%s",tx_hash,receipt.get("gasUsed"))
-                    await asyncio.sleep(float(os.getenv("DEX_LIVE_COOLDOWN_SECONDS","1.0")))
+                    logging.info("ATOMIC FLASH TX CONFIRMED hash=%s gas_used=%s",tx_hash,receipt.get("gasUsed")); await asyncio.sleep(float(os.getenv("DEX_LIVE_COOLDOWN_SECONDS","1.0")))
                 else: await asyncio.sleep(float(os.getenv("DEX_POLL_SECONDS","0.5")))
             except Exception as exc:
                 logging.exception("DEX scan/execution failed")
