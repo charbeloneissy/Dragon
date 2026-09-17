@@ -1,6 +1,6 @@
 import asyncio
 
-from dragon_cross_exchange_runner import main
+from dex_cross_exchange_runner import main
 
 
 if __name__ == "__main__":
