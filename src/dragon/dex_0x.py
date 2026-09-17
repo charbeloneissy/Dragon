@@ -12,6 +12,7 @@ import httpx
 from .dex import DexQuote
 
 _ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+NATIVE_TOKEN = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,43 @@ class ZeroXAdapter:
         payload = self._get(self.SOURCES_URL, {"chainId": int(chain_id)})
         values = payload.get("sources") or []
         return tuple(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
+
+    def native_to_quote_rate(self, *, chain_id: int, quote_token: str, sell_amount_native: int,
+                             taker: str) -> Decimal:
+        """Return a live native-token -> quote-token conversion rate.
+
+        The input amount is native base units (wei on EVM). This uses 0x's
+        pricing endpoint so Dragon does not confuse native gas units with
+        quote-token units.
+        """
+        self._validate_address("quote_token", quote_token)
+        self._validate_address("taker", taker)
+        self._validate_amount(sell_amount_native)
+        if int(chain_id) <= 0:
+            raise ValueError("chain_id must be positive")
+        if quote_token.lower() == NATIVE_TOKEN.lower():
+            return Decimal("1")
+
+        payload = self._get(
+            f"{self.BASE_URL}/price",
+            {
+                "chainId": int(chain_id),
+                "sellToken": NATIVE_TOKEN,
+                "buyToken": quote_token,
+                "sellAmount": int(sell_amount_native),
+                "taker": taker,
+            },
+        )
+        if payload.get("liquidityAvailable") is False:
+            raise RuntimeError("0x reports no native-to-quote liquidity")
+        try:
+            sell_amount = int(payload.get("sellAmount", sell_amount_native))
+            buy_amount = int(payload.get("buyAmount", 0))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("0x returned invalid native-to-quote amounts") from exc
+        if sell_amount <= 0 or buy_amount <= 0:
+            raise RuntimeError("0x returned invalid native-to-quote price")
+        return Decimal(buy_amount) / Decimal(sell_amount)
 
     def quote_single_source(self, *, chain_id: int, sell_token: str, buy_token: str,
                             sell_amount: int, taker: str, source: str,
