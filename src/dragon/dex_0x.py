@@ -46,15 +46,12 @@ class ZeroXAdapter:
         self.timeout = float(timeout)
         if self.timeout <= 0:
             raise ValueError("timeout must be positive")
-        self.client = httpx.Client(
-            timeout=self.timeout,
-            headers={
-                "Accept": "application/json",
-                "0x-version": "v2",
-                **({"0x-api-key": self.api_key} if self.api_key else {}),
-                "User-Agent": "Dragon-Arbitrage/2.1",
-            },
-        )
+        self.client = httpx.Client(timeout=self.timeout, headers={
+            "Accept": "application/json",
+            "0x-version": "v2",
+            **({"0x-api-key": self.api_key} if self.api_key else {}),
+            "User-Agent": "Dragon-Arbitrage/2.1",
+        })
 
     @property
     def enabled(self) -> bool:
@@ -108,17 +105,9 @@ class ZeroXAdapter:
         values = payload.get("sources") or []
         return tuple(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
 
-    def quote_single_source(
-        self,
-        *,
-        chain_id: int,
-        sell_token: str,
-        buy_token: str,
-        sell_amount: int,
-        taker: str,
-        source: str,
-        slippage_bps: int = 50,
-    ) -> tuple[DexQuote, DexExecution]:
+    def quote_single_source(self, *, chain_id: int, sell_token: str, buy_token: str,
+                            sell_amount: int, taker: str, source: str,
+                            slippage_bps: int = 50) -> tuple[DexQuote, DexExecution]:
         self._validate_address("sell_token", sell_token)
         self._validate_address("buy_token", buy_token)
         self._validate_address("taker", taker)
@@ -131,29 +120,13 @@ class ZeroXAdapter:
         if source not in available:
             raise ValueError(f"unsupported 0x liquidity source for chain {chain_id}: {source}")
         excluded = ",".join(sorted(available - {source}))
-        return self.quote(
-            chain_id=chain_id,
-            sell_token=sell_token,
-            buy_token=buy_token,
-            sell_amount=sell_amount,
-            taker=taker,
-            slippage_bps=slippage_bps,
-            excluded_sources=excluded,
-            expected_source=source,
-        )
+        return self.quote(chain_id=chain_id, sell_token=sell_token, buy_token=buy_token,
+                          sell_amount=sell_amount, taker=taker, slippage_bps=slippage_bps,
+                          excluded_sources=excluded, expected_source=source)
 
-    def quote(
-        self,
-        *,
-        chain_id: int,
-        sell_token: str,
-        buy_token: str,
-        sell_amount: int,
-        taker: str,
-        slippage_bps: int = 50,
-        excluded_sources: str | None = None,
-        expected_source: str | None = None,
-    ) -> tuple[DexQuote, DexExecution]:
+    def quote(self, *, chain_id: int, sell_token: str, buy_token: str, sell_amount: int,
+              taker: str, slippage_bps: int = 50, excluded_sources: str | None = None,
+              expected_source: str | None = None) -> tuple[DexQuote, DexExecution]:
         self._validate_address("sell_token", sell_token)
         self._validate_address("buy_token", buy_token)
         self._validate_address("taker", taker)
@@ -166,12 +139,8 @@ class ZeroXAdapter:
 
         started = time.perf_counter()
         params: dict[str, Any] = {
-            "chainId": int(chain_id),
-            "sellToken": sell_token,
-            "buyToken": buy_token,
-            "sellAmount": int(sell_amount),
-            "taker": taker,
-            "slippageBps": int(slippage_bps),
+            "chainId": int(chain_id), "sellToken": sell_token, "buyToken": buy_token,
+            "sellAmount": int(sell_amount), "taker": taker, "slippageBps": int(slippage_bps),
         }
         if excluded_sources:
             params["excludedSources"] = excluded_sources
@@ -179,7 +148,6 @@ class ZeroXAdapter:
         payload = self._get(f"{self.BASE_URL}/quote", params)
         if payload.get("liquidityAvailable") is False:
             raise RuntimeError("0x reports no liquidity for this quote")
-
         issues = payload.get("issues") or {}
         if issues.get("simulationIncomplete"):
             raise RuntimeError("0x quote simulation is incomplete")
@@ -193,9 +161,7 @@ class ZeroXAdapter:
         if not actual_sources:
             raise RuntimeError("0x quote returned no route source")
         if expected_source and actual_sources != {expected_source}:
-            raise RuntimeError(
-                f"route is not single-source: expected {expected_source}, got {sorted(actual_sources)}"
-            )
+            raise RuntimeError(f"route is not single-source: expected {expected_source}, got {sorted(actual_sources)}")
         if not tx.get("to") or not tx.get("data"):
             raise RuntimeError("0x quote did not return executable transaction calldata")
         self._validate_address("transaction.to", str(tx["to"]))
@@ -220,31 +186,19 @@ class ZeroXAdapter:
         venue = next(iter(actual_sources)) if len(actual_sources) == 1 else "mixed"
 
         quote = DexQuote(
-            chain=str(chain_id),
-            venue=venue,
-            sell_token=str(payload["sellToken"]),
-            buy_token=str(payload["buyToken"]),
-            sell_amount=Decimal(str(payload["sellAmount"])),
-            buy_amount=Decimal(str(payload["buyAmount"])),
-            gas_native=total_network_fee,
-            gas_quote=gas_quote,
-            fee_bps=Decimal("0"),
-            slippage_bps=Decimal(str(slippage_bps)),
+            chain=str(chain_id), venue=venue, sell_token=str(payload["sellToken"]),
+            buy_token=str(payload["buyToken"]), sell_amount=Decimal(str(payload["sellAmount"])),
+            buy_amount=Decimal(str(payload["buyAmount"])), gas_native=total_network_fee,
+            gas_quote=gas_quote, fee_bps=Decimal("0"), slippage_bps=Decimal(str(slippage_bps)),
             latency_ms=latency_ms,
         )
         execution = DexExecution(
-            chain_id=int(chain_id),
-            venue="0x",
-            source=venue,
-            to=str(tx["to"]),
-            data=str(tx["data"]),
-            value=int(tx.get("value", "0")),
+            chain_id=int(chain_id), venue="0x", source=venue, to=str(tx["to"]),
+            data=str(tx["data"]), value=int(tx.get("value", "0")),
             gas=int(tx["gas"]) if tx.get("gas") is not None else None,
             gas_price=int(tx["gasPrice"]) if tx.get("gasPrice") is not None else None,
-            sell_token=str(payload["sellToken"]),
-            buy_token=str(payload["buyToken"]),
-            sell_amount=int(payload["sellAmount"]),
-            buy_amount=buy_amount,
+            sell_token=str(payload["sellToken"]), buy_token=str(payload["buyToken"]),
+            sell_amount=int(payload["sellAmount"]), buy_amount=buy_amount,
             allowance_target=((issues.get("allowance") or {}).get("spender") or payload.get("allowanceTarget")),
             issues=issues,
         )
