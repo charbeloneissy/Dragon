@@ -1,9 +1,7 @@
 import asyncio
-import logging
 
-from src.dragon.cross_exchange_futures import run
+from dragon_cross_exchange_runner import main
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(run())
+    asyncio.run(main())
