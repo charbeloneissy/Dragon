@@ -28,15 +28,11 @@ class DexOpportunity:
 
 
 class DexCrossExchangeEngine:
-    """Paper-only cross-DEX opportunity scanner.
+    """Paper-only two-leg cross-DEX scanner with flash-liquidity sizing.
 
-    This engine never signs or broadcasts transactions. It evaluates a
-    two-leg cross-DEX round trip using independently constrained 0x sources.
-    Flash-loan mode is modeled as a cost; the actual flash-loan executor is
-    deliberately not enabled here.
-
-    0x reports totalNetworkFee in native-chain units (wei on EVM), not in the
-    quote token. Gas is therefore converted with a live 0x native->quote price.
+    No transaction is signed or broadcast here. The sizing engine evaluates
+    real route quotes at multiple notionals and chooses the largest executable
+    notional that still satisfies the complete net-profit constraint.
     """
 
     def __init__(
@@ -75,6 +71,84 @@ class DexCrossExchangeEngine:
         self.flash_loan_enabled = bool(flash_loan_enabled)
         self.flash_loan_fee_bps = Decimal(flash_loan_fee_bps)
         self.native_to_quote_rate = Decimal(native_to_quote_rate)
+
+    def scan_max_profitable(
+        self,
+        *,
+        chain_id: int,
+        quote_token: str,
+        base_token: str,
+        max_quote_amount: Decimal,
+        taker: str,
+        slippage_bps: int = 50,
+    ) -> list[DexOpportunity]:
+        """Search executable sizes up to available flash liquidity.
+
+        The search deliberately does not treat the flash-loan ceiling as owned
+        capital. It is only a liquidity ceiling. Candidate sizes are sampled
+        geometrically, then refined around the largest profitable size.
+        """
+        if max_quote_amount <= 0:
+            raise ValueError("max_quote_amount must be positive")
+
+        scale = Decimal(10) ** self.quote_token_decimals
+        ceiling = int(max_quote_amount * scale)
+        if ceiling <= 0:
+            return []
+
+        # Start at one quote-token base unit and grow geometrically. This avoids
+        # introducing a fake starting balance while still discovering the
+        # executable region from live route quotes.
+        candidates: list[int] = []
+        amount = 1
+        while amount < ceiling:
+            candidates.append(amount)
+            amount *= 2
+        candidates.append(ceiling)
+
+        profitable: list[DexOpportunity] = []
+        for candidate in candidates:
+            rows = self.scan_once(
+                chain_id=chain_id,
+                quote_token=quote_token,
+                base_token=base_token,
+                quote_amount=candidate,
+                taker=taker,
+                slippage_bps=slippage_bps,
+            )
+            profitable.extend(rows)
+
+        if not profitable:
+            return []
+
+        # Refine between the last profitable candidate and the next larger
+        # tested candidate. This is intentionally bounded to avoid unbounded
+        # quote/API traffic.
+        best = max(profitable, key=lambda x: x.quote_amount)
+        lower = best.quote_amount
+        upper = ceiling
+        for _ in range(8):
+            if upper - lower <= 1:
+                break
+            mid = (lower + upper) // 2
+            rows = self.scan_once(
+                chain_id=chain_id,
+                quote_token=quote_token,
+                base_token=base_token,
+                quote_amount=mid,
+                taker=taker,
+                slippage_bps=slippage_bps,
+            )
+            if rows:
+                candidate = max(rows, key=lambda x: x.quote_amount)
+                if candidate.quote_amount > best.quote_amount:
+                    best = candidate
+                lower = candidate.quote_amount
+            else:
+                upper = mid - 1
+
+        # Return the best executable route at the largest profitable size.
+        return [best]
 
     def scan_once(
         self,
@@ -117,9 +191,6 @@ class DexCrossExchangeEngine:
             if self.flash_loan_enabled else Decimal("0")
         )
 
-        # Use a live native->quote rate unless an explicit rate is supplied.
-        # 0.001 native units is large enough for a meaningful price request
-        # while remaining small relative to a $100 strategy balance.
         native_to_quote_rate = self.native_to_quote_rate
         if native_to_quote_rate <= 0:
             native_to_quote_rate = self.adapter.native_to_quote_rate(
