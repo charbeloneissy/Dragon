@@ -2,12 +2,13 @@ from dataclasses import dataclass
 import os
 
 
-# Fixed Dragon core quotas. Market-sensitive thresholds remain tunable below.
-FIXED_STARTING_CAPITAL_USDT = 10.0
-FIXED_SAFETY_RESERVE_USDT = 5.0
-FIXED_DEPLOYABLE_USDT = 5.0
-FIXED_MIN_TRADE_NOTIONAL_USDT = 5.0
-FIXED_MAX_NOTIONAL_USDT = 5.0
+# Legacy CEX configuration is retained for compatibility but has no owned-capital budget.
+# The active DEX engine is flash-liquidity based and must not inherit a fixed starting balance.
+FIXED_STARTING_CAPITAL_USDT = 0.0
+FIXED_SAFETY_RESERVE_USDT = 0.0
+FIXED_DEPLOYABLE_USDT = 0.0
+FIXED_MIN_TRADE_NOTIONAL_USDT = 0.0
+FIXED_MAX_NOTIONAL_USDT = 0.0
 FIXED_DECISION_CYCLE_SECONDS = 30
 FIXED_UNIVERSE_SYMBOL_CAP = 1000
 FIXED_PROBABILITY_SAMPLE_SIZE = 1000
@@ -18,7 +19,7 @@ FIXED_SPOT_ONLY = True
 FIXED_FUTURES_ENABLED = False
 FIXED_LEVERAGE_ENABLED = False
 FIXED_MARTINGALE_ENABLED = False
-FIXED_ONE_TIME_COMPOUND_TARGET_USDT = 20.0
+FIXED_ONE_TIME_COMPOUND_TARGET_USDT = 0.0
 
 
 @dataclass(frozen=True)
@@ -27,18 +28,18 @@ class Config:
     ws_base: str = "wss://stream.binance.com:9443/ws"
     dry_run: bool = True
     live_trading: bool = False
-    # Adaptive market layer. The fixed floor below prevents tuning under 2 bps.
+    flash_loan_only: bool = True
+    own_capital_usdt: float = 0.0
+    flash_loan_liquidity_usdt: float = 0.0
     min_net_edge_bps: float = FIXED_NET_EDGE_FLOOR_BPS
-    min_expected_profit_usdt: float = 0.001
-    min_trade_notional_usdt: float = FIXED_MIN_TRADE_NOTIONAL_USDT
-    max_notional_usdt: float = FIXED_MAX_NOTIONAL_USDT
+    min_expected_profit_usdt: float = 0.005
+    min_trade_notional_usdt: float = 0.0
+    max_notional_usdt: float = 0.0
     max_slippage_bps: float = 15.0
     fee_bps: float = 10.0
-    risk_pct: float = 0.0015
-    # With the fixed $10 starting capital, $5 reserve, and $5 minimum trade,
-    # the default allocation must expose the full $5 deployable budget.
-    capital_allocation_pct: float = 1.0
-    safety_reserve_usdt: float = FIXED_SAFETY_RESERVE_USDT
+    risk_pct: float = 0.0
+    capital_allocation_pct: float = 0.0
+    safety_reserve_usdt: float = 0.0
     cooldown_ms: int = 1000
     max_triangles: int = 0
     stale_ms: int = 1000
@@ -62,25 +63,26 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
-        # Core quotas intentionally do not read environment overrides.
-        # Only market-sensitive/risk-tuning parameters remain variable.
         requested_min_edge = float(os.getenv("MIN_NET_EDGE_BPS", str(cls.min_net_edge_bps)))
         return cls(
             api_base=os.getenv("BINANCE_API_BASE", cls.api_base).strip().rstrip("/"),
             ws_base=os.getenv("BINANCE_WS_BASE", cls.ws_base).strip().rstrip("/"),
             dry_run=cls._bool("DRY_RUN", cls.dry_run),
             live_trading=cls._bool("LIVE_TRADING", cls.live_trading),
+            flash_loan_only=cls._bool("FLASH_LOAN_ONLY", cls.flash_loan_only),
+            own_capital_usdt=0.0,
+            flash_loan_liquidity_usdt=float(os.getenv("DEX_FLASH_LOAN_LIQUIDITY_QUOTE", "0")),
             min_net_edge_bps=max(FIXED_NET_EDGE_FLOOR_BPS, requested_min_edge),
-            min_expected_profit_usdt=float(os.getenv("MIN_EXPECTED_PROFIT_USDT", str(cls.min_expected_profit_usdt))),
-            min_trade_notional_usdt=FIXED_MIN_TRADE_NOTIONAL_USDT,
-            max_notional_usdt=FIXED_MAX_NOTIONAL_USDT,
+            min_expected_profit_usdt=max(0.005, float(os.getenv("MIN_EXPECTED_PROFIT_USDT", "0.005"))),
+            min_trade_notional_usdt=0.0,
+            max_notional_usdt=0.0,
             max_slippage_bps=float(os.getenv("MAX_SLIPPAGE_BPS", str(cls.max_slippage_bps))),
             fee_bps=float(os.getenv("FEE_BPS", str(cls.fee_bps))),
-            risk_pct=float(os.getenv("ARB_RISK_PCT", str(cls.risk_pct))),
-            capital_allocation_pct=float(os.getenv("ARB_CAPITAL_ALLOCATION_PCT", str(cls.capital_allocation_pct))),
-            safety_reserve_usdt=FIXED_SAFETY_RESERVE_USDT,
+            risk_pct=0.0,
+            capital_allocation_pct=0.0,
+            safety_reserve_usdt=0.0,
             cooldown_ms=int(os.getenv("LIVE_ORDER_COOLDOWN_MS", str(cls.cooldown_ms))),
-            max_triangles=int(os.getenv("MAX_TRIANGLES", str(cls.max_triangles))),
+            max_triangles=0,
             stale_ms=int(os.getenv("STALE_MS", str(cls.stale_ms))),
             poll_interval_seconds=float(os.getenv("POLL_INTERVAL_SECONDS", str(cls.poll_interval_seconds))),
             order_timeout_ms=int(os.getenv("ORDER_TIMEOUT_MS", str(cls.order_timeout_ms))),
@@ -103,26 +105,20 @@ class Config:
             raise ValueError("BINANCE_API_BASE must be an HTTP(S) URL")
         if not self.ws_base.startswith(("wss://", "ws://")):
             raise ValueError("BINANCE_WS_BASE must be a WebSocket URL")
-        if self.min_trade_notional_usdt != FIXED_MIN_TRADE_NOTIONAL_USDT or self.max_notional_usdt != FIXED_MAX_NOTIONAL_USDT:
-            raise ValueError("core trade quota was modified")
-        if self.safety_reserve_usdt != FIXED_SAFETY_RESERVE_USDT or self.decision_cycle_seconds != FIXED_DECISION_CYCLE_SECONDS:
-            raise ValueError("core Dragon quota was modified")
+        if self.own_capital_usdt != 0:
+            raise ValueError("owned capital must remain exactly 0")
+        if not self.flash_loan_only:
+            raise ValueError("Dragon must use flash-loan-only capital mode")
+        if self.min_expected_profit_usdt < 0.005:
+            raise ValueError("minimum net profit cannot be below 0.005")
         if self.min_net_edge_bps < FIXED_NET_EDGE_FLOOR_BPS:
             raise ValueError("MIN_NET_EDGE_BPS cannot be tuned below the fixed 2 bps floor")
-        if self.max_notional_usdt <= 0 or self.min_trade_notional_usdt <= 0 or self.risk_pct <= 0:
-            raise ValueError("trade notionals and risk percentage must be positive")
-        if self.min_trade_notional_usdt > self.max_notional_usdt:
-            raise ValueError("MIN_TRADE_NOTIONAL_USDT cannot exceed MAX_NOTIONAL_USDT")
-        if self.risk_pct > 0.01:
-            raise ValueError("ARB_RISK_PCT cannot exceed 0.01 (1%)")
-        if not 0 < self.capital_allocation_pct <= 1:
-            raise ValueError("ARB_CAPITAL_ALLOCATION_PCT must be between 0 and 1")
-        if self.safety_reserve_usdt < 0:
-            raise ValueError("ARB_SAFETY_RESERVE_USDT cannot be negative")
-        if self.min_expected_profit_usdt < 0:
-            raise ValueError("MIN_EXPECTED_PROFIT_USDT cannot be negative")
-        if self.min_net_edge_bps < 0 or self.fee_bps < 0 or self.max_slippage_bps < 0:
-            raise ValueError("edge, fee, and slippage limits cannot be negative")
+        if self.min_trade_notional_usdt != 0 or self.max_notional_usdt != 0:
+            raise ValueError("owned-capital trade quotas are disabled in flash-loan-only mode")
+        if self.safety_reserve_usdt != 0 or self.capital_allocation_pct != 0:
+            raise ValueError("owned-capital reserve/allocation must remain zero")
+        if self.max_slippage_bps < 0 or self.fee_bps < 0:
+            raise ValueError("fee and slippage limits cannot be negative")
         if self.cooldown_ms < 0 or self.stale_ms <= 0 or self.order_timeout_ms <= 0:
             raise ValueError("timing values are invalid")
         if not 1 <= self.depth_levels <= 100:
@@ -135,5 +131,5 @@ class Config:
             raise ValueError("DEX cost/latency limits are invalid")
         if self.dex_enabled and not self.dex_quote_url:
             raise ValueError("DEX_ENABLED=true requires DEX_QUOTE_URL")
-        if self.live_trading and self.dry_run:
-            raise ValueError("LIVE_TRADING=true cannot be combined with DRY_RUN=true")
+        if self.live_trading:
+            raise ValueError("live execution remains disabled until the flash-loan MEV-protected atomic executor exists")
