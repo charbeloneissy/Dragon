@@ -105,10 +105,25 @@ class AaveFlashExecutor:
             raise ValueError("max_block_number is already expired")
         if opportunity.first_leg.value != 0 or opportunity.second_leg.value != 0:
             raise ValueError("native-value DEX calls are disabled for atomic ERC20 flash execution")
+        if opportunity.first_leg.sell_amount != opportunity.quote_amount:
+            raise ValueError("first leg sell amount does not match flash amount")
+        if opportunity.first_leg.buy_amount < opportunity.second_leg.sell_amount:
+            raise ValueError("second leg attempts to sell more base than the first leg produces")
+        if opportunity.second_leg.buy_amount < opportunity.quote_amount:
+            raise ValueError("second leg quote output is below the flash principal")
 
         scale = Decimal(10) ** self.config.quote_token_decimals
+        # The contract's minProfit is gross profit after flash-loan repayment.
+        # Include the scanner's gas estimate and safety reserve so the on-chain
+        # invariant also enforces the requested net-profit floor.
+        gas_reserve = Decimal(str(getattr(opportunity, "gas_cost_quote", 0)))
+        safety_reserve = Decimal(str(getattr(opportunity, "safety_buffer_quote", 0)))
+        required_profit = self.config.min_profit_quote + gas_reserve + safety_reserve
+        if required_profit <= 0 or not required_profit.is_finite():
+            raise ValueError("invalid required net-profit reserve")
+
         params = (
-            self.config.owner_address, int(self.config.min_profit_quote * scale), int(max_block_number),
+            self.config.owner_address, int(required_profit * scale), int(max_block_number),
             self._call(opportunity.first_leg), self._call(opportunity.second_leg),
         )
         fn = self.contract.functions.executeFlashArbitrage(
