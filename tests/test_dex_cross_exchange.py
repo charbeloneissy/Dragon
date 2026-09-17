@@ -40,7 +40,9 @@ def test_cross_dex_requires_two_sources():
 
 
 def test_cross_dex_returns_only_cross_source_opportunities():
-    engine = DexCrossExchangeEngine(FakeAdapter(), ["A", "B"], min_profit=Decimal("0.005"))
+    engine = DexCrossExchangeEngine(
+        FakeAdapter(), ["A", "B"], min_profit=Decimal("0.005"), native_to_quote_rate=Decimal("1")
+    )
     opportunities = engine.scan_once(
         chain_id=8453,
         quote_token="QUOTE",
@@ -51,3 +53,18 @@ def test_cross_dex_returns_only_cross_source_opportunities():
     assert opportunities
     assert all(item.buy_source != item.sell_source for item in opportunities)
     assert all(item.net_profit_quote >= Decimal("0.005") for item in opportunities)
+
+
+def test_zero_gas_quote_falls_back_to_native_gas():
+    engine = DexCrossExchangeEngine(
+        FakeAdapter(), ["A", "B"], min_profit=Decimal("0.005"), native_to_quote_rate=Decimal("1")
+    )
+    opportunities = engine.scan_once(
+        chain_id=8453,
+        quote_token="QUOTE",
+        base_token="BASE",
+        quote_amount=1_000_000,
+        taker="0x1",
+    )
+    assert opportunities
+    assert all(item.gas_cost_quote > Decimal("0") for item in opportunities)
