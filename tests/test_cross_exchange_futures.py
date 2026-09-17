@@ -52,13 +52,13 @@ def test_contract_size_is_used_for_profit_and_margin():
         async def fetch_balance(self, _): return {"free": {"USDT": str(self.free)}}
 
     e.exchanges = {"a": Exchange(5), "b": Exchange(8)}
-    op = Opportunity("BTC/USDT:USDT", "a", "b", Decimal("100"), Decimal("101"), Decimal("1"), Decimal(0), Decimal(0), Decimal(0), Decimal(0), Decimal(0), int(time.time() * 1000))
-    assert asyncio.run(e._execution_quantity(op)) == Decimal("0.040")
+    op = Opportunity("BTC/USDT:USDT", "a", "b", Decimal("100"), Decimal("101"), Decimal("0.001"), Decimal(0), Decimal(0), Decimal(0), Decimal(0), Decimal(0), int(time.time() * 1000))
+    assert asyncio.run(e._execution_quantity(op)) == Decimal("0.001")
     gross, *_ = e._profit_for_quantity(op, Decimal("1"))
     assert gross == Decimal("10")
 
 
-def test_execution_sizing_uses_both_venues_free_margin_and_leverage():
+def test_compounding_starts_at_minimum_lot_and_scales_by_balance_units():
     e = _engine(leverage=10)
 
     class Exchange:
@@ -67,15 +67,15 @@ def test_execution_sizing_uses_both_venues_free_margin_and_leverage():
 
     e.exchanges = {"a": Exchange(5), "b": Exchange(8)}
     op = Opportunity("BTC/USDT:USDT", "a", "b", Decimal("100"), Decimal("101"), Decimal("0.001"), Decimal(0), Decimal(0), Decimal(0), Decimal(0), Decimal(0), int(time.time() * 1000))
-    assert asyncio.run(e._execution_quantity(op)) == Decimal("0.500")
+    assert asyncio.run(e._execution_quantity(op)) == Decimal("0.001")
+    e.exchanges = {"a": Exchange(10), "b": Exchange(12)}
+    assert asyncio.run(e._execution_quantity(op)) == Decimal("0.002")
 
 
 def test_execution_rejects_minimum_lot_above_margin():
     e = _engine(leverage=1)
-
     class Exchange:
         async def fetch_balance(self, _): return {"free": {"USDT": "5"}}
-
     e.exchanges = {"a": Exchange(), "b": Exchange()}
     op = Opportunity("BTC/USDT:USDT", "a", "b", Decimal("100000"), Decimal("100100"), Decimal("0.001"), Decimal(0), Decimal(0), Decimal(0), Decimal(0), Decimal(0), int(time.time() * 1000))
     assert asyncio.run(e._execution_quantity(op)) == Decimal("0")
@@ -83,29 +83,58 @@ def test_execution_rejects_minimum_lot_above_margin():
 
 def test_resolve_filled_uses_exact_zero_and_fetches_when_missing():
     e = _engine()
-
     class Exchange:
         async def fetch_order(self, order_id, symbol): return {"id": order_id, "filled": "0.004"}
-
     assert asyncio.run(e._resolve_filled(Exchange(), {"id": "123", "filled": 0}, "BTC/USDT:USDT")) == Decimal("0")
     assert asyncio.run(e._resolve_filled(Exchange(), {"id": "124"}, "BTC/USDT:USDT")) == Decimal("0.004")
     assert asyncio.run(e._resolve_filled(Exchange(), None, "BTC/USDT:USDT")) is None
 
 
+def test_flatten_requires_verified_fill():
+    e = _engine()
+    class Exchange:
+        async def create_order(self, *args, **kwargs): return {"id": "1", "filled": "0.001"}
+    assert asyncio.run(e._flatten(Exchange(), "BTC/USDT:USDT", "sell", Decimal("0.001"))) is True
+
+    class BadExchange:
+        async def create_order(self, *args, **kwargs): return {"id": "1", "filled": "0"}
+    assert asyncio.run(e._flatten(BadExchange(), "BTC/USDT:USDT", "sell", Decimal("0.001"))) is False
+
+
 def test_execute_halts_when_fill_state_cannot_be_reconciled():
     e = _engine(leverage=1)
-
     class Exchange:
         async def fetch_balance(self, _): return {"free": {"USDT": "5"}}
         def amount_to_precision(self, symbol, qty): return "0.001"
         async def set_leverage(self, leverage, symbol): return {}
         async def create_order(self, *args, **kwargs): raise TimeoutError("lost response")
-
     e.exchanges = {"a": Exchange(), "b": Exchange()}
     op = Opportunity("BTC/USDT:USDT", "a", "b", Decimal("100"), Decimal("1100"), Decimal("0.001"), Decimal(0), Decimal(0), Decimal(0), Decimal(0), Decimal(0), int(time.time() * 1000))
     result = asyncio.run(e.execute(op))
     assert result["status"] == "reconciliation_required"
     assert e.execution_halted is True
+
+
+def test_startup_reconciliation_halts_on_existing_position():
+    e = _engine()
+
+    class Exchange:
+        async def fetch_positions(self): return [{"symbol": "BTC/USDT:USDT", "side": "long", "contracts": "0.001"}]
+
+    e.exchanges = {"a": Exchange(), "b": Exchange()}
+    assert asyncio.run(e.reconcile_startup_positions()) is False
+    assert e.execution_halted is True
+
+
+def test_startup_reconciliation_allows_clean_accounts():
+    e = _engine()
+
+    class Exchange:
+        async def fetch_positions(self): return []
+
+    e.exchanges = {"a": Exchange(), "b": Exchange()}
+    assert asyncio.run(e.reconcile_startup_positions()) is True
+    assert e.execution_halted is False
 
 
 def test_no_triangular_strategy():
