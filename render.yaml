@@ -19,7 +19,7 @@ services:
       - key: DEX_CHAIN_ID
         value: "8453"
       - key: DEX_STARTING_QUOTE
-        value: "5"
+        value: "0"
       - key: DEX_QUOTE_TOKEN_DECIMALS
         value: "6"
       - key: DEX_MIN_NET_PROFIT
