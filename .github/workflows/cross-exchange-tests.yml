@@ -3,10 +3,13 @@ name: cross-exchange-tests
 on:
   pull_request:
     paths:
-      - "src/dragon/cross_exchange_futures.py"
-      - "tests/test_cross_exchange_futures.py"
+      - "src/dragon/dex_cross_exchange.py"
+      - "src/dragon/dex_0x.py"
+      - "src/dragon/flash_executor.py"
+      - "contracts/**"
+      - "tests/test_dex_cross_exchange.py"
+      - "tests/test_executor.py"
       - "requirements.txt"
-      - "dragon_live_config.yaml"
       - ".github/workflows/cross-exchange-tests.yml"
   push:
     branches: [main]
@@ -20,4 +23,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: pytest -q tests/test_cross_exchange_futures.py
+      - run: pytest -q tests/test_dex_cross_exchange.py tests/test_executor.py
