@@ -1,11 +1,13 @@
-import asyncio
+"""Dragon production entrypoint.
+
+The legacy Binance triangular runtime is intentionally not imported here.
+The application runtime is provided by the dedicated cross-DEX service module.
+"""
 
 
 def main():
-    """Production entrypoint for Dragon's 2-leg cross-DEX pipeline."""
-    from src.dragon import dex_cross_exchange
-
-    asyncio.run(dex_cross_exchange.run())
+    from src.dragon.cross_exchange_runtime import run
+    return run()
 
 
 if __name__ == "__main__":
