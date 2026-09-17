@@ -20,6 +20,7 @@ CONFIG_PATH = Path(__file__).resolve().parents[2] / "dragon_live_config.yaml"
 def _decimal(value: Any) -> Decimal:
     return Decimal(str(value))
 
+
 @dataclass(frozen=True)
 class Settings:
     starting_balance: Decimal = Decimal("5")
@@ -30,6 +31,7 @@ class Settings:
     poll_ms: int = 250
     leg_timeout_ms: int = 1500
     max_hold_ms: int = 30000
+    max_concurrent_pairs: int = 64
     live: bool = False
     exchanges: tuple[str, ...] = DEFAULT_EXCHANGES
     dynamic_sizing: bool = True
@@ -43,15 +45,24 @@ class Settings:
     def from_yaml(cls, path: str | Path = CONFIG_PATH) -> "Settings":
         with Path(path).open("r", encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh) or {}
-        strategy, market, capital = cfg.get("strategy") or {}, cfg.get("market") or {}, cfg.get("capital") or {}
-        arb, position = cfg.get("arbitrage") or {}, cfg.get("position") or {}
-        execution, runtime = cfg.get("execution") or {}, cfg.get("runtime") or {}
+        strategy = cfg.get("strategy") or {}
+        market = cfg.get("market") or {}
+        capital = cfg.get("capital") or {}
+        arb = cfg.get("arbitrage") or {}
+        position = cfg.get("position") or {}
+        execution = cfg.get("execution") or {}
+        runtime = cfg.get("runtime") or {}
         exchanges = tuple(str(x).strip() for x in (cfg.get("exchanges") or DEFAULT_EXCHANGES) if str(x).strip())
-        if strategy.get("type") != "cross_exchange": raise ValueError("config strategy.type must be cross_exchange")
-        if strategy.get("triangular", False) or strategy.get("intra_exchange", False): raise ValueError("triangular and intra-exchange strategies are disabled")
-        if market.get("type") != "futures_only" or market.get("spot", False): raise ValueError("config must be futures-only with spot disabled")
-        if len(exchanges) != 15: raise ValueError("config must contain exactly 15 exchanges")
-        if _decimal(arb.get("min_net_profit_usdt", "0.005")) < Decimal("0.005"): raise ValueError("minimum net profit cannot be below 0.005 USDT")
+        if strategy.get("type") != "cross_exchange":
+            raise ValueError("config strategy.type must be cross_exchange")
+        if strategy.get("triangular", False) or strategy.get("intra_exchange", False):
+            raise ValueError("triangular and intra-exchange strategies are disabled")
+        if market.get("type") != "futures_only" or market.get("spot", False):
+            raise ValueError("config must be futures-only with spot disabled")
+        if len(exchanges) != 15:
+            raise ValueError("config must contain exactly 15 exchanges")
+        if _decimal(arb.get("min_net_profit_usdt", "0.005")) < Decimal("0.005"):
+            raise ValueError("minimum net profit cannot be below 0.005 USDT")
         return cls(
             starting_balance=_decimal(capital.get("starting_balance_usdt", "5")),
             min_profit_usdt=_decimal(arb.get("min_net_profit_usdt", "0.005")),
@@ -61,6 +72,7 @@ class Settings:
             poll_ms=max(50, int(runtime.get("poll_interval_ms", 250))),
             leg_timeout_ms=max(250, int(execution.get("leg_timeout_ms", 1500))),
             max_hold_ms=max(1000, int(execution.get("max_hold_ms", 30000))),
+            max_concurrent_pairs=max(1, int(runtime.get("max_concurrent_pairs", 64))),
             live=str(cfg.get("mode", "paper")).lower() == "live",
             exchanges=exchanges,
             dynamic_sizing=bool(position.get("dynamic_sizing", True)),
@@ -75,6 +87,7 @@ class Settings:
     def from_env(cls) -> "Settings":
         return cls.from_yaml()
 
+
 @dataclass
 class Quote:
     exchange: str
@@ -84,6 +97,7 @@ class Quote:
     bid_qty: Decimal
     ask_qty: Decimal
     ts_ms: int
+
 
 @dataclass
 class Opportunity:
@@ -100,14 +114,17 @@ class Opportunity:
     net_profit: Decimal
     detected_ms: int
 
+
 @dataclass
 class Position:
     opportunity: Opportunity
     opened_ms: int
     quantity: Decimal
 
+
 class CrossExchangeFutures:
     """Two-leg cross-exchange perpetual arbitrage only. No triangles or intra-exchange paths."""
+
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings.from_yaml()
         self.exchange_names = self.settings.exchanges
@@ -118,15 +135,20 @@ class CrossExchangeFutures:
 
     def _make_exchange(self, name: str):
         cls = getattr(ccxt, name, None)
-        if cls is None: raise ValueError(f"ccxt exchange is unavailable: {name}")
+        if cls is None:
+            raise ValueError(f"ccxt exchange is unavailable: {name}")
         params: dict[str, Any] = {"enableRateLimit": True, "options": {"defaultType": "swap"}}
         prefix = name.upper()
-        key, secret = os.getenv(f"{prefix}_API_KEY", "").strip(), os.getenv(f"{prefix}_API_SECRET", "").strip()
-        password, uid = os.getenv(f"{prefix}_API_PASSWORD", "").strip(), os.getenv(f"{prefix}_API_UID", "").strip()
+        key = os.getenv(f"{prefix}_API_KEY", "").strip()
+        secret = os.getenv(f"{prefix}_API_SECRET", "").strip()
+        password = os.getenv(f"{prefix}_API_PASSWORD", "").strip()
+        uid = os.getenv(f"{prefix}_API_UID", "").strip()
         if key and secret:
             params["apiKey"], params["secret"] = key, secret
-            if password: params["password"] = password
-            if uid: params["uid"] = uid
+            if password:
+                params["password"] = password
+            if uid:
+                params["uid"] = uid
         return cls(params)
 
     async def load(self):
@@ -134,11 +156,16 @@ class CrossExchangeFutures:
             try:
                 ex = self._make_exchange(name)
                 markets = await ex.load_markets()
-                swaps = {s: m for s, m in markets.items() if m.get("swap") and m.get("linear") and m.get("quote") in {"USDT", "USDC"} and m.get("active", True)}
+                swaps = {
+                    s: m for s, m in markets.items()
+                    if m.get("swap") and m.get("linear") and m.get("quote") in {"USDT", "USDC"} and m.get("active", True)
+                }
                 self.exchanges[name], self.markets[name] = ex, swaps
                 LOG.info("loaded %s: %d linear perpetuals", name, len(swaps))
-            except Exception: LOG.exception("failed to initialize %s", name)
-        if len(self.exchanges) < 2: raise RuntimeError("fewer than two futures venues initialized")
+            except Exception:
+                LOG.exception("failed to initialize %s", name)
+        if len(self.exchanges) < 2:
+            raise RuntimeError("fewer than two futures venues initialized")
 
     def _symbols_for_pair(self, a: str, b: str) -> set[str]:
         return set(self.markets.get(a, {})).intersection(self.markets.get(b, {}))
@@ -150,9 +177,14 @@ class CrossExchangeFutures:
     @staticmethod
     def _step(market: dict[str, Any]) -> Decimal:
         amount = (market.get("precision") or {}).get("amount")
-        if amount is None: return Decimal("0.00000001")
-        if isinstance(amount, int): return Decimal("1e-" + str(amount))
+        if amount is None:
+            return Decimal("0.00000001")
+        if isinstance(amount, int):
+            return Decimal("1e-" + str(amount))
         return _decimal(amount)
+
+    def _contract_size(self, exchange: str, symbol: str) -> Decimal:
+        return _decimal(self.markets[exchange][symbol].get("contractSize") or 1)
 
     def _minimum_quantity(self, long_name: str, short_name: str, symbol: str, price: Decimal) -> Decimal:
         markets = (self.markets[long_name][symbol], self.markets[short_name][symbol])
@@ -161,11 +193,15 @@ class CrossExchangeFutures:
             limits = market.get("limits") or {}
             amount_min = (limits.get("amount") or {}).get("min")
             cost_min = (limits.get("cost") or {}).get("min")
-            if amount_min not in (None, 0): mins.append(_decimal(amount_min))
-            if cost_min not in (None, 0): mins.append(_decimal(cost_min) / price)
+            if amount_min not in (None, 0):
+                mins.append(_decimal(amount_min))
+            if cost_min not in (None, 0):
+                contract_size = _decimal(market.get("contractSize") or 1)
+                mins.append(_decimal(cost_min) / (price * contract_size))
         minimum = max(mins or [Decimal("0")])
         step = max(self._step(markets[0]), self._step(markets[1]))
-        if minimum > 0 and step > 0: minimum = (minimum / step).to_integral_value(rounding=ROUND_CEILING) * step
+        if minimum > 0 and step > 0:
+            minimum = (minimum / step).to_integral_value(rounding=ROUND_CEILING) * step
         return minimum
 
     def _common_step(self, long_name: str, short_name: str, symbol: str) -> Decimal:
@@ -176,51 +212,81 @@ class CrossExchangeFutures:
         return (qty / step).to_integral_value(rounding=ROUND_FLOOR) * step if step > 0 else qty
 
     def _profit_for_quantity(self, op: Opportunity, qty: Decimal) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal]:
-        gross = (op.short_price - op.long_price) * qty
-        fees = op.long_price * qty * self._fee_rate(op.long_exchange) + op.short_price * qty * self._fee_rate(op.short_exchange) if self.settings.include_fees else Decimal("0")
-        slippage = ((op.long_price + op.short_price) * qty / Decimal("2")) * _decimal(os.getenv("DRAGON_SLIPPAGE_BPS", "2")) / Decimal("10000") if self.settings.include_slippage else Decimal("0")
-        funding = self._funding_buffer(qty, (op.long_price + op.short_price) / Decimal("2")) if self.settings.include_funding else Decimal("0")
+        long_cs = self._contract_size(op.long_exchange, op.symbol)
+        short_cs = self._contract_size(op.short_exchange, op.symbol)
+        if long_cs != short_cs:
+            return Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"), Decimal("-Infinity")
+        base_qty = qty * long_cs
+        gross = (op.short_price - op.long_price) * base_qty
+        fees = (
+            op.long_price * base_qty * self._fee_rate(op.long_exchange)
+            + op.short_price * base_qty * self._fee_rate(op.short_exchange)
+        ) if self.settings.include_fees else Decimal("0")
+        slippage = (
+            ((op.long_price + op.short_price) * base_qty / Decimal("2"))
+            * _decimal(os.getenv("DRAGON_SLIPPAGE_BPS", "2")) / Decimal("10000")
+        ) if self.settings.include_slippage else Decimal("0")
+        funding = self._funding_buffer(base_qty, (op.long_price + op.short_price) / Decimal("2")) if self.settings.include_funding else Decimal("0")
         return gross, fees, slippage, funding, gross - fees - slippage - funding
 
     async def _quote(self, name: str, symbol: str) -> Quote | None:
         try:
             ticker = await self.exchanges[name].fetch_ticker(symbol)
             bid, ask = ticker.get("bid"), ticker.get("ask")
-            if bid is None or ask is None or bid <= 0 or ask <= 0 or ask < bid: return None
+            if bid is None or ask is None or bid <= 0 or ask <= 0 or ask < bid:
+                return None
             now = int(time.time() * 1000)
             ts = int(ticker.get("timestamp") or now)
             return Quote(name, symbol, _decimal(bid), _decimal(ask), _decimal(ticker.get("bidVolume") or 0), _decimal(ticker.get("askVolume") or 0), ts)
-        except Exception: return None
+        except Exception:
+            return None
 
-    def _funding_buffer(self, qty: Decimal, mid: Decimal) -> Decimal:
-        return mid * qty * _decimal(os.getenv("DRAGON_FUNDING_BUFFER_BPS", "1")) / Decimal("10000")
+    def _funding_buffer(self, base_qty: Decimal, mid: Decimal) -> Decimal:
+        return mid * base_qty * _decimal(os.getenv("DRAGON_FUNDING_BUFFER_BPS", "1")) / Decimal("10000")
 
     def evaluate_pair(self, a: Quote, b: Quote) -> Opportunity | None:
-        if a.symbol != b.symbol or a.exchange == b.exchange: return None
+        if a.symbol != b.symbol or a.exchange == b.exchange:
+            return None
         now = int(time.time() * 1000)
-        if now - a.ts_ms > self.settings.quote_age_ms or now - b.ts_ms > self.settings.quote_age_ms: return None
-        if abs(a.ts_ms - b.ts_ms) > self.settings.pair_skew_ms or a.ask >= b.bid: return None
+        if now - a.ts_ms > self.settings.quote_age_ms or now - b.ts_ms > self.settings.quote_age_ms:
+            return None
+        if abs(a.ts_ms - b.ts_ms) > self.settings.pair_skew_ms or a.ask >= b.bid:
+            return None
+        if self._contract_size(a.exchange, a.symbol) != self._contract_size(b.exchange, b.symbol):
+            return None
         minimum = self._minimum_quantity(a.exchange, b.exchange, a.symbol, max(a.ask, b.bid))
-        if minimum <= 0: return None
-        qty = minimum
-        if a.ask_qty > 0 and b.bid_qty > 0: qty = min(qty, a.ask_qty, b.bid_qty)
-        if qty < minimum: return None
-        seed = Opportunity(a.symbol, a.exchange, b.exchange, a.ask, b.bid, qty, Decimal(0), Decimal(0), Decimal(0), Decimal(0), Decimal(0), now)
-        gross, fees, slippage, funding, net = self._profit_for_quantity(seed, qty)
-        if net < self.settings.min_profit_usdt: return None
-        return Opportunity(a.symbol, a.exchange, b.exchange, a.ask, b.bid, qty, gross, fees, slippage, funding, net, now)
+        if minimum <= 0:
+            return None
+        seed = Opportunity(a.symbol, a.exchange, b.exchange, a.ask, b.bid, minimum, Decimal(0), Decimal(0), Decimal(0), Decimal(0), Decimal(0), now)
+        gross, fees, slippage, funding, net = self._profit_for_quantity(seed, minimum)
+        if net < self.settings.min_profit_usdt:
+            return None
+        return Opportunity(a.symbol, a.exchange, b.exchange, a.ask, b.bid, minimum, gross, fees, slippage, funding, net, now)
 
     async def scan_once(self) -> list[Opportunity]:
-        rows: list[Opportunity] = []
         names = list(self.exchanges)
-        for i, left_name in enumerate(names):
-            for right_name in names[i + 1:]:
-                for symbol in self._symbols_for_pair(left_name, right_name):
-                    left, right = await asyncio.gather(self._quote(left_name, symbol), self._quote(right_name, symbol))
-                    if left is None or right is None: continue
-                    for a, b in ((left, right), (right, left)):
-                        op = self.evaluate_pair(a, b)
-                        if op: rows.append(op)
+        jobs = [
+            (left, right, symbol)
+            for i, left in enumerate(names)
+            for right in names[i + 1:]
+            for symbol in self._symbols_for_pair(left, right)
+        ]
+        sem = asyncio.Semaphore(self.settings.max_concurrent_pairs)
+
+        async def one(left: str, right: str, symbol: str):
+            async with sem:
+                a, b = await asyncio.gather(self._quote(left, symbol), self._quote(right, symbol))
+                if a is None or b is None:
+                    return []
+                return [op for x, y in ((a, b), (b, a)) if (op := self.evaluate_pair(x, y))]
+
+        results = await asyncio.gather(*(one(*job) for job in jobs), return_exceptions=True)
+        rows: list[Opportunity] = []
+        for result in results:
+            if isinstance(result, Exception):
+                LOG.warning("pair scan failed: %s", result)
+                continue
+            rows.extend(result)
         rows.sort(key=lambda x: x.net_profit, reverse=True)
         return rows
 
@@ -232,121 +298,174 @@ class CrossExchangeFutures:
     async def _execution_quantity(self, op: Opportunity) -> Decimal:
         minimum = self._minimum_quantity(op.long_exchange, op.short_exchange, op.symbol, max(op.long_price, op.short_price))
         long_free, short_free = await asyncio.gather(self._free_margin(op.long_exchange), self._free_margin(op.short_exchange))
-        if min(long_free, short_free) <= 0: return Decimal("0")
-        if not self.settings.dynamic_sizing or not self.settings.compound_realized_pnl: target = op.quantity
+        if min(long_free, short_free) <= 0:
+            return Decimal("0")
+        if not self.settings.dynamic_sizing or not self.settings.compound_realized_pnl:
+            target = op.quantity
         else:
-            max_notional = min(long_free, short_free) * Decimal(self.settings.leverage)
-            target = max_notional / max(op.long_price, op.short_price)
+            leverage = Decimal(self.settings.leverage)
+            long_max = long_free * leverage / (op.long_price * self._contract_size(op.long_exchange, op.symbol))
+            short_max = short_free * leverage / (op.short_price * self._contract_size(op.short_exchange, op.symbol))
+            target = min(long_max, short_max)
         target = self._round_down_common(target, op.long_exchange, op.short_exchange, op.symbol)
         return target if target >= minimum else Decimal("0")
 
     async def _resolve_filled(self, exchange: Any, order: dict[str, Any] | None, symbol: str) -> Decimal | None:
-        if not order: return Decimal("0")
-        if order.get("filled") is not None: return _decimal(order["filled"])
+        if order is None:
+            return None
+        if order.get("filled") is not None:
+            return _decimal(order["filled"])
         order_id = order.get("id")
-        if not order_id or not hasattr(exchange, "fetch_order"): return None
+        if not order_id or not hasattr(exchange, "fetch_order"):
+            return None
         try:
             refreshed = await exchange.fetch_order(order_id, symbol)
-            if refreshed.get("filled") is not None: return _decimal(refreshed["filled"])
-        except Exception: LOG.exception("order reconciliation failed: %s", order_id)
+            if refreshed.get("filled") is not None:
+                return _decimal(refreshed["filled"])
+        except Exception:
+            LOG.exception("order reconciliation failed: %s", order_id)
         return None
 
     async def _flatten(self, exchange: Any, symbol: str, side: str, quantity: Decimal) -> bool:
-        if quantity <= 0: return True
+        if quantity <= 0:
+            return True
         try:
             await exchange.create_order(symbol, "market", side, float(quantity), None, {"reduceOnly": True})
             return True
-        except Exception: LOG.exception("failed to flatten %s %s", symbol, quantity); return False
+        except Exception:
+            LOG.exception("failed to flatten %s %s", symbol, quantity)
+            return False
+
+    async def _recover_known_fills(self, op: Opportunity, long_filled: Decimal | None, short_filled: Decimal | None) -> bool:
+        if long_filled is None and short_filled is None:
+            return False
+        if long_filled is not None and short_filled is not None:
+            if long_filled > short_filled:
+                return await self._flatten(self.exchanges[op.long_exchange], op.symbol, "sell", long_filled - short_filled)
+            if short_filled > long_filled:
+                return await self._flatten(self.exchanges[op.short_exchange], op.symbol, "buy", short_filled - long_filled)
+            return True
+        if long_filled is not None and long_filled > 0:
+            return await self._flatten(self.exchanges[op.long_exchange], op.symbol, "sell", long_filled)
+        if short_filled is not None and short_filled > 0:
+            return await self._flatten(self.exchanges[op.short_exchange], op.symbol, "buy", short_filled)
+        return True
 
     async def execute(self, op: Opportunity) -> dict[str, Any]:
-        if not self.settings.live: return {"status": "paper", "opportunity": op.__dict__}
-        if self.execution_halted: return {"status": "halted", "reason": "execution_reconciliation_required"}
+        if not self.settings.live:
+            return {"status": "paper", "opportunity": op.__dict__}
+        if self.execution_halted:
+            return {"status": "halted", "reason": "execution_reconciliation_required"}
         qty = await self._execution_quantity(op)
-        if qty <= 0: return {"status": "rejected", "reason": "insufficient_free_margin_or_below_minimum"}
+        if qty <= 0:
+            return {"status": "rejected", "reason": "insufficient_free_margin_or_below_minimum"}
         _, _, _, _, net = self._profit_for_quantity(op, qty)
-        if net < self.settings.min_profit_usdt: return {"status": "rejected", "reason": "net_profit_below_threshold", "net_profit": str(net)}
+        if net < self.settings.min_profit_usdt:
+            return {"status": "rejected", "reason": "net_profit_below_threshold", "net_profit": str(net)}
         long_ex, short_ex = self.exchanges[op.long_exchange], self.exchanges[op.short_exchange]
         try:
             qty_long = _decimal(long_ex.amount_to_precision(op.symbol, float(qty)))
             qty_short = _decimal(short_ex.amount_to_precision(op.symbol, float(qty)))
-        except Exception: return {"status": "rejected", "reason": "invalid_exchange_quantity"}
+        except Exception:
+            return {"status": "rejected", "reason": "invalid_exchange_quantity"}
         qty_f = min(qty_long, qty_short)
         minimum = self._minimum_quantity(op.long_exchange, op.short_exchange, op.symbol, max(op.long_price, op.short_price))
-        if qty_f < minimum or qty_f <= 0: return {"status": "rejected", "reason": "below_exchange_minimum"}
+        if qty_f < minimum or qty_f <= 0:
+            return {"status": "rejected", "reason": "below_exchange_minimum"}
+        _, _, _, _, net = self._profit_for_quantity(op, qty_f)
+        if net < self.settings.min_profit_usdt:
+            return {"status": "rejected", "reason": "final_quantity_below_profit_threshold", "net_profit": str(net)}
         try:
             await asyncio.gather(long_ex.set_leverage(self.settings.leverage, op.symbol), short_ex.set_leverage(self.settings.leverage, op.symbol))
-        except Exception as exc: return {"status": "rejected", "reason": "leverage_setup_failed", "error": str(exc)}
-        first = second = None
-        try:
-            first, second = await asyncio.gather(
-                asyncio.wait_for(long_ex.create_order(op.symbol, self.settings.order_type, "buy", float(qty_f), None, {"reduceOnly": False}), self.settings.leg_timeout_ms / 1000),
-                asyncio.wait_for(short_ex.create_order(op.symbol, self.settings.order_type, "sell", float(qty_f), None, {"reduceOnly": False}), self.settings.leg_timeout_ms / 1000),
-            )
-            long_filled, short_filled = await asyncio.gather(self._resolve_filled(long_ex, first, op.symbol), self._resolve_filled(short_ex, second, op.symbol))
-            if long_filled is None or short_filled is None:
-                self.execution_halted = True
-                return {"status": "reconciliation_required", "reason": "filled_quantity_unknown"}
-            if long_filled <= 0 and short_filled <= 0: return {"status": "rejected", "reason": "both_legs_unfilled"}
-            if long_filled > short_filled:
-                ok = await self._flatten(long_ex, op.symbol, "sell", long_filled - short_filled)
-            elif short_filled > long_filled:
-                ok = await self._flatten(short_ex, op.symbol, "buy", short_filled - long_filled)
-            else: ok = True
-            if not ok:
-                self.execution_halted = True
-                return {"status": "hedge_failed", "reason": "excess_leg_unflattened"}
-            matched = min(long_filled, short_filled)
-            if matched <= 0:
-                self.execution_halted = True
-                return {"status": "hedge_failed", "reason": "no_matched_hedge"}
-            self.positions.append(Position(op, int(time.time() * 1000), matched))
-            return {"status": "opened", "long": first, "short": second, "quantity": str(matched), "net_profit_estimate": str(self._profit_for_quantity(op, matched)[4])}
         except Exception as exc:
-            LOG.exception("paired execution failed")
-            long_filled, short_filled = await asyncio.gather(self._resolve_filled(long_ex, first, op.symbol), self._resolve_filled(short_ex, second, op.symbol))
-            if long_filled is None or short_filled is None:
-                self.execution_halted = True
-                return {"status": "reconciliation_required", "reason": "order_state_unknown", "error": str(exc)}
-            if long_filled > short_filled: ok = await self._flatten(long_ex, op.symbol, "sell", long_filled - short_filled)
-            elif short_filled > long_filled: ok = await self._flatten(short_ex, op.symbol, "buy", short_filled - long_filled)
-            else: ok = True
-            if not ok: self.execution_halted = True
-            return {"status": "hedge_failed" if not ok else "recovered", "error": str(exc), "long_filled": str(long_filled), "short_filled": str(short_filled)}
+            return {"status": "rejected", "reason": "leverage_setup_failed", "error": str(exc)}
+
+        async def submit(exchange: Any, side: str):
+            try:
+                return await asyncio.wait_for(exchange.create_order(op.symbol, self.settings.order_type, side, float(qty_f), None, {"reduceOnly": False}), self.settings.leg_timeout_ms / 1000)
+            except Exception as exc:
+                return exc
+
+        first, second = await asyncio.gather(submit(long_ex, "buy"), submit(short_ex, "sell"))
+        first_order = first if isinstance(first, dict) else None
+        second_order = second if isinstance(second, dict) else None
+        long_filled, short_filled = await asyncio.gather(
+            self._resolve_filled(long_ex, first_order, op.symbol),
+            self._resolve_filled(short_ex, second_order, op.symbol),
+        )
+        first_error = first if isinstance(first, Exception) else None
+        second_error = second if isinstance(second, Exception) else None
+
+        if first_error or second_error:
+            recovered = await self._recover_known_fills(op, long_filled, short_filled)
+            self.execution_halted = not recovered or (first_error and long_filled is None) or (second_error and short_filled is None)
+            if not self.execution_halted and long_filled is not None and short_filled is not None and long_filled == short_filled and long_filled > 0:
+                self.positions.append(Position(op, int(time.time() * 1000), long_filled))
+            return {
+                "status": "reconciliation_required" if self.execution_halted else "recovered",
+                "reason": "order_response_timeout_or_error",
+                "long_filled": None if long_filled is None else str(long_filled),
+                "short_filled": None if short_filled is None else str(short_filled),
+                "error": str(first_error or second_error),
+            }
+
+        if long_filled is None or short_filled is None:
+            self.execution_halted = True
+            await self._recover_known_fills(op, long_filled, short_filled)
+            return {"status": "reconciliation_required", "reason": "filled_quantity_unknown"}
+        if long_filled <= 0 and short_filled <= 0:
+            return {"status": "rejected", "reason": "both_legs_unfilled"}
+        if not await self._recover_known_fills(op, long_filled, short_filled):
+            self.execution_halted = True
+            return {"status": "hedge_failed", "reason": "excess_leg_unflattened"}
+        matched = min(long_filled, short_filled)
+        if matched <= 0:
+            self.execution_halted = True
+            return {"status": "hedge_failed", "reason": "no_matched_hedge"}
+        self.positions.append(Position(op, int(time.time() * 1000), matched))
+        return {"status": "opened", "long": first_order, "short": second_order, "quantity": str(matched), "net_profit_estimate": str(self._profit_for_quantity(op, matched)[4])}
 
     async def close_position(self, position: Position) -> bool:
         op = position.opportunity
         long_ex, short_ex = self.exchanges[op.long_exchange], self.exchanges[op.short_exchange]
-        try:
-            results = await asyncio.gather(
-                asyncio.wait_for(long_ex.create_order(op.symbol, "market", "sell", float(position.quantity), None, {"reduceOnly": True}), self.settings.leg_timeout_ms / 1000),
-                asyncio.wait_for(short_ex.create_order(op.symbol, "market", "buy", float(position.quantity), None, {"reduceOnly": True}), self.settings.leg_timeout_ms / 1000),
-            )
-            fills = await asyncio.gather(self._resolve_filled(long_ex, results[0], op.symbol), self._resolve_filled(short_ex, results[1], op.symbol))
-            if any(x is None for x in fills) or fills[0] != fills[1]:
-                self.execution_halted = True
-                LOG.error("close reconciliation mismatch for %s: %s", op.symbol, fills)
-                return False
-            return True
-        except Exception:
-            LOG.exception("paired close failed for %s", op.symbol)
+
+        async def close_leg(exchange: Any, side: str):
+            try:
+                return await asyncio.wait_for(exchange.create_order(op.symbol, "market", side, float(position.quantity), None, {"reduceOnly": True}), self.settings.leg_timeout_ms / 1000)
+            except Exception as exc:
+                return exc
+
+        results = await asyncio.gather(close_leg(long_ex, "sell"), close_leg(short_ex, "buy"))
+        fills = await asyncio.gather(
+            self._resolve_filled(long_ex, results[0] if isinstance(results[0], dict) else None, op.symbol),
+            self._resolve_filled(short_ex, results[1] if isinstance(results[1], dict) else None, op.symbol),
+        )
+        if any(isinstance(x, Exception) for x in results) or any(x is None for x in fills) or fills[0] != fills[1]:
             self.execution_halted = True
+            LOG.error("close reconciliation mismatch for %s: results=%s fills=%s", op.symbol, results, fills)
             return False
+        return True
 
     async def manage_positions(self):
-        if not self.positions or self.execution_halted: return
+        if not self.positions or self.execution_halted:
+            return
         now = int(time.time() * 1000)
         remaining: list[Position] = []
         for position in self.positions:
             op = position.opportunity
             left, right = await asyncio.gather(self._quote(op.long_exchange, op.symbol), self._quote(op.short_exchange, op.symbol))
             close = now - position.opened_ms >= self.settings.max_hold_ms
-            if left and right and left.bid >= right.ask: close = True
-            if close and await self.close_position(position): LOG.info("CLOSED %s", op.symbol)
-            else: remaining.append(position)
+            if left and right and left.bid >= right.ask:
+                close = True
+            if close and await self.close_position(position):
+                LOG.info("CLOSED %s", op.symbol)
+            else:
+                remaining.append(position)
         self.positions = remaining
 
     async def close(self):
         await asyncio.gather(*(ex.close() for ex in self.exchanges.values()), return_exceptions=True)
+
 
 async def run() -> None:
     logging.basicConfig(level=logging.INFO)
@@ -356,7 +475,8 @@ async def run() -> None:
         while True:
             await engine.manage_positions()
             if not engine.execution_halted:
-                for op in await engine.scan_once(): await engine.execute(op)
+                for op in await engine.scan_once():
+                    await engine.execute(op)
             await asyncio.sleep(engine.settings.poll_ms / 1000)
     finally:
         await engine.close()
