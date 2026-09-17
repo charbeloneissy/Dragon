@@ -28,7 +28,7 @@ class DexOpportunity:
 
 
 class DexCrossExchangeEngine:
-    """Two-leg cross-DEX scanner with flash-liquidity sizing."""
+    """Two-leg cross-DEX scanner with conservative net-profit accounting."""
 
     def __init__(
         self,
@@ -76,11 +76,12 @@ class DexCrossExchangeEngine:
         execution: DexExecution,
         native_to_quote_rate: Decimal,
     ) -> Decimal:
-        """Return gas in quote-token units.
+        """Convert execution gas to quote-token units without treating zero as free.
 
-        gas_quote is accepted only when it is a positive explicit quote-token
-        amount. A zero/absent gas_quote must not mask a real gas_native value.
-        gas_native is expected to be native-token base units (wei-like units).
+        A positive explicit gas_quote is authoritative. Otherwise gas_native is
+        used; if it is absent, gas * gas_price is treated as native base units.
+        A missing native-to-quote rate makes the candidate non-executable rather
+        than silently assigning zero gas cost.
         """
         direct = getattr(quote, "gas_quote", None)
         if direct is not None:
@@ -100,6 +101,29 @@ class DexCrossExchangeEngine:
             return Decimal("Infinity")
         return (gas_native / Decimal(10) ** 18) * native_to_quote_rate
 
+    def _candidate_amounts(self, ceiling: int) -> list[int]:
+        """Return logarithmic sizing probes plus the exact ceiling.
+
+        Profit is not assumed to be monotonic with size: price impact can make
+        a larger trade less profitable. The old binary-search logic therefore
+        could move in the wrong direction and select a suboptimal size.
+        """
+        if ceiling <= 0:
+            return []
+        amounts = {1, ceiling}
+        points = 64
+        for i in range(1, points):
+            # Integer geometric spacing without floating-point arithmetic.
+            amount = max(1, (ceiling * i) // points)
+            amounts.add(amount)
+        # Also preserve powers of two because they are useful around small
+        # account sizes and minimum order boundaries.
+        amount = 1
+        while amount < ceiling:
+            amounts.add(amount)
+            amount *= 2
+        return sorted(amounts)
+
     def scan_max_profitable(
         self,
         *,
@@ -118,15 +142,8 @@ class DexCrossExchangeEngine:
         if ceiling <= 0:
             return []
 
-        candidates: list[int] = []
-        amount = 1
-        while amount < ceiling:
-            candidates.append(amount)
-            amount *= 2
-        candidates.append(ceiling)
-
         profitable: list[DexOpportunity] = []
-        for candidate in candidates:
+        for candidate in self._candidate_amounts(ceiling):
             profitable.extend(
                 self.scan_once(
                     chain_id=chain_id,
@@ -141,28 +158,12 @@ class DexCrossExchangeEngine:
         if not profitable:
             return []
 
-        best = max(profitable, key=lambda x: x.quote_amount)
-        lower = best.quote_amount
-        upper = ceiling
-        for _ in range(16):
-            if upper - lower <= 1:
-                break
-            mid = (lower + upper) // 2
-            rows = self.scan_once(
-                chain_id=chain_id,
-                quote_token=quote_token,
-                base_token=base_token,
-                quote_amount=mid,
-                taker=taker,
-                slippage_bps=slippage_bps,
-            )
-            if rows:
-                candidate = max(rows, key=lambda x: x.quote_amount)
-                if candidate.quote_amount > best.quote_amount:
-                    best = candidate
-                lower = candidate.quote_amount
-            else:
-                upper = mid - 1
+        # Optimize the quantity that actually matters: net profit after gas,
+        # flash-loan fee and safety buffer. Never optimize merely for notional.
+        best = max(
+            profitable,
+            key=lambda x: (x.net_profit_quote, x.quote_amount),
+        )
         return [best]
 
     def scan_once(
@@ -196,7 +197,9 @@ class DexCrossExchangeEngine:
                 )
             except Exception:
                 continue
-            if self._quote_latency(quote) > self.max_quote_latency_ms or execution.buy_amount <= 0:
+            if self._quote_latency(quote) > self.max_quote_latency_ms:
+                continue
+            if execution.buy_amount <= 0:
                 continue
             quotes[source] = (quote, execution)
 
@@ -212,8 +215,6 @@ class DexCrossExchangeEngine:
         )
 
         native_to_quote_rate = self.native_to_quote_rate
-        # gas_quote=0 is not proof that gas is free; only a positive direct
-        # quote suppresses the native-token conversion requirement.
         needs_native_rate = any(
             (
                 getattr(q, "gas_quote", None) is None
@@ -246,6 +247,7 @@ class DexCrossExchangeEngine:
             bought_amount = buy_execution.buy_amount
             if bought_amount <= 0:
                 continue
+
             for sell_source in quotes:
                 if sell_source == buy_source:
                     continue
@@ -263,14 +265,14 @@ class DexCrossExchangeEngine:
                     continue
                 if self._quote_latency(sell_quote) > self.max_quote_latency_ms:
                     continue
+
                 final_amount = sell_execution.buy_amount
                 if final_amount <= 0:
                     continue
 
                 gas_cost_quote = self._gas_cost_quote(
                     buy_quote, buy_execution, native_to_quote_rate
-                )
-                gas_cost_quote += self._gas_cost_quote(
+                ) + self._gas_cost_quote(
                     sell_quote, sell_execution, native_to_quote_rate
                 )
                 if not gas_cost_quote.is_finite():
@@ -279,25 +281,29 @@ class DexCrossExchangeEngine:
                 gross = Decimal(final_amount - quote_amount) / scale
                 net = gross - gas_cost_quote - flash_loan_fee_quote - self.safety_buffer_quote
 
-                if net >= self.min_profit:
-                    opportunities.append(
-                        DexOpportunity(
-                            chain_id=chain_id,
-                            buy_source=buy_source,
-                            sell_source=sell_source,
-                            base_token=base_token,
-                            quote_token=quote_token,
-                            quote_amount=quote_amount,
-                            bought_amount=bought_amount,
-                            final_amount=final_amount,
-                            gross_profit_quote=gross,
-                            net_profit_quote=net,
-                            gas_cost_quote=gas_cost_quote,
-                            flash_loan_fee_quote=flash_loan_fee_quote,
-                            safety_buffer_quote=self.safety_buffer_quote,
-                            first_leg=buy_execution,
-                            second_leg=sell_execution,
-                        )
+                # Only candidates that remain profitable after every modeled
+                # cost can enter the execution pipeline.
+                if net < self.min_profit:
+                    continue
+
+                opportunities.append(
+                    DexOpportunity(
+                        chain_id=chain_id,
+                        buy_source=buy_source,
+                        sell_source=sell_source,
+                        base_token=base_token,
+                        quote_token=quote_token,
+                        quote_amount=quote_amount,
+                        bought_amount=bought_amount,
+                        final_amount=final_amount,
+                        gross_profit_quote=gross,
+                        net_profit_quote=net,
+                        gas_cost_quote=gas_cost_quote,
+                        flash_loan_fee_quote=flash_loan_fee_quote,
+                        safety_buffer_quote=self.safety_buffer_quote,
+                        first_leg=buy_execution,
+                        second_leg=sell_execution,
                     )
+                )
 
         return sorted(opportunities, key=lambda x: x.net_profit_quote, reverse=True)
