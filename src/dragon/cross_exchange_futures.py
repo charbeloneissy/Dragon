@@ -167,6 +167,35 @@ class CrossExchangeFutures:
         if len(self.exchanges) < 2:
             raise RuntimeError("fewer than two futures venues initialized")
 
+    async def reconcile_startup_positions(self) -> bool:
+        """Refuse live trading when an exchange reports an existing futures position."""
+        if not self.settings.live:
+            return True
+        unknown = False
+        for name, exchange in self.exchanges.items():
+            fetch_positions = getattr(exchange, "fetch_positions", None)
+            if fetch_positions is None:
+                LOG.error("%s does not expose fetch_positions; live startup reconciliation is unsafe", name)
+                unknown = True
+                continue
+            try:
+                positions = await fetch_positions()
+                open_positions = []
+                for position in positions or []:
+                    contracts = _decimal(position.get("contracts") or 0)
+                    if contracts != 0:
+                        open_positions.append((position.get("symbol"), position.get("side"), str(contracts)))
+                if open_positions:
+                    LOG.error("%s has pre-existing futures positions: %s", name, open_positions)
+                    unknown = True
+            except Exception:
+                LOG.exception("startup position reconciliation failed on %s", name)
+                unknown = True
+        if unknown:
+            self.execution_halted = True
+            return False
+        return True
+
     def _symbols_for_pair(self, a: str, b: str) -> set[str]:
         return set(self.markets.get(a, {})).intersection(self.markets.get(b, {}))
 
@@ -265,12 +294,7 @@ class CrossExchangeFutures:
 
     async def scan_once(self) -> list[Opportunity]:
         names = list(self.exchanges)
-        jobs = [
-            (left, right, symbol)
-            for i, left in enumerate(names)
-            for right in names[i + 1:]
-            for symbol in self._symbols_for_pair(left, right)
-        ]
+        jobs = [(left, right, symbol) for i, left in enumerate(names) for right in names[i + 1:] for symbol in self._symbols_for_pair(left, right)]
         sem = asyncio.Semaphore(self.settings.max_concurrent_pairs)
 
         async def one(left: str, right: str, symbol: str):
@@ -298,15 +322,23 @@ class CrossExchangeFutures:
     async def _execution_quantity(self, op: Opportunity) -> Decimal:
         minimum = self._minimum_quantity(op.long_exchange, op.short_exchange, op.symbol, max(op.long_price, op.short_price))
         long_free, short_free = await asyncio.gather(self._free_margin(op.long_exchange), self._free_margin(op.short_exchange))
-        if min(long_free, short_free) <= 0:
+        available = min(long_free, short_free)
+        if available <= 0 or minimum <= 0:
             return Decimal("0")
-        if not self.settings.dynamic_sizing or not self.settings.compound_realized_pnl:
-            target = op.quantity
+
+        # Start at the smallest valid lot. Compound only when realized/free equity
+        # has grown by another starting-balance unit; never deploy all available margin.
+        if self.settings.dynamic_sizing and self.settings.compound_realized_pnl:
+            units = max(1, int(available / self.settings.starting_balance))
+            target = minimum * Decimal(units)
         else:
-            leverage = Decimal(self.settings.leverage)
-            long_max = long_free * leverage / (op.long_price * self._contract_size(op.long_exchange, op.symbol))
-            short_max = short_free * leverage / (op.short_price * self._contract_size(op.short_exchange, op.symbol))
-            target = min(long_max, short_max)
+            target = op.quantity
+
+        leverage = Decimal(self.settings.leverage)
+        long_max = long_free * leverage / (op.long_price * self._contract_size(op.long_exchange, op.symbol))
+        short_max = short_free * leverage / (op.short_price * self._contract_size(op.short_exchange, op.symbol))
+        affordable = min(long_max, short_max)
+        target = min(target, affordable)
         target = self._round_down_common(target, op.long_exchange, op.short_exchange, op.symbol)
         return target if target >= minimum else Decimal("0")
 
@@ -330,8 +362,9 @@ class CrossExchangeFutures:
         if quantity <= 0:
             return True
         try:
-            await exchange.create_order(symbol, "market", side, float(quantity), None, {"reduceOnly": True})
-            return True
+            result = await exchange.create_order(symbol, "market", side, float(quantity), None, {"reduceOnly": True})
+            filled = await self._resolve_filled(exchange, result, symbol)
+            return filled is not None and filled >= quantity
         except Exception:
             LOG.exception("failed to flatten %s %s", symbol, quantity)
             return False
@@ -401,13 +434,7 @@ class CrossExchangeFutures:
             self.execution_halted = not recovered or (first_error and long_filled is None) or (second_error and short_filled is None)
             if not self.execution_halted and long_filled is not None and short_filled is not None and long_filled == short_filled and long_filled > 0:
                 self.positions.append(Position(op, int(time.time() * 1000), long_filled))
-            return {
-                "status": "reconciliation_required" if self.execution_halted else "recovered",
-                "reason": "order_response_timeout_or_error",
-                "long_filled": None if long_filled is None else str(long_filled),
-                "short_filled": None if short_filled is None else str(short_filled),
-                "error": str(first_error or second_error),
-            }
+            return {"status": "reconciliation_required" if self.execution_halted else "recovered", "reason": "order_response_timeout_or_error", "long_filled": None if long_filled is None else str(long_filled), "short_filled": None if short_filled is None else str(short_filled), "error": str(first_error or second_error)}
 
         if long_filled is None or short_filled is None:
             self.execution_halted = True
@@ -471,6 +498,7 @@ async def run() -> None:
     logging.basicConfig(level=logging.INFO)
     engine = CrossExchangeFutures()
     await engine.load()
+    await engine.reconcile_startup_positions()
     try:
         while True:
             await engine.manage_positions()
