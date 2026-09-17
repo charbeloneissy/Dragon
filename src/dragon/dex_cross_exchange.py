@@ -20,15 +20,17 @@ class DexOpportunity:
     final_amount: int
     gross_profit_quote: Decimal
     net_profit_quote: Decimal
+    gas_cost_quote: Decimal
+    safety_buffer_quote: Decimal
     first_leg: DexExecution
     second_leg: DexExecution
 
 
 class DexCrossExchangeEngine:
-    """Cross-DEX scanner using independently constrained 0x liquidity sources.
+    """Paper-only cross-DEX opportunity scanner.
 
-    The engine only accepts opportunities where the first and second legs use
-    different DEX sources. It does not execute transactions.
+    This engine never signs or broadcasts transactions. It evaluates a
+    two-leg cross-DEX round trip using independently constrained 0x sources.
     """
 
     def __init__(
@@ -38,14 +40,23 @@ class DexCrossExchangeEngine:
         min_profit: Decimal = Decimal("0.005"),
         quote_token_decimals: int = 6,
         max_quote_latency_ms: Decimal = Decimal("1000"),
+        safety_buffer_quote: Decimal = Decimal("0.001"),
     ):
         if quote_token_decimals < 0 or quote_token_decimals > 36:
             raise ValueError("quote_token_decimals must be between 0 and 36")
+        if Decimal(min_profit) < Decimal("0.005"):
+            raise ValueError("min_profit cannot be below 0.005")
+        if Decimal(max_quote_latency_ms) <= 0:
+            raise ValueError("max_quote_latency_ms must be positive")
+        if Decimal(safety_buffer_quote) < 0:
+            raise ValueError("safety_buffer_quote cannot be negative")
+
         self.adapter = adapter
         self.sources = tuple(dict.fromkeys(s.strip() for s in sources if s.strip()))
         self.min_profit = Decimal(min_profit)
         self.quote_token_decimals = quote_token_decimals
         self.max_quote_latency_ms = Decimal(max_quote_latency_ms)
+        self.safety_buffer_quote = Decimal(safety_buffer_quote)
 
     def scan_once(
         self,
@@ -86,8 +97,11 @@ class DexCrossExchangeEngine:
 
         for buy_source, (buy_quote, buy_execution) in quotes.items():
             bought_amount = buy_execution.buy_amount
-            for sell_source in self.sources:
-                if sell_source == buy_source or sell_source not in quotes and len(quotes) < 2:
+            if bought_amount <= 0:
+                continue
+
+            for sell_source in quotes:
+                if sell_source == buy_source:
                     continue
 
                 sell_quote, sell_execution = self.adapter.quote_single_source(
@@ -106,13 +120,13 @@ class DexCrossExchangeEngine:
                 if final_amount <= 0:
                     continue
 
-                # gas_quote is already represented by the adapter in quote-token
-                # units. Never hard-code 1e6 for every possible quote token.
                 second_rate = Decimal(final_amount) / Decimal(bought_amount)
                 gas_quote_units = buy_quote.gas_quote + (sell_quote.gas_quote * second_rate)
                 gross_units = Decimal(final_amount - quote_amount)
-                net_units = gross_units - gas_quote_units
+                safety_units = self.safety_buffer_quote * scale
+                net_units = gross_units - gas_quote_units - safety_units
                 gross = gross_units / scale
+                gas_cost = gas_quote_units / scale
                 net = net_units / scale
 
                 if net >= self.min_profit:
@@ -128,6 +142,8 @@ class DexCrossExchangeEngine:
                             final_amount=final_amount,
                             gross_profit_quote=gross,
                             net_profit_quote=net,
+                            gas_cost_quote=gas_cost,
+                            safety_buffer_quote=self.safety_buffer_quote,
                             first_leg=buy_execution,
                             second_leg=sell_execution,
                         )
