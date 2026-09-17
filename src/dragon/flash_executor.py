@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -13,6 +14,7 @@ EXECUTOR_ABI = [
     {"inputs":[{"internalType":"address","name":"asset","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"components":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"uint256","name":"minProfit","type":"uint256"},{"internalType":"uint256","name":"maxBlockNumber","type":"uint256"},{"components":[{"internalType":"address","name":"target","type":"address"},{"internalType":"bytes","name":"data","type":"bytes"},{"internalType":"address","name":"sellToken","type":"address"},{"internalType":"address","name":"buyToken","type":"address"},{"internalType":"address","name":"allowanceTarget","type":"address"},{"internalType":"uint256","name":"sellAmount","type":"uint256"},{"internalType":"uint256","name":"minBuyAmount","type":"uint256"}],"internalType":"struct DragonAaveV3Executor.Call","name":"first","type":"tuple"},{"components":[{"internalType":"address","name":"target","type":"address"},{"internalType":"bytes","name":"data","type":"bytes"},{"internalType":"address","name":"sellToken","type":"address"},{"internalType":"address","name":"buyToken","type":"address"},{"internalType":"address","name":"allowanceTarget","type":"address"},{"internalType":"uint256","name":"sellAmount","type":"uint256"},{"internalType":"uint256","name":"minBuyAmount","type":"uint256"}],"internalType":"struct DragonAaveV3Executor.Call","name":"second","type":"tuple"}],"internalType":"struct DragonAaveV3Executor.FlashParams","name":"params","type":"tuple"}],"name":"executeFlashArbitrage","outputs":[],"stateMutability":"nonpayable","type":"function"}
 ]
 ERC20_ABI = [{"constant":True,"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
+AAVE_POOL_ABI = [{"inputs":[],"name":"FLASHLOAN_PREMIUM_TOTAL","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"}]
 
 
 @dataclass(frozen=True)
@@ -42,15 +44,15 @@ class FlashExecutorConfig:
         chain_id = int(os.getenv("DEX_CHAIN_ID", "8453"))
         decimals = int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS", "6"))
         min_profit = Decimal(os.getenv("DEX_MIN_NET_PROFIT", "0.005"))
-        if chain_id <= 0 or not 0 <= decimals <= 36 or min_profit < Decimal("0.005"):
-            raise ValueError("invalid flash executor chain/decimals/min-profit configuration")
+        multiplier = Decimal(os.getenv("DEX_MAX_FEE_MULTIPLIER", "1.20"))
+        if chain_id <= 0 or not 0 <= decimals <= 36 or min_profit < Decimal("0.005") or multiplier < Decimal("1"):
+            raise ValueError("invalid flash executor chain/decimals/min-profit/fee configuration")
         return cls(
             rpc_url=rpc, private_key=key, executor_address=Web3.to_checksum_address(executor),
             owner_address=Web3.to_checksum_address(owner), pool_address=Web3.to_checksum_address(pool),
             chain_id=chain_id, quote_token_decimals=decimals, min_profit_quote=min_profit,
             gas_limit=int(os.getenv("DEX_EXECUTOR_GAS_LIMIT", "0")) or None,
-            max_fee_multiplier=Decimal(os.getenv("DEX_MAX_FEE_MULTIPLIER", "1.20")),
-            max_priority_fee_gwei=Decimal(os.getenv("DEX_MAX_PRIORITY_FEE_GWEI", "0.001")),
+            max_fee_multiplier=multiplier, max_priority_fee_gwei=Decimal(os.getenv("DEX_MAX_PRIORITY_FEE_GWEI", "0.001")),
             mev_required=os.getenv("MEV_PROTECTION_REQUIRED", "true").lower() in {"1","true","yes","on"},
         )
 
@@ -68,6 +70,7 @@ class AaveFlashExecutor:
         if self.w3.eth.chain_id != self.config.chain_id:
             raise RuntimeError("configured chain ID does not match private RPC")
         self.contract: Contract = self.w3.eth.contract(address=self.config.executor_address, abi=EXECUTOR_ABI)
+        self.pool = self.w3.eth.contract(address=self.config.pool_address, abi=AAVE_POOL_ABI)
         self.account = self.w3.eth.account.from_key(self.config.private_key)
         if self.account.address != self.config.owner_address:
             raise RuntimeError("executor private key does not match DEX_EXECUTOR_OWNER_ADDRESS")
@@ -75,6 +78,13 @@ class AaveFlashExecutor:
     def available_liquidity_units(self, token: str) -> int:
         token_contract = self.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
         return int(token_contract.functions.balanceOf(self.config.pool_address).call())
+
+    def flash_loan_fee_bps(self) -> Decimal:
+        """Read Aave's current on-chain premium instead of trusting a static env value."""
+        premium_bps = Decimal(str(self.pool.functions.FLASHLOAN_PREMIUM_TOTAL().call())) / Decimal("100")
+        if premium_bps < 0 or premium_bps > Decimal("1000"):
+            raise RuntimeError(f"invalid Aave flash-loan premium: {premium_bps} bps")
+        return premium_bps
 
     @staticmethod
     def _call(execution: Any) -> tuple[Any, ...]:
@@ -109,7 +119,14 @@ class AaveFlashExecutor:
         base_fee = int(latest.get("baseFeePerGas") or 0)
         priority = int(self.w3.to_wei(self.config.max_priority_fee_gwei, "gwei"))
         max_fee = int(Decimal(max(base_fee + priority, priority)) * self.config.max_fee_multiplier)
-        tx: dict[str, Any] = fn.build_transaction({"from":self.account.address,"nonce":nonce,"chainId":self.config.chain_id,"maxFeePerGas":max_fee,"maxPriorityFeePerGas":priority,"value":0})
+        tx: dict[str, Any] = {"from":self.account.address,"nonce":nonce,"chainId":self.config.chain_id,"maxFeePerGas":max_fee,"maxPriorityFeePerGas":priority,"value":0}
+        tx.update(fn.build_transaction(tx))
         tx["gas"] = self.config.gas_limit or int(self.w3.eth.estimate_gas(tx) * Decimal("1.10"))
         signed = self.account.sign_transaction(tx)
         return self.w3.eth.send_raw_transaction(signed.raw_transaction).hex()
+
+    def wait_for_success(self, tx_hash: str, timeout: int = 30) -> dict[str, Any]:
+        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
+        if int(receipt.get("status", 0)) != 1:
+            raise RuntimeError(f"flash transaction reverted: {tx_hash}")
+        return dict(receipt)
