@@ -35,9 +35,8 @@ class DexCrossExchangeEngine:
     Flash-loan mode is modeled as a cost; the actual flash-loan executor is
     deliberately not enabled here.
 
-    0x reports ``totalNetworkFee`` in the native chain token (wei on EVM), not
-    in the quote token. Therefore a native-to-quote conversion rate is required
-    before Dragon can make a trustworthy net-profit decision.
+    0x reports totalNetworkFee in native-chain units (wei on EVM), not in the
+    quote token. Gas is therefore converted with a live 0x native->quote price.
     """
 
     def __init__(
@@ -118,6 +117,20 @@ class DexCrossExchangeEngine:
             if self.flash_loan_enabled else Decimal("0")
         )
 
+        # Use a live native->quote rate unless an explicit rate is supplied.
+        # 0.001 native units is large enough for a meaningful price request
+        # while remaining small relative to a $100 strategy balance.
+        native_to_quote_rate = self.native_to_quote_rate
+        if native_to_quote_rate <= 0:
+            native_to_quote_rate = self.adapter.native_to_quote_rate(
+                chain_id=chain_id,
+                quote_token=quote_token,
+                sell_amount_native=10**15,
+                taker=taker,
+            )
+        if native_to_quote_rate <= 0:
+            return []
+
         for buy_source, (buy_quote, buy_execution) in quotes.items():
             bought_amount = buy_execution.buy_amount
             if bought_amount <= 0:
@@ -143,15 +156,9 @@ class DexCrossExchangeEngine:
                 if final_amount <= 0:
                     continue
 
-                # 0x totalNetworkFee is denominated in native-chain units
-                # (wei for EVM). Convert each leg's native fee to quote-token
-                # units using a separately supplied current rate. Never treat
-                # wei as quote-token base units.
-                if self.native_to_quote_rate <= 0:
-                    continue
                 native_scale = Decimal(10) ** 18
                 gas_native = buy_quote.gas_native + sell_quote.gas_native
-                gas_cost_quote = (gas_native / native_scale) * self.native_to_quote_rate
+                gas_cost_quote = (gas_native / native_scale) * native_to_quote_rate
 
                 gross = Decimal(final_amount - quote_amount) / scale
                 net = gross - gas_cost_quote - flash_loan_fee_quote - self.safety_buffer_quote
