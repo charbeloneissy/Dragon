@@ -13,13 +13,13 @@ from src.dragon.dex_0x import ZeroXAdapter
 from src.dragon.dex_cross_exchange import DexCrossExchangeEngine
 from src.dragon.flash_executor import AaveFlashExecutor
 
-STATE={"status":"starting","mode":"paper","chain_id":None,"sources":[],"scans":0,"opportunities":0,"last_scan":None,"last_error":None,"started_at":time.time(),"quote_amount":None,"quote_decimals":None,"min_net_profit":None,"safety_buffer":None,"own_capital":"0","flash_liquidity":None,"flash_loan_enabled":False,"last_tx_hash":None}
+STATE={"status":"starting","mode":"paper","chain_id":None,"sources":[],"scans":0,"opportunities":0,"last_scan":None,"last_error":None,"started_at":time.time(),"quote_amount":None,"quote_decimals":None,"min_net_profit":None,"safety_buffer":None,"own_capital":"0","flash_liquidity":None,"flash_loan_enabled":False,"last_tx_hash":None,"rejections":{}}
 LOCK=Lock()
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/","/health","/healthz"):
-            with LOCK: payload=dict(STATE)
+            with LOCK: payload=dict(STATE); payload["rejections"]=dict(STATE["rejections"])
             body=json.dumps(payload,default=str).encode(); self.send_response(200 if payload["status"] in {"starting","running","degraded"} else 503); self.send_header("Content-Type","application/json"); self.send_header("Cache-Control","no-store"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body); return
         self.send_response(404); self.end_headers()
     def log_message(self,*_args): return
@@ -47,6 +47,10 @@ def env_decimal(name,default):
 
 def env_bool(name,default=False): return os.getenv(name,str(default)).strip().lower() in {"1","true","yes","on"}
 
+def record_rejections(stats):
+    with LOCK:
+        for key,value in stats.items(): STATE["rejections"][key]=STATE["rejections"].get(key,0)+int(value)
+
 async def main():
     logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"),format="%(asctime)s %(levelname)s %(message)s")
     Thread(target=start_health_server,daemon=True).start(); adapter=ZeroXAdapter()
@@ -71,17 +75,21 @@ async def main():
         else:
             executor=None; taker=taker_config; fee_bps=configured_fee
         if not flash_enabled and configured_fee!=0: raise ValueError("FLASH_LOAN_FEE_BPS requires FLASH_LOAN_ENABLED=true")
-        configured=tuple(x.strip() for x in os.getenv("DEX_SOURCES","").split(",") if x.strip()); sources=configured or tuple(x for x in ("Uniswap_V3","Aerodrome","SushiSwap","Uniswap_V2","PancakeSwapV3") if x in adapter.sources(chain_id))[:4]
-        if len(sources)<2: raise RuntimeError(f"fewer than two usable DEX sources found on chain {chain_id}: {sources}")
+        available=set(adapter.sources(chain_id))
+        configured=tuple(x.strip() for x in os.getenv("DEX_SOURCES","").split(",") if x.strip())
+        requested=configured or ("Uniswap_V3","Aerodrome","SushiSwap","Uniswap_V2","PancakeSwapV3")
+        sources=tuple(x for x in requested if x in available)
+        unsupported=tuple(x for x in requested if x not in available)
+        if unsupported: logging.warning("Ignoring unsupported DEX sources on chain %s: %s",chain_id,unsupported)
+        if len(sources)<2: raise RuntimeError(f"fewer than two usable DEX sources found on chain {chain_id}: requested={requested}, available={sorted(available)}, usable={sources}")
+        sources=sources[:4]
         engine=DexCrossExchangeEngine(adapter,sources,min_profit=min_profit,quote_token_decimals=quote_decimals,max_quote_latency_ms=latency,safety_buffer_quote=safety,flash_loan_enabled=flash_enabled,flash_loan_fee_bps=fee_bps)
         with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":"0","flash_liquidity":str(flash_cap),"flash_loan_enabled":flash_enabled})
         while True:
             try:
                 if live:
-                    # In live mode use the actual Aave pool balance; the env value is only a paper-mode ceiling.
                     actual=Decimal(executor.available_liquidity_units(quote_token))/(Decimal(10)**quote_decimals)
-                    max_quote=actual
-                    fee_bps=executor.flash_loan_fee_bps(); engine.flash_loan_fee_bps=fee_bps
+                    max_quote=actual; fee_bps=executor.flash_loan_fee_bps(); engine.flash_loan_fee_bps=fee_bps
                     if max_quote<=0: raise RuntimeError("no flash-loan liquidity available for the quote token")
                     with LOCK: STATE["flash_liquidity"]=str(max_quote)
                 else: max_quote=flash_cap
