@@ -80,11 +80,15 @@ class AaveFlashExecutor:
         return int(token_contract.functions.balanceOf(self.config.pool_address).call())
 
     def flash_loan_fee_bps(self) -> Decimal:
-        """Read Aave's premium in basis points (bps). Aave returns hundredths of a bps."""
-        premium_bps = Decimal(str(self.pool.functions.FLASHLOAN_PREMIUM_TOTAL().call())) / Decimal("10000")
-        if premium_bps < 0 or premium_bps > Decimal("1000"):
-            raise RuntimeError(f"invalid Aave flash-loan premium: {premium_bps} bps")
-        return premium_bps
+        """Read Aave V3 FLASHLOAN_PREMIUM_TOTAL as basis points.
+
+        Aave exposes the premium in basis points (e.g. 5 = 5 bps = 0.05%),
+        so the raw on-chain value must NOT be divided by 10,000 here.
+        """
+        raw_bps = Decimal(str(self.pool.functions.FLASHLOAN_PREMIUM_TOTAL().call()))
+        if raw_bps < 0 or raw_bps > Decimal("1000"):
+            raise RuntimeError(f"invalid Aave flash-loan premium: {raw_bps} bps")
+        return raw_bps
 
     @staticmethod
     def _call(execution: Any) -> tuple[Any, ...]:
