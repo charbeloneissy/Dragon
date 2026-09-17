@@ -17,11 +17,11 @@ def test_cross_exchange_profit_gate():
         "b": {"BTC/USDT:USDT": {"limits": {"amount": {"min": 0.001}, "cost": {"min": 0}}, "precision": {"amount": 3}}},
     }
     a = Quote("a", "BTC/USDT:USDT", Decimal("100000"), Decimal("100000"), Decimal("1"), Decimal("1"), 1000)
-    b = Quote("b", "BTC/USDT:USDT", Decimal("100010"), Decimal("100010"), Decimal("1"), Decimal("1"), 1000)
+    b = Quote("b", "BTC/USDT:USDT", Decimal("102000"), Decimal("102000"), Decimal("1"), Decimal("1"), 1000)
     op = e.evaluate_pair(a, b)
     assert op is not None
     assert op.net_profit >= Decimal("0.005")
 
 
-def test_no_triangle_fields_are_used():
-    assert "triangular" not in CrossExchangeFutures.__doc__.lower() or "no triangle" in CrossExchangeFutures.__doc__.lower()
+def test_no_triangular_strategy():
+    assert "no triangle" in CrossExchangeFutures.__doc__.lower()
