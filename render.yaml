@@ -37,7 +37,7 @@ services:
       - key: DEX_SOURCES
         value: "Uniswap_V3,Aerodrome"
       - key: FLASH_LOAN_ENABLED
-        value: "false"
+        value: "true"
       - key: FLASH_LOAN_FEE_BPS
         value: "0"
       - key: MEV_PROTECTION_REQUIRED
