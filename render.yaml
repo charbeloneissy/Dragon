@@ -1,12 +1,12 @@
 services:
   - type: web
-    name: dragon-arbitrage-live
+    name: dragon-arbitrage-dex
     runtime: python
     region: frankfurt
     plan: free
-    branch: cross-exchange-futures-v1
+    branch: main
     buildCommand: pip install -r requirements.txt
-    startCommand: python dragon_cross_exchange_runner.py
+    startCommand: python dex_cross_exchange_runner.py
     autoDeploy: true
     healthCheckPath: /health
     envVars:
@@ -16,13 +16,17 @@ services:
         value: 10000
       - key: LOG_LEVEL
         value: INFO
-      - key: DRAGON_CONFIG_PATH
-        value: dragon_live_config.yaml
-      - key: FUTURES_ONLY
-        value: "true"
-      - key: SPOT_ENABLED
-        value: "false"
-      - key: TRIANGULAR_ENABLED
-        value: "false"
+      - key: DEX_CHAIN_ID
+        value: "8453"
+      - key: DEX_QUOTE_AMOUNT_BASE_UNITS
+        value: "5000000"
+      - key: DEX_MIN_NET_PROFIT
+        value: "0.005"
+      - key: DEX_SLIPPAGE_BPS
+        value: "50"
+      - key: DEX_POLL_SECONDS
+        value: "0.5"
+      - key: DEX_SOURCES
+        value: "Uniswap_V3,Aerodrome"
       - key: LIVE_TRADING
         value: "false"
