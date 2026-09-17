@@ -21,6 +21,7 @@ class DexOpportunity:
     gross_profit_quote: Decimal
     net_profit_quote: Decimal
     gas_cost_quote: Decimal
+    flash_loan_fee_quote: Decimal
     safety_buffer_quote: Decimal
     first_leg: DexExecution
     second_leg: DexExecution
@@ -31,6 +32,8 @@ class DexCrossExchangeEngine:
 
     This engine never signs or broadcasts transactions. It evaluates a
     two-leg cross-DEX round trip using independently constrained 0x sources.
+    Flash-loan mode is modeled as a cost in the profitability calculation;
+    the actual flash-loan contract/executor is deliberately not enabled here.
     """
 
     def __init__(
@@ -41,6 +44,8 @@ class DexCrossExchangeEngine:
         quote_token_decimals: int = 6,
         max_quote_latency_ms: Decimal = Decimal("1000"),
         safety_buffer_quote: Decimal = Decimal("0.001"),
+        flash_loan_enabled: bool = False,
+        flash_loan_fee_bps: Decimal = Decimal("0"),
     ):
         if quote_token_decimals < 0 or quote_token_decimals > 36:
             raise ValueError("quote_token_decimals must be between 0 and 36")
@@ -50,6 +55,10 @@ class DexCrossExchangeEngine:
             raise ValueError("max_quote_latency_ms must be positive")
         if Decimal(safety_buffer_quote) < 0:
             raise ValueError("safety_buffer_quote cannot be negative")
+        if Decimal(flash_loan_fee_bps) < 0 or Decimal(flash_loan_fee_bps) > 1000:
+            raise ValueError("flash_loan_fee_bps must be between 0 and 1000")
+        if not flash_loan_enabled and Decimal(flash_loan_fee_bps) != 0:
+            raise ValueError("flash_loan_fee_bps requires flash_loan_enabled=true")
 
         self.adapter = adapter
         self.sources = tuple(dict.fromkeys(s.strip() for s in sources if s.strip()))
@@ -57,6 +66,8 @@ class DexCrossExchangeEngine:
         self.quote_token_decimals = quote_token_decimals
         self.max_quote_latency_ms = Decimal(max_quote_latency_ms)
         self.safety_buffer_quote = Decimal(safety_buffer_quote)
+        self.flash_loan_enabled = bool(flash_loan_enabled)
+        self.flash_loan_fee_bps = Decimal(flash_loan_fee_bps)
 
     def scan_once(
         self,
@@ -94,6 +105,10 @@ class DexCrossExchangeEngine:
 
         opportunities: list[DexOpportunity] = []
         scale = Decimal(10) ** self.quote_token_decimals
+        flash_loan_fee_quote = (
+            Decimal(quote_amount) / scale * self.flash_loan_fee_bps / Decimal("10000")
+            if self.flash_loan_enabled else Decimal("0")
+        )
 
         for buy_source, (buy_quote, buy_execution) in quotes.items():
             bought_amount = buy_execution.buy_amount
@@ -124,7 +139,8 @@ class DexCrossExchangeEngine:
                 gas_quote_units = buy_quote.gas_quote + (sell_quote.gas_quote * second_rate)
                 gross_units = Decimal(final_amount - quote_amount)
                 safety_units = self.safety_buffer_quote * scale
-                net_units = gross_units - gas_quote_units - safety_units
+                flash_fee_units = flash_loan_fee_quote * scale
+                net_units = gross_units - gas_quote_units - flash_fee_units - safety_units
                 gross = gross_units / scale
                 gas_cost = gas_quote_units / scale
                 net = net_units / scale
@@ -143,6 +159,7 @@ class DexCrossExchangeEngine:
                             gross_profit_quote=gross,
                             net_profit_quote=net,
                             gas_cost_quote=gas_cost,
+                            flash_loan_fee_quote=flash_loan_fee_quote,
                             safety_buffer_quote=self.safety_buffer_quote,
                             first_leg=buy_execution,
                             second_leg=sell_execution,
