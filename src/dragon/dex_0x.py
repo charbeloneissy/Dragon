@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from decimal import Decimal
@@ -9,6 +10,8 @@ from typing import Any
 import httpx
 
 from .dex import DexQuote
+
+_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 
 @dataclass(frozen=True)
@@ -30,11 +33,9 @@ class DexExecution:
 
 
 class ZeroXAdapter:
-    """Real 0x Swap API v2 adapter for single-source EVM DEX routes.
+    """0x Swap API v2 quote/calldata adapter.
 
-    The adapter returns firm quote data and executable calldata. It does not
-    sign or broadcast transactions; Dragon's execution layer must explicitly
-    enable that path.
+    Quotes are advisory. This class never signs or broadcasts transactions.
     """
 
     BASE_URL = "https://api.0x.org/swap/allowance-holder"
@@ -42,9 +43,9 @@ class ZeroXAdapter:
 
     def __init__(self, api_key: str | None = None, timeout: float = 4.0):
         self.api_key = (api_key or os.getenv("ZEROX_API_KEY", "")).strip()
-        self.timeout = timeout
+        self.timeout = float(timeout)
         self.client = httpx.Client(
-            timeout=timeout,
+            timeout=self.timeout,
             headers={
                 "Accept": "application/json",
                 "0x-version": "v2",
@@ -57,20 +58,40 @@ class ZeroXAdapter:
     def enabled(self) -> bool:
         return bool(self.api_key)
 
+    @staticmethod
+    def _validate_address(name: str, value: str) -> None:
+        if not _ADDRESS_RE.fullmatch(value):
+            raise ValueError(f"{name} must be a valid EVM address")
+
+    @staticmethod
+    def _validate_amount(sell_amount: int) -> None:
+        if isinstance(sell_amount, bool) or int(sell_amount) <= 0:
+            raise ValueError("sell_amount must be a positive integer")
+
+    @staticmethod
+    def _validate_slippage(slippage_bps: int) -> None:
+        if isinstance(slippage_bps, bool) or not 0 <= int(slippage_bps) <= 10_000:
+            raise ValueError("slippage_bps must be between 0 and 10000")
+
     def _get(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.enabled:
             raise RuntimeError("ZEROX_API_KEY is not configured")
-        response = self.client.get(url, params=params)
-        response.raise_for_status()
+        try:
+            response = self.client.get(url, params=params)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"0x API request failed: {exc}") from exc
         payload = response.json()
         if not isinstance(payload, dict):
             raise RuntimeError("0x returned a non-object response")
         return payload
 
     def sources(self, chain_id: int) -> tuple[str, ...]:
-        payload = self._get(self.SOURCES_URL, {"chainId": chain_id})
+        if int(chain_id) <= 0:
+            raise ValueError("chain_id must be positive")
+        payload = self._get(self.SOURCES_URL, {"chainId": int(chain_id)})
         values = payload.get("sources") or []
-        return tuple(str(value) for value in values if str(value).strip())
+        return tuple(str(value).strip() for value in values if str(value).strip())
 
     def quote_single_source(
         self,
@@ -83,6 +104,13 @@ class ZeroXAdapter:
         source: str,
         slippage_bps: int = 50,
     ) -> tuple[DexQuote, DexExecution]:
+        self._validate_address("sell_token", sell_token)
+        self._validate_address("buy_token", buy_token)
+        self._validate_address("taker", taker)
+        if sell_token.lower() == buy_token.lower():
+            raise ValueError("sell_token and buy_token must differ")
+        if not source.strip():
+            raise ValueError("source is required")
         available = set(self.sources(chain_id))
         if source not in available:
             raise ValueError(f"unsupported 0x liquidity source for chain {chain_id}: {source}")
@@ -110,14 +138,22 @@ class ZeroXAdapter:
         excluded_sources: str | None = None,
         expected_source: str | None = None,
     ) -> tuple[DexQuote, DexExecution]:
+        self._validate_address("sell_token", sell_token)
+        self._validate_address("buy_token", buy_token)
+        self._validate_address("taker", taker)
+        self._validate_amount(sell_amount)
+        self._validate_slippage(slippage_bps)
+        if sell_token.lower() == buy_token.lower():
+            raise ValueError("sell_token and buy_token must differ")
+
         started = time.perf_counter()
         params: dict[str, Any] = {
-            "chainId": chain_id,
+            "chainId": int(chain_id),
             "sellToken": sell_token,
             "buyToken": buy_token,
-            "sellAmount": sell_amount,
+            "sellAmount": int(sell_amount),
             "taker": taker,
-            "slippageBps": slippage_bps,
+            "slippageBps": int(slippage_bps),
         }
         if excluded_sources:
             params["excludedSources"] = excluded_sources
@@ -139,9 +175,21 @@ class ZeroXAdapter:
         if not actual_sources:
             raise RuntimeError("0x quote returned no route source")
         if expected_source and actual_sources != {expected_source}:
-            raise RuntimeError(f"route is not single-source: expected {expected_source}, got {sorted(actual_sources)}")
+            raise RuntimeError(
+                f"route is not single-source: expected {expected_source}, got {sorted(actual_sources)}"
+            )
         if not tx.get("to") or not tx.get("data"):
             raise RuntimeError("0x quote did not return executable transaction calldata")
+        self._validate_address("transaction.to", str(tx["to"]))
+        if not isinstance(tx.get("data"), str) or not tx["data"].startswith("0x"):
+            raise RuntimeError("0x transaction calldata is invalid")
+
+        buy_amount = int(payload.get("buyAmount", 0))
+        returned_sell_amount = int(payload.get("sellAmount", sell_amount))
+        if returned_sell_amount != int(sell_amount):
+            raise RuntimeError("0x returned a different sell amount than requested")
+        if buy_amount <= 0:
+            raise RuntimeError("0x returned a non-positive buy amount")
 
         gas_fee = ((payload.get("fees") or {}).get("gasFee") or {}).get("amount")
         gas_quote = Decimal(str(gas_fee or "0"))
@@ -162,7 +210,7 @@ class ZeroXAdapter:
             latency_ms=latency_ms,
         )
         execution = DexExecution(
-            chain_id=chain_id,
+            chain_id=int(chain_id),
             venue="0x",
             source=venue,
             to=str(tx["to"]),
@@ -173,7 +221,7 @@ class ZeroXAdapter:
             sell_token=str(payload["sellToken"]),
             buy_token=str(payload["buyToken"]),
             sell_amount=int(payload["sellAmount"]),
-            buy_amount=int(payload["buyAmount"]),
+            buy_amount=buy_amount,
             allowance_target=((issues.get("allowance") or {}).get("spender") or payload.get("allowanceTarget")),
             issues=issues,
         )
