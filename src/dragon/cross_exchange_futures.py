@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +57,6 @@ class Settings:
         execution = cfg.get("execution") or {}
         runtime = cfg.get("runtime") or {}
         exchanges = tuple(str(x).strip() for x in (cfg.get("exchanges") or DEFAULT_EXCHANGES) if str(x).strip())
-
         if strategy.get("type") != "cross_exchange":
             raise ValueError("config strategy.type must be cross_exchange")
         if strategy.get("triangular", False) or strategy.get("intra_exchange", False):
@@ -68,7 +67,6 @@ class Settings:
             raise ValueError("config must contain exactly 15 exchanges")
         if _decimal(arb.get("min_net_profit_usdt", "0.005")) < Decimal("0.005"):
             raise ValueError("minimum net profit cannot be below 0.005 USDT")
-
         return cls(
             starting_balance=_decimal(capital.get("starting_balance_usdt", "5")),
             min_profit_usdt=_decimal(arb.get("min_net_profit_usdt", "0.005")),
@@ -90,7 +88,6 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        # Backward-compatible name; operational strategy values now come from YAML.
         return cls.from_yaml()
 
 
@@ -212,6 +209,29 @@ class CrossExchangeFutures:
             minimum = (minimum / step).to_integral_value(rounding=ROUND_CEILING) * step
         return minimum
 
+    def _common_step(self, long_name: str, short_name: str, symbol: str) -> Decimal:
+        return max(self._step(self.markets[long_name][symbol]), self._step(self.markets[short_name][symbol]))
+
+    def _round_down_common(self, qty: Decimal, long_name: str, short_name: str, symbol: str) -> Decimal:
+        step = self._common_step(long_name, short_name, symbol)
+        if step <= 0:
+            return qty
+        return (qty / step).to_integral_value(rounding=ROUND_FLOOR) * step
+
+    def _profit_for_quantity(self, op: Opportunity, qty: Decimal) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal]:
+        gross = (op.short_price - op.long_price) * qty
+        fees = Decimal("0")
+        slippage = Decimal("0")
+        funding = Decimal("0")
+        if self.settings.include_fees:
+            fees = op.long_price * qty * self._fee_rate(op.long_exchange) + op.short_price * qty * self._fee_rate(op.short_exchange)
+        if self.settings.include_slippage:
+            slip_bps = _decimal(os.getenv("DRAGON_SLIPPAGE_BPS", "2"))
+            slippage = ((op.long_price + op.short_price) * qty / Decimal("2")) * slip_bps / Decimal("10000")
+        if self.settings.include_funding:
+            funding = self._funding_buffer(qty, (op.long_price + op.short_price) / Decimal("2"))
+        return gross, fees, slippage, funding, gross - fees - slippage - funding
+
     async def _quote(self, name: str, symbol: str) -> Quote | None:
         try:
             ticker = await self.exchanges[name].fetch_ticker(symbol)
@@ -243,18 +263,9 @@ class CrossExchangeFutures:
             qty = min(qty, a.ask_qty, b.bid_qty)
         if qty < minimum:
             return None
-        gross = (b.bid - a.ask) * qty
-        fees = Decimal("0")
-        slippage = Decimal("0")
-        funding = Decimal("0")
-        if self.settings.include_fees:
-            fees = a.ask * qty * self._fee_rate(a.exchange) + b.bid * qty * self._fee_rate(b.exchange)
-        if self.settings.include_slippage:
-            slip_bps = _decimal(os.getenv("DRAGON_SLIPPAGE_BPS", "2"))
-            slippage = ((a.ask + b.bid) * qty / Decimal("2")) * slip_bps / Decimal("10000")
-        if self.settings.include_funding:
-            funding = self._funding_buffer(qty, (a.ask + b.bid) / Decimal("2"))
-        net = gross - fees - slippage - funding
+        gross, fees, slippage, funding, net = self._profit_for_quantity(
+            Opportunity(a.symbol, a.exchange, b.exchange, a.ask, b.bid, qty, Decimal(0), Decimal(0), Decimal(0), Decimal(0), Decimal(0), now), qty
+        )
         if net < self.settings.min_profit_usdt:
             return None
         return Opportunity(a.symbol, a.exchange, b.exchange, a.ask, b.bid, qty, gross, fees, slippage, funding, net, now)
@@ -280,50 +291,77 @@ class CrossExchangeFutures:
         free = balance.get("free") or {}
         return _decimal(free.get("USDT", 0) or 0)
 
-    async def _compound_quantity(self, op: Opportunity) -> Decimal:
-        if not self.settings.dynamic_sizing:
-            return op.quantity
-        long_free, short_free = await asyncio.gather(self._free_margin(op.long_exchange), self._free_margin(op.short_exchange))
+    async def _execution_quantity(self, op: Opportunity) -> Decimal:
+        """Size from actual free margin and leverage, never from an arbitrary capital multiplier."""
+        minimum = self._minimum_quantity(op.long_exchange, op.short_exchange, op.symbol, max(op.long_price, op.short_price))
+        long_free, short_free = await asyncio.gather(
+            self._free_margin(op.long_exchange), self._free_margin(op.short_exchange)
+        )
         if min(long_free, short_free) <= 0:
             return Decimal("0")
-        if not self.settings.compound_realized_pnl:
-            return op.quantity
-        units = max(1, int(min(long_free, short_free) / self.settings.starting_balance))
-        return op.quantity * Decimal(units)
+        if not self.settings.dynamic_sizing:
+            target = op.quantity
+        else:
+            # Both legs require margin. Use the smaller free-margin side.
+            max_notional = min(long_free, short_free) * Decimal(self.settings.leverage)
+            target = max_notional / max(op.long_price, op.short_price)
+            if op.quantity > 0:
+                # Never execute more than available executable quote liquidity.
+                target = max(target, minimum)
+                if op.quantity > 0:
+                    target = min(target, op.quantity * (target / op.quantity))
+        target = self._round_down_common(target, op.long_exchange, op.short_exchange, op.symbol)
+        if target < minimum:
+            return Decimal("0")
+        return target
 
     async def execute(self, op: Opportunity) -> dict[str, Any]:
         if not self.settings.live:
             return {"status": "paper", "opportunity": op.__dict__}
 
-        qty = await self._compound_quantity(op)
+        qty = await self._execution_quantity(op)
         if qty <= 0:
-            return {"status": "rejected", "reason": "insufficient_free_margin"}
+            return {"status": "rejected", "reason": "insufficient_free_margin_or_below_minimum"}
+
+        gross, fees, slippage, funding, net = self._profit_for_quantity(op, qty)
+        if net < self.settings.min_profit_usdt:
+            return {"status": "rejected", "reason": "net_profit_below_threshold", "net_profit": str(net)}
+
         long_ex = self.exchanges[op.long_exchange]
         short_ex = self.exchanges[op.short_exchange]
         try:
-            qty_long = float(long_ex.amount_to_precision(op.symbol, float(qty)))
-            qty_short = float(short_ex.amount_to_precision(op.symbol, float(qty)))
+            qty_long = _decimal(long_ex.amount_to_precision(op.symbol, float(qty)))
+            qty_short = _decimal(short_ex.amount_to_precision(op.symbol, float(qty)))
         except Exception:
             return {"status": "rejected", "reason": "invalid_exchange_quantity"}
-        if qty_long <= 0 or qty_short <= 0:
-            return {"status": "rejected", "reason": "below_exchange_minimum"}
         qty_f = min(qty_long, qty_short)
-        await long_ex.set_leverage(self.settings.leverage, op.symbol)
-        await short_ex.set_leverage(self.settings.leverage, op.symbol)
+        minimum = self._minimum_quantity(op.long_exchange, op.short_exchange, op.symbol, max(op.long_price, op.short_price))
+        if qty_f < minimum or qty_f <= 0:
+            return {"status": "rejected", "reason": "below_exchange_minimum"}
+
+        try:
+            await asyncio.gather(
+                long_ex.set_leverage(self.settings.leverage, op.symbol),
+                short_ex.set_leverage(self.settings.leverage, op.symbol),
+            )
+        except Exception as exc:
+            return {"status": "rejected", "reason": "leverage_setup_failed", "error": str(exc)}
+
         first = second = None
         try:
             first, second = await asyncio.gather(
-                asyncio.wait_for(long_ex.create_order(op.symbol, self.settings.order_type, "buy", qty_f, None, {"reduceOnly": False}), self.settings.leg_timeout_ms / 1000),
-                asyncio.wait_for(short_ex.create_order(op.symbol, self.settings.order_type, "sell", qty_f, None, {"reduceOnly": False}), self.settings.leg_timeout_ms / 1000),
+                asyncio.wait_for(long_ex.create_order(op.symbol, self.settings.order_type, "buy", float(qty_f), None, {"reduceOnly": False}), self.settings.leg_timeout_ms / 1000),
+                asyncio.wait_for(short_ex.create_order(op.symbol, self.settings.order_type, "sell", float(qty_f), None, {"reduceOnly": False}), self.settings.leg_timeout_ms / 1000),
             )
-            self.positions.append(Position(op, int(time.time() * 1000), _decimal(qty_f)))
-            return {"status": "opened", "long": first, "short": second, "quantity": str(qty_f)}
+            self.positions.append(Position(op, int(time.time() * 1000), qty_f))
+            return {"status": "opened", "long": first, "short": second, "quantity": str(qty_f), "net_profit_estimate": str(net)}
         except Exception as exc:
             LOG.exception("paired execution failed")
             for ex, order, side in ((long_ex, first, "sell"), (short_ex, second, "buy")):
                 if order:
                     try:
-                        filled = _decimal(order.get("filled") or qty_f)
+                        filled_raw = order.get("filled")
+                        filled = _decimal(filled_raw) if filled_raw is not None else Decimal("0")
                         if filled > 0:
                             await ex.create_order(op.symbol, "market", side, float(filled), None, {"reduceOnly": True})
                     except Exception:
@@ -377,7 +415,3 @@ async def run() -> None:
             await asyncio.sleep(engine.settings.poll_ms / 1000)
     finally:
         await engine.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(run())
