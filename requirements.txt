@@ -3,3 +3,4 @@ websockets>=12,<16
 ccxt>=4.5,<5
 pytest>=8.0,<9
 PyYAML>=6.0,<7
+web3>=7,<8
