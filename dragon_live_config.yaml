@@ -1,0 +1,58 @@
+mode: paper
+
+strategy:
+  type: cross_exchange
+  triangular: false
+  intra_exchange: false
+
+market:
+  type: futures_only
+  spot: false
+  margin: true
+  perpetuals: true
+  leverage: 1
+
+capital:
+  starting_balance_usdt: 5.0
+
+arbitrage:
+  min_net_profit_usdt: 0.005
+  include_trading_fees: true
+  include_funding_cost: true
+  include_slippage: true
+  max_quote_age_ms: 1000
+  max_pair_skew_ms: 500
+
+position:
+  sizing: minimum_valid_lot
+  dynamic_sizing: true
+  compound_realized_pnl: true
+
+execution:
+  continuous_scanning: true
+  continuous_trading: true
+  order_type: market
+  leg_timeout_ms: 1500
+  hedge_on_partial_fill: true
+
+exchanges:
+  - binanceusdm
+  - bybit
+  - okx
+  - bitget
+  - gateio
+  - kucoinfutures
+  - mexc
+  - bingx
+  - bitmart
+  - phemex
+  - coinex
+  - htx
+  - deribit
+  - cryptocom
+  - woo
+
+runtime:
+  poll_interval_ms: 250
+  max_concurrent_pairs: 64
+  log_level: INFO
