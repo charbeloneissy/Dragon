@@ -76,7 +76,7 @@ def test_execute_halts_when_fill_state_cannot_be_reconciled():
         async def set_leverage(self, leverage, symbol): return {}
         async def create_order(self, *args, **kwargs): raise TimeoutError("lost response")
     e.exchanges = {"a": Exchange(), "b": Exchange()}
-    op = Opportunity("BTC/USDT:USDT", "a", "b", Decimal("100"), Decimal("101"), Decimal("0.001"), Decimal(0), Decimal(0), Decimal(0), Decimal(0), Decimal(0), int(time.time() * 1000))
+    op = Opportunity("BTC/USDT:USDT", "a", "b", Decimal("100"), Decimal("1100"), Decimal("0.001"), Decimal(0), Decimal(0), Decimal(0), Decimal(0), Decimal(0), int(time.time() * 1000))
     result = asyncio.run(e.execute(op))
     assert result["status"] == "reconciliation_required"
     assert e.execution_halted is True
