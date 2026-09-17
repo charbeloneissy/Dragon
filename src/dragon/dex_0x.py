@@ -4,7 +4,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -44,6 +44,8 @@ class ZeroXAdapter:
     def __init__(self, api_key: str | None = None, timeout: float = 4.0):
         self.api_key = (api_key or os.getenv("ZEROX_API_KEY", "")).strip()
         self.timeout = float(timeout)
+        if self.timeout <= 0:
+            raise ValueError("timeout must be positive")
         self.client = httpx.Client(
             timeout=self.timeout,
             headers={
@@ -73,6 +75,16 @@ class ZeroXAdapter:
         if isinstance(slippage_bps, bool) or not 0 <= int(slippage_bps) <= 10_000:
             raise ValueError("slippage_bps must be between 0 and 10000")
 
+    @staticmethod
+    def _decimal(name: str, value: Any) -> Decimal:
+        try:
+            result = Decimal(str(value))
+        except (InvalidOperation, ValueError) as exc:
+            raise RuntimeError(f"invalid numeric value for {name}") from exc
+        if not result.is_finite() or result < 0:
+            raise RuntimeError(f"invalid non-negative numeric value for {name}")
+        return result
+
     def _get(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.enabled:
             raise RuntimeError("ZEROX_API_KEY is not configured")
@@ -81,7 +93,10 @@ class ZeroXAdapter:
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise RuntimeError(f"0x API request failed: {exc}") from exc
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise RuntimeError("0x returned invalid JSON") from exc
         if not isinstance(payload, dict):
             raise RuntimeError("0x returned a non-object response")
         return payload
@@ -91,7 +106,7 @@ class ZeroXAdapter:
             raise ValueError("chain_id must be positive")
         payload = self._get(self.SOURCES_URL, {"chainId": int(chain_id)})
         values = payload.get("sources") or []
-        return tuple(str(value).strip() for value in values if str(value).strip())
+        return tuple(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
 
     def quote_single_source(
         self,
@@ -109,7 +124,8 @@ class ZeroXAdapter:
         self._validate_address("taker", taker)
         if sell_token.lower() == buy_token.lower():
             raise ValueError("sell_token and buy_token must differ")
-        if not source.strip():
+        source = source.strip()
+        if not source:
             raise ValueError("source is required")
         available = set(self.sources(chain_id))
         if source not in available:
@@ -143,6 +159,8 @@ class ZeroXAdapter:
         self._validate_address("taker", taker)
         self._validate_amount(sell_amount)
         self._validate_slippage(slippage_bps)
+        if int(chain_id) <= 0:
+            raise ValueError("chain_id must be positive")
         if sell_token.lower() == buy_token.lower():
             raise ValueError("sell_token and buy_token must differ")
 
@@ -184,15 +202,20 @@ class ZeroXAdapter:
         if not isinstance(tx.get("data"), str) or not tx["data"].startswith("0x"):
             raise RuntimeError("0x transaction calldata is invalid")
 
-        buy_amount = int(payload.get("buyAmount", 0))
-        returned_sell_amount = int(payload.get("sellAmount", sell_amount))
+        try:
+            buy_amount = int(payload.get("buyAmount", 0))
+            returned_sell_amount = int(payload.get("sellAmount", sell_amount))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("0x returned invalid token amounts") from exc
         if returned_sell_amount != int(sell_amount):
             raise RuntimeError("0x returned a different sell amount than requested")
         if buy_amount <= 0:
             raise RuntimeError("0x returned a non-positive buy amount")
 
-        gas_fee = ((payload.get("fees") or {}).get("gasFee") or {}).get("amount")
-        gas_quote = Decimal(str(gas_fee or "0"))
+        fees = payload.get("fees") or {}
+        gas_fee = (fees.get("gasFee") or {}).get("amount")
+        gas_quote = self._decimal("fees.gasFee.amount", gas_fee or "0")
+        total_network_fee = self._decimal("totalNetworkFee", payload.get("totalNetworkFee", "0"))
         latency_ms = Decimal(str((time.perf_counter() - started) * 1000))
         venue = next(iter(actual_sources)) if len(actual_sources) == 1 else "mixed"
 
@@ -203,7 +226,7 @@ class ZeroXAdapter:
             buy_token=str(payload["buyToken"]),
             sell_amount=Decimal(str(payload["sellAmount"])),
             buy_amount=Decimal(str(payload["buyAmount"])),
-            gas_native=Decimal(str(payload.get("totalNetworkFee", "0"))),
+            gas_native=total_network_fee,
             gas_quote=gas_quote,
             fee_bps=Decimal("0"),
             slippage_bps=Decimal(str(slippage_bps)),
