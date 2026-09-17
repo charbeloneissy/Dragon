@@ -6,7 +6,7 @@ interface IAaveV3Pool { function flashLoanSimple(address receiverAddress,address
 interface IFlashLoanSimpleReceiver { function executeOperation(address asset,uint256 amount,uint256 premium,address initiator,bytes calldata params) external returns (bool); }
 
 contract DragonAaveV3Executor is IFlashLoanSimpleReceiver {
-    error NotOwner(); error NotPool(); error InvalidAsset(); error InvalidAmount(); error InvalidTarget(); error InvalidBlock(); error PreExistingBalance(); error FirstLegFailed(); error SecondLegFailed(); error FirstLegSlippage(); error SecondLegSlippage(); error RepaymentShortfall(); error ProfitTooSmall(); error TransferFailed(); error Reentrancy();
+    error NotOwner(); error NotPool(); error InvalidAsset(); error InvalidAmount(); error InvalidTarget(); error InvalidBlock(); error PreExistingBalance(); error FirstLegFailed(); error SecondLegFailed(); error FirstLegSlippage(); error SecondLegSlippage(); error RepaymentShortfall(); error ProfitTooSmall(); error TransferFailed(); error Reentrancy(); error ProfitRecipientMismatch();
     struct Call { address target; bytes data; address sellToken; address buyToken; address allowanceTarget; uint256 sellAmount; uint256 minBuyAmount; }
     struct FlashParams { address owner; uint256 minProfit; uint256 maxBlockNumber; Call first; Call second; }
     address public immutable POOL; address public owner; bool private entered;
@@ -17,6 +17,7 @@ contract DragonAaveV3Executor is IFlashLoanSimpleReceiver {
     constructor(address pool,address initialOwner){if(pool==address(0)||initialOwner==address(0))revert InvalidTarget();POOL=pool;owner=initialOwner;emit OwnershipTransferred(address(0),initialOwner);}
     function transferOwnership(address newOwner) external onlyOwner {if(newOwner==address(0))revert InvalidTarget();emit OwnershipTransferred(owner,newOwner);owner=newOwner;}
     function executeFlashArbitrage(address asset,uint256 amount,FlashParams calldata params) external onlyOwner nonReentrant {
+        if(params.owner!=owner)revert ProfitRecipientMismatch();
         if(asset==address(0)||asset!=params.first.sellToken||asset!=params.second.buyToken)revert InvalidAsset();
         if(amount==0||params.first.sellAmount!=amount)revert InvalidAmount(); if(params.maxBlockNumber<block.number)revert InvalidBlock();
         _validateCall(params.first);_validateCall(params.second);if(params.first.buyToken!=params.second.sellToken)revert InvalidAsset();
@@ -25,10 +26,11 @@ contract DragonAaveV3Executor is IFlashLoanSimpleReceiver {
     function executeOperation(address asset,uint256 amount,uint256 premium,address initiator,bytes calldata rawParams) external override returns(bool){
         if(msg.sender!=POOL||initiator!=address(this))revert NotPool();
         FlashParams memory params=abi.decode(rawParams,(FlashParams));
+        if(params.owner!=owner)revert ProfitRecipientMismatch();
         if(params.maxBlockNumber<block.number)revert InvalidBlock();
         if(params.first.sellToken!=asset||params.second.buyToken!=asset||params.first.sellAmount!=amount)revert InvalidAsset();
         if(params.first.buyToken!=params.second.sellToken)revert InvalidAsset();_validateCall(params.first);_validateCall(params.second);
-        // Dragon uses flash liquidity only: the executor must have had zero quote-token balance before the loan.
+        // Flash liquidity only: the executor must have had exactly the loan amount before the callback.
         if(IERC20(asset).balanceOf(address(this))!=amount)revert PreExistingBalance();
         _approve(params.first.sellToken,params.first.allowanceTarget,amount);
         uint256 baseBefore=IERC20(params.first.buyToken).balanceOf(address(this));
