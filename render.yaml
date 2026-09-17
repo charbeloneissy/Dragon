@@ -18,12 +18,18 @@ services:
         value: INFO
       - key: DEX_CHAIN_ID
         value: "8453"
-      - key: DEX_QUOTE_AMOUNT_BASE_UNITS
-        value: "5000000"
+      - key: DEX_STARTING_QUOTE
+        value: "5"
+      - key: DEX_QUOTE_TOKEN_DECIMALS
+        value: "6"
       - key: DEX_MIN_NET_PROFIT
         value: "0.005"
+      - key: DEX_SAFETY_BUFFER
+        value: "0.001"
       - key: DEX_SLIPPAGE_BPS
         value: "50"
+      - key: DEX_MAX_QUOTE_LATENCY_MS
+        value: "1000"
       - key: DEX_POLL_SECONDS
         value: "0.5"
       - key: DEX_SOURCES
