@@ -57,4 +57,4 @@ def test_execution_rejects_minimum_lot_above_margin():
 
 
 def test_no_triangular_strategy():
-    assert "no triangle" in CrossExchangeFutures.__doc__.lower()
+    assert "no triangles" in CrossExchangeFutures.__doc__.lower()
