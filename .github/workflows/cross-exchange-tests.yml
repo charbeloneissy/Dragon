@@ -6,6 +6,7 @@ on:
       - "src/dragon/dex_cross_exchange.py"
       - "src/dragon/dex_0x.py"
       - "src/dragon/flash_executor.py"
+      - "dex_cross_exchange_runner.py"
       - "contracts/**"
       - "tests/test_dex_cross_exchange.py"
       - "requirements.txt"
@@ -25,5 +26,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
+      - name: Compile active DEX runtime
+        run: python -m py_compile dex_cross_exchange_runner.py src/dragon/dex_cross_exchange.py src/dragon/dex_0x.py src/dragon/flash_executor.py
       - name: Run active DEX tests
         run: pytest -q tests/test_dex_cross_exchange.py
