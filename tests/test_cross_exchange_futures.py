@@ -2,13 +2,14 @@ from decimal import Decimal
 import asyncio
 import time
 
-from src.dragon.cross_exchange_futures import CrossExchangeFutures, Opportunity, Settings
+from src.dragon.cross_exchange_futures import CrossExchangeFutures, Opportunity, Quote, Settings
 
 
 def _engine(leverage=1, dynamic=True, compound=True):
     e = object.__new__(CrossExchangeFutures)
-    e.settings = Settings(starting_balance=Decimal("5"), min_profit_usdt=Decimal("0.005"), leverage=leverage, quote_age_ms=1000, pair_skew_ms=500, poll_ms=250, leg_timeout_ms=1500, max_hold_ms=30000, live=True, dynamic_sizing=dynamic, compound_realized_pnl=compound)
-    e.markets = {"a": {"BTC/USDT:USDT": {"limits": {"amount": {"min": Decimal("0.001")}, "cost": {"min": 0}}, "precision": {"amount": 3}}}, "b": {"BTC/USDT:USDT": {"limits": {"amount": {"min": Decimal("0.001")}, "cost": {"min": 0}}, "precision": {"amount": 3}}}}
+    e.settings = Settings(starting_balance=Decimal("5"), min_profit_usdt=Decimal("0.005"), leverage=leverage, quote_age_ms=1000, pair_skew_ms=500, poll_ms=250, leg_timeout_ms=1500, max_hold_ms=30000, max_concurrent_pairs=64, live=True, dynamic_sizing=dynamic, compound_realized_pnl=compound)
+    market = {"limits": {"amount": {"min": Decimal("0.001")}, "cost": {"min": 0}}, "precision": {"amount": 3}, "contractSize": 1}
+    e.markets = {"a": {"BTC/USDT:USDT": market.copy()}, "b": {"BTC/USDT:USDT": market.copy()}}
     e.exchanges = {}
     e.positions = []
     e.execution_halted = False
@@ -19,12 +20,12 @@ def test_required_strategy_settings():
     s = Settings.from_env()
     assert s.starting_balance == Decimal("5")
     assert s.min_profit_usdt == Decimal("0.005")
+    assert len(s.exchanges) == 15
 
 
 def test_cross_exchange_profit_gate():
     e = _engine()
     now = int(time.time() * 1000)
-    from src.dragon.cross_exchange_futures import Quote
     a = Quote("a", "BTC/USDT:USDT", Decimal("100000"), Decimal("100000"), Decimal("1"), Decimal("1"), now)
     b = Quote("b", "BTC/USDT:USDT", Decimal("102000"), Decimal("102000"), Decimal("1"), Decimal("1"), now)
     op = e.evaluate_pair(a, b)
@@ -41,20 +42,40 @@ def test_profit_calculation_includes_all_costs():
     assert net == gross - fees - slippage - funding
 
 
-def test_execution_sizing_uses_both_venues_free_margin_and_leverage():
+def test_contract_size_is_used_for_profit_and_margin():
     e = _engine(leverage=10)
+    e.markets["a"]["BTC/USDT:USDT"]["contractSize"] = 10
+    e.markets["b"]["BTC/USDT:USDT"]["contractSize"] = 10
+
     class Exchange:
         def __init__(self, free): self.free = free
         async def fetch_balance(self, _): return {"free": {"USDT": str(self.free)}}
+
+    e.exchanges = {"a": Exchange(5), "b": Exchange(8)}
+    op = Opportunity("BTC/USDT:USDT", "a", "b", Decimal("100"), Decimal("101"), Decimal("1"), Decimal(0), Decimal(0), Decimal(0), Decimal(0), Decimal(0), int(time.time() * 1000))
+    assert asyncio.run(e._execution_quantity(op)) == Decimal("0.040")
+    gross, *_ = e._profit_for_quantity(op, Decimal("1"))
+    assert gross == Decimal("10")
+
+
+def test_execution_sizing_uses_both_venues_free_margin_and_leverage():
+    e = _engine(leverage=10)
+
+    class Exchange:
+        def __init__(self, free): self.free = free
+        async def fetch_balance(self, _): return {"free": {"USDT": str(self.free)}}
+
     e.exchanges = {"a": Exchange(5), "b": Exchange(8)}
     op = Opportunity("BTC/USDT:USDT", "a", "b", Decimal("100"), Decimal("101"), Decimal("0.001"), Decimal(0), Decimal(0), Decimal(0), Decimal(0), Decimal(0), int(time.time() * 1000))
-    assert asyncio.run(e._execution_quantity(op)) == Decimal("0.495")
+    assert asyncio.run(e._execution_quantity(op)) == Decimal("0.500")
 
 
 def test_execution_rejects_minimum_lot_above_margin():
     e = _engine(leverage=1)
+
     class Exchange:
         async def fetch_balance(self, _): return {"free": {"USDT": "5"}}
+
     e.exchanges = {"a": Exchange(), "b": Exchange()}
     op = Opportunity("BTC/USDT:USDT", "a", "b", Decimal("100000"), Decimal("100100"), Decimal("0.001"), Decimal(0), Decimal(0), Decimal(0), Decimal(0), Decimal(0), int(time.time() * 1000))
     assert asyncio.run(e._execution_quantity(op)) == Decimal("0")
@@ -62,19 +83,24 @@ def test_execution_rejects_minimum_lot_above_margin():
 
 def test_resolve_filled_uses_exact_zero_and_fetches_when_missing():
     e = _engine()
+
     class Exchange:
         async def fetch_order(self, order_id, symbol): return {"id": order_id, "filled": "0.004"}
+
     assert asyncio.run(e._resolve_filled(Exchange(), {"id": "123", "filled": 0}, "BTC/USDT:USDT")) == Decimal("0")
     assert asyncio.run(e._resolve_filled(Exchange(), {"id": "124"}, "BTC/USDT:USDT")) == Decimal("0.004")
+    assert asyncio.run(e._resolve_filled(Exchange(), None, "BTC/USDT:USDT")) is None
 
 
 def test_execute_halts_when_fill_state_cannot_be_reconciled():
     e = _engine(leverage=1)
+
     class Exchange:
         async def fetch_balance(self, _): return {"free": {"USDT": "5"}}
         def amount_to_precision(self, symbol, qty): return "0.001"
         async def set_leverage(self, leverage, symbol): return {}
         async def create_order(self, *args, **kwargs): raise TimeoutError("lost response")
+
     e.exchanges = {"a": Exchange(), "b": Exchange()}
     op = Opportunity("BTC/USDT:USDT", "a", "b", Decimal("100"), Decimal("1100"), Decimal("0.001"), Decimal(0), Decimal(0), Decimal(0), Decimal(0), Decimal(0), int(time.time() * 1000))
     result = asyncio.run(e.execute(op))
