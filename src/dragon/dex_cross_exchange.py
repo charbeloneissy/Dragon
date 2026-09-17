@@ -69,6 +69,7 @@ class DexCrossExchangeEngine:
             return Decimal("0")
         if native_to_quote_rate <= 0:
             return Decimal("Infinity")
+        # native_to_quote_rate is normalized to quote tokens per 1 native token.
         return (gas_native / Decimal(10) ** 18) * native_to_quote_rate
 
     def _candidate_amounts(self, ceiling: int) -> list[int]:
@@ -105,7 +106,11 @@ class DexCrossExchangeEngine:
         native_to_quote_rate = self.native_to_quote_rate
         needs_native_rate = any(((getattr(q, "gas_quote", None) is None or Decimal(str(getattr(q, "gas_quote", 0))) <= 0) and (Decimal(str(getattr(q, "gas_native", 0))) > 0 or Decimal(str(getattr(e, "gas", 0))) * Decimal(str(getattr(e, "gas_price", 0))) > 0)) for q, e in quotes.values())
         if native_to_quote_rate <= 0 and needs_native_rate:
-            try: native_to_quote_rate = Decimal(str(self.adapter.native_to_quote_rate(chain_id=chain_id, quote_token=quote_token, sell_amount_native=10**15, taker=taker)))
+            try:
+                raw_rate = Decimal(str(self.adapter.native_to_quote_rate(chain_id=chain_id, quote_token=quote_token, sell_amount_native=10**15, taker=taker)))
+                # The adapter returns quote base-units per native base-unit. Normalize
+                # once here so gas accounting is expressed in human quote units.
+                native_to_quote_rate = raw_rate * (Decimal(10) ** 18) / scale
             except Exception: self._reject("native_to_quote_rate_error"); return []
         if native_to_quote_rate < 0: self._reject("negative_native_to_quote_rate"); return []
         for buy_source, (buy_quote, buy_execution) in quotes.items():
