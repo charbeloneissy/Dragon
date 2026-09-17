@@ -13,28 +13,33 @@ market:
   leverage: 1
 
 capital:
-  starting_balance_usdt: 5.0
+  starting_balance_usdt: 0
+  own_capital_usdt: 0
+  flash_loan_only: true
 
 arbitrage:
   min_net_profit_usdt: 0.005
   include_trading_fees: true
   include_gas_cost: true
   include_slippage: true
+  include_mev_reserve: true
   max_quote_age_ms: 1000
   max_pair_skew_ms: 500
 
 position:
-  sizing: minimum_valid_lot
+  sizing: flash_liquidity_dynamic
   dynamic_sizing: true
   compound_realized_pnl: true
 
 execution:
   continuous_scanning: true
-  continuous_trading: true
+  continuous_trading: false
   order_type: market
   leg_timeout_ms: 1500
   hedge_on_partial_fill: false
   live_execution: false
+  mev_protection_required: true
+  atomic_repayment_required: true
 
 runtime:
   poll_interval_ms: 500
