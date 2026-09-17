@@ -6,11 +6,10 @@ from src.dragon.dex_cross_exchange import DexCrossExchangeEngine
 
 class FakeAdapter:
     def quote_single_source(self, *, sell_token, buy_token, sell_amount, source, **_kwargs):
-        # Source A is cheaper for QUOTE -> BASE; source B is better on BASE -> QUOTE.
         if source == "A":
-            buy_amount = 101000 if sell_token == "QUOTE" else 990000
+            buy_amount = 1_010_000 if sell_token == "QUOTE" else 990_000
         else:
-            buy_amount = 100000 if sell_token == "QUOTE" else 102000
+            buy_amount = 1_000_000 if sell_token == "QUOTE" else 1_020_000
         execution = DexExecution(
             chain_id=8453,
             venue="0x",
@@ -33,7 +32,7 @@ class FakeAdapter:
 def test_cross_dex_requires_two_sources():
     engine = DexCrossExchangeEngine(FakeAdapter(), ["A"], min_profit=Decimal("0.005"))
     try:
-        engine.scan_once(chain_id=8453, quote_token="QUOTE", base_token="BASE", quote_amount=100000, taker="0x1")
+        engine.scan_once(chain_id=8453, quote_token="QUOTE", base_token="BASE", quote_amount=1_000_000, taker="0x1")
     except ValueError as exc:
         assert "at least two" in str(exc)
     else:
@@ -46,7 +45,7 @@ def test_cross_dex_returns_only_cross_source_opportunities():
         chain_id=8453,
         quote_token="QUOTE",
         base_token="BASE",
-        quote_amount=100000,
+        quote_amount=1_000_000,
         taker="0x1",
     )
     assert opportunities
