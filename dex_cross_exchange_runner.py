@@ -66,9 +66,17 @@ def merge_rejections(stats):
 
 async def main():
     logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"),format="%(asctime)s %(levelname)s %(message)s")
-    Thread(target=start_health_server,daemon=True).start(); adapter=ZeroXAdapter()
+    Thread(target=start_health_server,daemon=True).start()
+    adapter=ZeroXAdapter()
+    if not adapter.enabled:
+        message="ZEROX_API_KEY is missing; dashboard is alive, DEX scanning is paused until the API key is configured"
+        logging.error(message)
+        with LOCK:
+            STATE["status"]="degraded"
+            STATE["last_error"]=message
+        while True:
+            await asyncio.sleep(30)
     try:
-        if not adapter.enabled: raise RuntimeError("ZEROX_API_KEY is required for the real DEX adapter")
         chain_id=int(os.getenv("DEX_CHAIN_ID","8453")); taker_config=validate_evm_address("DEX_TAKER_ADDRESS",env_required("DEX_TAKER_ADDRESS")); quote_token=validate_evm_address("DEX_QUOTE_TOKEN",env_required("DEX_QUOTE_TOKEN")); base_token=validate_evm_address("DEX_BASE_TOKEN",env_required("DEX_BASE_TOKEN"))
         if quote_token.lower()==base_token.lower(): raise ValueError("DEX_QUOTE_TOKEN and DEX_BASE_TOKEN must be different")
         quote_decimals=int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS","6")); own_capital=env_decimal("DEX_OWN_CAPITAL_QUOTE","0")
