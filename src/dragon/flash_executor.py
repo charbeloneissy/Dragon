@@ -80,8 +80,8 @@ class AaveFlashExecutor:
         return int(token_contract.functions.balanceOf(self.config.pool_address).call())
 
     def flash_loan_fee_bps(self) -> Decimal:
-        """Read Aave's current on-chain premium instead of trusting a static env value."""
-        premium_bps = Decimal(str(self.pool.functions.FLASHLOAN_PREMIUM_TOTAL().call())) / Decimal("100")
+        """Read Aave's premium in basis points (bps). Aave returns hundredths of a bps."""
+        premium_bps = Decimal(str(self.pool.functions.FLASHLOAN_PREMIUM_TOTAL().call())) / Decimal("10000")
         if premium_bps < 0 or premium_bps > Decimal("1000"):
             raise RuntimeError(f"invalid Aave flash-loan premium: {premium_bps} bps")
         return premium_bps
@@ -113,9 +113,6 @@ class AaveFlashExecutor:
             raise ValueError("second leg quote output is below the flash principal")
 
         scale = Decimal(10) ** self.config.quote_token_decimals
-        # The contract's minProfit is gross profit after flash-loan repayment.
-        # Include the scanner's gas estimate and safety reserve so the on-chain
-        # invariant also enforces the requested net-profit floor.
         gas_reserve = Decimal(str(getattr(opportunity, "gas_cost_quote", 0)))
         safety_reserve = Decimal(str(getattr(opportunity, "safety_buffer_quote", 0)))
         required_profit = self.config.min_profit_quote + gas_reserve + safety_reserve
