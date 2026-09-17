@@ -5,14 +5,24 @@ import json
 import logging
 import os
 import time
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock, Thread
-from decimal import Decimal
 
 from src.dragon.dex_0x import ZeroXAdapter
 from src.dragon.dex_cross_exchange import DexCrossExchangeEngine
 
-STATE = {"status": "starting", "mode": "paper", "scans": 0, "opportunities": 0, "last_scan": None, "last_error": None, "started_at": time.time()}
+STATE = {
+    "status": "starting",
+    "mode": "paper",
+    "chain_id": None,
+    "sources": [],
+    "scans": 0,
+    "opportunities": 0,
+    "last_scan": None,
+    "last_error": None,
+    "started_at": time.time(),
+}
 LOCK = Lock()
 
 
@@ -48,18 +58,43 @@ def env_required(name: str) -> str:
     return value
 
 
+def validate_evm_address(name: str, value: str) -> str:
+    value = value.strip()
+    if len(value) != 42 or not value.startswith("0x"):
+        raise ValueError(f"{name} must be a 20-byte EVM address")
+    try:
+        int(value[2:], 16)
+    except ValueError as exc:
+        raise ValueError(f"{name} contains non-hex characters") from exc
+    return value
+
+
 async def main() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
     Thread(target=start_health_server, daemon=True).start()
 
     adapter = ZeroXAdapter()
+    if not adapter.enabled:
+        raise RuntimeError("ZEROX_API_KEY is required for the real DEX adapter")
+
     chain_id = int(os.getenv("DEX_CHAIN_ID", "8453"))
-    taker = env_required("DEX_TAKER_ADDRESS")
-    quote_token = env_required("DEX_QUOTE_TOKEN")
-    base_token = env_required("DEX_BASE_TOKEN")
+    taker = validate_evm_address("DEX_TAKER_ADDRESS", env_required("DEX_TAKER_ADDRESS"))
+    quote_token = validate_evm_address("DEX_QUOTE_TOKEN", env_required("DEX_QUOTE_TOKEN"))
+    base_token = validate_evm_address("DEX_BASE_TOKEN", env_required("DEX_BASE_TOKEN"))
+    if quote_token.lower() == base_token.lower():
+        raise ValueError("DEX_QUOTE_TOKEN and DEX_BASE_TOKEN must be different")
+
     quote_amount = int(os.getenv("DEX_QUOTE_AMOUNT_BASE_UNITS", "5000000"))
+    quote_decimals = int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS", "6"))
     min_profit = Decimal(os.getenv("DEX_MIN_NET_PROFIT", "0.005"))
     slippage_bps = int(os.getenv("DEX_SLIPPAGE_BPS", "50"))
+    max_quote_latency_ms = Decimal(os.getenv("DEX_MAX_QUOTE_LATENCY_MS", "1000"))
+
+    if quote_amount <= 0:
+        raise ValueError("DEX_QUOTE_AMOUNT_BASE_UNITS must be positive")
+    if min_profit < Decimal("0.005"):
+        raise ValueError("DEX_MIN_NET_PROFIT cannot be below 0.005 USDT-equivalent")
+
     configured = tuple(x.strip() for x in os.getenv("DEX_SOURCES", "").split(",") if x.strip())
     if configured:
         sources = configured
@@ -67,13 +102,30 @@ async def main() -> None:
         discovered = adapter.sources(chain_id)
         preferred = ("Uniswap_V3", "Aerodrome", "SushiSwap", "Uniswap_V2", "PancakeSwapV3")
         sources = tuple(x for x in preferred if x in discovered)[:4]
+
     if len(sources) < 2:
         raise RuntimeError(f"fewer than two usable DEX sources found on chain {chain_id}: {sources}")
 
-    engine = DexCrossExchangeEngine(adapter, sources, min_profit=min_profit)
-    logging.info("Dragon DEX cross-exchange | chain=%s sources=%s quote_amount=%s min_profit=%s", chain_id, sources, quote_amount, min_profit)
+    engine = DexCrossExchangeEngine(
+        adapter,
+        sources,
+        min_profit=min_profit,
+        quote_token_decimals=quote_decimals,
+        max_quote_latency_ms=max_quote_latency_ms,
+    )
+
+    logging.info(
+        "Dragon DEX cross-exchange | PAPER=%s | chain=%s sources=%s quote_amount=%s min_profit=%s",
+        True,
+        chain_id,
+        sources,
+        quote_amount,
+        min_profit,
+    )
     with LOCK:
         STATE["status"] = "running"
+        STATE["chain_id"] = chain_id
+        STATE["sources"] = list(sources)
 
     try:
         while True:
@@ -94,7 +146,13 @@ async def main() -> None:
                     STATE["last_error"] = None
                 if opportunities:
                     best = opportunities[0]
-                    logging.info("DEX OPPORTUNITY buy=%s sell=%s net_profit=%s", best.buy_source, best.sell_source, best.net_profit_quote)
+                    logging.info(
+                        "DEX OPPORTUNITY buy=%s sell=%s gross=%s net=%s",
+                        best.buy_source,
+                        best.sell_source,
+                        best.gross_profit_quote,
+                        best.net_profit_quote,
+                    )
                 await asyncio.sleep(float(os.getenv("DEX_POLL_SECONDS", "0.5")))
             except Exception as exc:
                 logging.exception("DEX scan failed")
