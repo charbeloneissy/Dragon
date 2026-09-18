@@ -167,7 +167,7 @@ async def main():
                 all_opportunities.sort(key=lambda x: x.net_profit_quote, reverse=True)
                 opportunities=all_opportunities[:max(1,int(os.getenv("DEX_MAX_OPPORTUNITIES","8")))]
                 merge_rejections(aggregate_rejections)
-                logging.info("DEX scan complete: sources=%s base_tokens=%s candidates_per_token=%s opportunities=%s rejections=%s", sources, len(base_tokens), len(engine._candidate_amounts(int(max_quote * (Decimal(10) ** quote_decimals)))), len(opportunities), aggregate_rejections)
+                logging.info("DEX scan complete: sources=%s base_tokens=%s candidates_per_token=%s opportunities=%s rejections=%s", sources, len(base_tokens), len(next(iter(token_engines.values()))._candidate_amounts(int(max_quote * (Decimal(10) ** quote_decimals)))), len(opportunities), aggregate_rejections)
                 with LOCK: STATE["scans"]+=1; STATE["opportunities"]+=len(opportunities); STATE["last_scan"]=time.time(); STATE["last_error"]=None; STATE["quote_amount"]=str(opportunities[0].quote_amount/(Decimal(10)**quote_decimals)) if opportunities else None
                 if opportunities and live:
                     best=opportunities[0]; max_block=executor.w3.eth.block_number+max(1,int(os.getenv("DEX_MAX_BLOCKS_AHEAD","2")))
