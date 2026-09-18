@@ -131,8 +131,24 @@ class DexCrossExchangeEngine:
                 try: sell_quote, sell_execution = self.adapter.quote_single_source(chain_id=chain_id, sell_token=base_token, buy_token=quote_token, sell_amount=bought_amount, taker=taker, source=sell_source, slippage_bps=slippage_bps)
                 except Exception: self._reject("sell_quote_error"); continue
                 if self._quote_latency(sell_quote) > self.max_quote_latency_ms: self._reject("sell_quote_stale"); continue
-                final_amount = sell_execution.buy_amount
-                if final_amount <= 0: self._reject("sell_zero_output"); continue
+                raw_final_amount = sell_execution.buy_amount
+                if raw_final_amount <= 0: self._reject("sell_zero_output"); continue
+                # Profitability must survive the same slippage bound used by both executable legs.
+                # Apply the slippage haircut to each leg for conservative pre-trade accounting;
+                # calldata still enforces the exact minOut on-chain.
+                slippage_factor = (Decimal(10000 - slippage_bps) / Decimal(10000))
+                conservative_bought_amount = int(Decimal(bought_amount) * slippage_factor)
+                if conservative_bought_amount <= 0: self._reject("slippage_zero_intermediate"); continue
+                try:
+                    if conservative_bought_amount != bought_amount:
+                        sell_quote_conservative, sell_execution_conservative = self.adapter.quote_single_source(chain_id=chain_id, sell_token=base_token, buy_token=quote_token, sell_amount=conservative_bought_amount, taker=taker, source=sell_source, slippage_bps=slippage_bps)
+                        if self._quote_latency(sell_quote_conservative) > self.max_quote_latency_ms: self._reject("sell_quote_stale"); continue
+                        raw_final_amount = sell_execution_conservative.buy_amount
+                        sell_quote = sell_quote_conservative
+                        sell_execution = sell_execution_conservative
+                except Exception: self._reject("conservative_sell_quote_error"); continue
+                final_amount = int(Decimal(raw_final_amount) * slippage_factor)
+                if final_amount <= 0: self._reject("slippage_zero_output"); continue
                 gas_cost_quote = self._gas_cost_quote(buy_quote, buy_execution, native_to_quote_rate) + self._gas_cost_quote(sell_quote, sell_execution, native_to_quote_rate)
                 if not gas_cost_quote.is_finite(): self._reject("gas_unpriced"); continue
                 gross = Decimal(final_amount - quote_amount) / scale
