@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Iterable
 
 from .dex import DexQuote
-from .dex_0x import DexExecution, ZeroXAdapter
+from .dex_0x import DexExecution
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class DexOpportunity:
 class DexCrossExchangeEngine:
     """Two-leg cross-DEX scanner with conservative net-profit accounting."""
 
-    def __init__(self, adapter: ZeroXAdapter, sources: Iterable[str], min_profit: Decimal = Decimal("0.005"), quote_token_decimals: int = 6, max_quote_latency_ms: Decimal = Decimal("1000"), safety_buffer_quote: Decimal = Decimal("0.001"), flash_loan_enabled: bool = False, flash_loan_fee_bps: Decimal = Decimal("0"), native_to_quote_rate: Decimal = Decimal("0")):
+    def __init__(self, adapter, sources: Iterable[str], min_profit: Decimal = Decimal("0.005"), quote_token_decimals: int = 6, max_quote_latency_ms: Decimal = Decimal("1000"), safety_buffer_quote: Decimal = Decimal("0.001"), flash_loan_enabled: bool = False, flash_loan_fee_bps: Decimal = Decimal("0"), native_to_quote_rate: Decimal = Decimal("0")):
         if quote_token_decimals < 0 or quote_token_decimals > 36: raise ValueError("quote_token_decimals must be between 0 and 36")
         if Decimal(min_profit) < Decimal("0.005"): raise ValueError("min_profit cannot be below 0.005")
         if Decimal(max_quote_latency_ms) <= 0: raise ValueError("max_quote_latency_ms must be positive")
