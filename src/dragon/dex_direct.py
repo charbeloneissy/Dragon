@@ -80,9 +80,9 @@ class DirectDexAdapter:
         self.aero_gas_limit = max(100_000, int(os.getenv("AERODROME_GAS_LIMIT", "250000")))
         self.uni_gas_limit = max(100_000, int(os.getenv("UNISWAP_GAS_LIMIT", "250000")))
         self.uni_fees = tuple(int(x) for x in os.getenv("UNISWAP_V3_FEES", "100,500,3000,10000").split(",") if x.strip())
-        raw_intermediates = os.getenv("DEX_ROUTE_INTERMEDIATES", "").strip()
+        raw_intermediates = os.getenv("DEX_ROUTE_INTERMEDIATES", BASE_WETH).strip()
         self.route_intermediates = tuple(x.strip() for x in raw_intermediates.split(",") if x.strip())
-        self.deep_route_always = os.getenv("DEX_DEEP_ROUTE_ALWAYS", "false").strip().lower() in {"1", "true", "yes", "on"}
+        self.deep_route_always = os.getenv("DEX_DEEP_ROUTE_ALWAYS", "true").strip().lower() in {"1", "true", "yes", "on"}
         self._gas_price_cache = 0
         self._gas_price_cache_at = 0.0
         # Keep route expansion bounded: direct + one-intermediate paths only.
