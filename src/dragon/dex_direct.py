@@ -55,6 +55,9 @@ class DirectDexAdapter:
         self.uni_fees = tuple(int(x) for x in os.getenv("UNISWAP_V3_FEES", "100,500,3000,10000").split(",") if x.strip())
         raw_intermediates = os.getenv("DEX_ROUTE_INTERMEDIATES", "").strip()
         self.route_intermediates = tuple(x.strip() for x in raw_intermediates.split(",") if x.strip())
+        # Keep route expansion bounded: direct + one-intermediate paths only.
+        if len(self.route_intermediates) > 4:
+            self.route_intermediates = self.route_intermediates[:4]
 
     @staticmethod
     def _addr(v: str) -> str:
