@@ -220,7 +220,15 @@ class ZeroXAdapter:
         params = {"chainId": int(chain_id), "sellToken": sell_token, "buyToken": buy_token, "sellAmount": int(sell_amount), "taker": taker, "slippageBps": int(slippage_bps)}
         if excluded_sources:
             params["excludedSources"] = excluded_sources
-        payload = self._get(f"{self.BASE_URL}/quote", params)
+        try:
+            payload = self._get(f"{self.BASE_URL}/quote", params)
+        except Exception as exc:
+            import logging
+            logging.warning(
+                "0x aggregated quote request failed sell=%s buy=%s amount=%s error=%s: %s",
+                sell_token, buy_token, sell_amount, type(exc).__name__, exc,
+            )
+            raise
         if payload.get("liquidityAvailable") is False:
             raise RuntimeError("0x reports no liquidity for this quote")
 
