@@ -123,7 +123,7 @@ async def main():
         sources=tuple(x for x in requested if x in available); unsupported=tuple(x for x in requested if x not in available)
         if unsupported: logging.warning("Ignoring unsupported DEX sources on chain %s: %s",chain_id,unsupported)
         if len(sources)<2: raise RuntimeError(f"fewer than two usable DEX sources found on chain {chain_id}: requested={requested}, available={sorted(available)}, usable={sources}")
-        sources=sources[:max(2,min(12,int(os.getenv("DEX_MAX_SOURCES","8")))]
+        sources=sources[:max(2,min(12,int(os.getenv("DEX_MAX_SOURCES","8"))))]
         engine_kwargs=dict(
             min_profit=min_profit,
             quote_token_decimals=quote_decimals,
