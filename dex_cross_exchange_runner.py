@@ -110,12 +110,27 @@ async def main():
         if unsupported: logging.warning("Ignoring unsupported DEX sources on chain %s: %s",chain_id,unsupported)
         if len(sources)<2: raise RuntimeError(f"fewer than two usable DEX sources found on chain {chain_id}: requested={requested}, available={sorted(available)}, usable={sources}")
         sources=sources[:4]
-        engine=DexCrossExchangeEngine(adapter,sources,min_profit=min_profit,quote_token_decimals=quote_decimals,max_quote_latency_ms=latency,safety_buffer_quote=safety,flash_loan_enabled=flash_enabled,flash_loan_fee_bps=fee_bps)
+        engine_kwargs=dict(
+            min_profit=min_profit,
+            quote_token_decimals=quote_decimals,
+            max_quote_latency_ms=latency,
+            safety_buffer_quote=safety,
+            flash_loan_enabled=flash_enabled,
+            flash_loan_fee_bps=fee_bps,
+        )
+        # Build one isolated engine per token once. Recreating engines inside every
+        # scan cycle repeatedly cloned Web3/RPC adapters and defeated the latency optimization.
+        token_engines={
+            token: DexCrossExchangeEngine(adapter,sources,**engine_kwargs)
+            for token in base_tokens
+        }
         with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":"0","flash_liquidity":str(flash_cap),"flash_loan_enabled":flash_enabled})
         while True:
             try:
                 if live:
-                    actual=Decimal(executor.available_liquidity_units(quote_token))/(Decimal(10)**quote_decimals); max_quote=actual; fee_bps=executor.flash_loan_fee_bps(); engine.flash_loan_fee_bps=fee_bps
+                    actual=Decimal(executor.available_liquidity_units(quote_token))/(Decimal(10)**quote_decimals); max_quote=actual; fee_bps=executor.flash_loan_fee_bps()
+                    for token_engine in token_engines.values():
+                        token_engine.flash_loan_fee_bps=fee_bps
                     if max_quote<=0: raise RuntimeError("no flash-loan liquidity available for the quote token")
                     with LOCK: STATE["flash_liquidity"]=str(max_quote)
                 else: max_quote=flash_cap
@@ -125,18 +140,10 @@ async def main():
                 scan_semaphore=asyncio.Semaphore(scan_concurrency)
                 async def scan_base_token(scan_base):
                     async with scan_semaphore:
-                        # Each concurrent asset gets an isolated engine state so rejection
-                        # telemetry cannot race through the shared last_rejections dict.
-                        scan_engine=DexCrossExchangeEngine(
-                            adapter,
-                            sources,
-                            min_profit=min_profit,
-                            quote_token_decimals=quote_decimals,
-                            max_quote_latency_ms=latency,
-                            safety_buffer_quote=safety,
-                            flash_loan_enabled=flash_enabled,
-                            flash_loan_fee_bps=fee_bps,
-                        )
+                        # Each token has its own persistent engine state, so scans can
+                        # run concurrently without rebuilding RPC/Web3 adapters.
+                        scan_engine=token_engines[scan_base]
+                        scan_engine.flash_loan_fee_bps=fee_bps
                         found=await asyncio.to_thread(
                             scan_engine.scan_max_profitable,
                             chain_id=chain_id,
