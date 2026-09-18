@@ -162,8 +162,20 @@ class DexCrossExchangeEngine:
             Decimal("0.05"), Decimal("0.10"), Decimal("0.20"), Decimal("0.30"),
             Decimal("0.40"), Decimal("0.50"), Decimal("0.75"), Decimal("1.00"),
         ]
-        n = min(max_candidates, len(fractions))
-        amounts = [max(1, int(Decimal(ceiling) * f)) for f in fractions[:n]]
+        # Keep the grid representative when the candidate budget is small:
+        # always probe both low size and full available size instead of truncating
+        # the fraction list at 30%, which can miss the most profitable size.
+        if max_candidates <= len(fractions):
+            if max_candidates == 4:
+                selected = [Decimal("0.05"), Decimal("0.20"), Decimal("0.50"), Decimal("1.00")]
+            else:
+                idx = [round(i * (len(fractions) - 1) / (max_candidates - 1)) for i in range(max_candidates)]
+                selected = [fractions[i] for i in sorted(set(idx))]
+                while len(selected) < max_candidates:
+                    selected.append(fractions[len(selected)])
+        else:
+            selected = fractions[:]
+        amounts = [max(1, int(Decimal(ceiling) * f)) for f in selected]
         if max_candidates > len(fractions):
             for i in range(len(fractions) + 1, max_candidates + 1):
                 amounts.append(max(1, (ceiling * i) // max_candidates))
@@ -174,8 +186,24 @@ class DexCrossExchangeEngine:
         scale = Decimal(10) ** self.quote_token_decimals; ceiling = int(max_quote_amount * scale)
         if ceiling <= 0: return []
         self.last_rejections = {}; profitable: list[DexOpportunity] = []
-        for candidate in self._candidate_amounts(ceiling):
-            profitable.extend(self.scan_once(chain_id=chain_id, quote_token=quote_token, base_token=base_token, quote_amount=candidate, taker=taker, slippage_bps=slippage_bps))
+        candidates = self._candidate_amounts(ceiling)
+
+        # Candidate sizes are independent. Evaluate them concurrently so the scan
+        # latency is bounded by the slowest candidate rather than the sum of all
+        # candidate RPC round trips. Keep the worker count bounded for RPC safety.
+        max_workers = max(1, min(len(candidates), int(os.getenv("DEX_CANDIDATE_CONCURRENCY", "4"))))
+        def _scan(candidate: int):
+            return self.scan_once(
+                chain_id=chain_id, quote_token=quote_token, base_token=base_token,
+                quote_amount=candidate, taker=taker, slippage_bps=slippage_bps,
+            )
+        if max_workers == 1:
+            results = [_scan(candidate) for candidate in candidates]
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                results = list(pool.map(_scan, candidates))
+        for result in results:
+            profitable.extend(result)
         return [max(profitable, key=lambda x: (x.net_profit_quote, x.quote_amount))] if profitable else []
 
     def scan_once(self, *, chain_id: int, quote_token: str, base_token: str, quote_amount: int, taker: str, slippage_bps: int = 50) -> list[DexOpportunity]:
