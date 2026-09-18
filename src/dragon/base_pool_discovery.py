@@ -48,7 +48,10 @@ def discover_recent_base_tokens(
 
     latest = int(adapter._rpc_call(lambda w3: w3.eth.block_number))
     start = max(0, latest - lookback_blocks)
-    discovered: dict[str, int] = {}
+    # Track both recency and how many independent pools expose the token.
+    # Pool count is a conservative liquidity/availability proxy during discovery;
+    # executable quote quality remains the final liquidity gate.
+    discovered: dict[str, dict[str, int]] = {}
 
     # The direct quote adapter currently supports Aerodrome's v2 factory.
     # Slipstream factories are intentionally excluded until their CL quote path
@@ -96,14 +99,20 @@ def discover_recent_base_tokens(
 
                 for token in (token0, token1):
                     if token.lower() not in anchors_set:
-                        discovered[token.lower()] = max(
-                            block, discovered.get(token.lower(), 0)
-                        )
+                        key = token.lower()
+                        entry = discovered.setdefault(key, {"latest_block": 0, "pool_count": 0})
+                        entry["latest_block"] = max(block, entry["latest_block"])
+                        entry["pool_count"] += 1
 
-    ranked = sorted(discovered.items(), key=lambda item: item[1], reverse=True)
+    ranked = sorted(
+        discovered.items(),
+        key=lambda item: (item[1]["pool_count"], item[1]["latest_block"]),
+        reverse=True,
+    )
     result = [Web3.to_checksum_address(token) for token, _ in ranked[:max_tokens]]
     logging.info(
-        "DEX universe discovery complete latest_block=%s lookback=%s candidates=%s",
+        "DEX universe discovery complete latest_block=%s lookback=%s candidates=%s top_pool_count=%s",
         latest, lookback_blocks, len(result),
+        ranked[0][1]["pool_count"] if ranked else 0,
     )
     return result
