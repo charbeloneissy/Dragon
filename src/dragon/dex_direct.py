@@ -74,6 +74,10 @@ class DirectDexAdapter:
         if len(self.route_intermediates) > 4:
             self.route_intermediates = self.route_intermediates[:4]
 
+    def clone_for_concurrent_quotes(self):
+        """Create an isolated adapter so parallel quote calls do not share RPC failover state."""
+        return DirectDexAdapter(rpc_url=self.rpc_url, timeout=self._rpc_timeout)
+
     @staticmethod
     def _addr(v: str) -> str:
         return Web3.to_checksum_address(v)
