@@ -115,6 +115,7 @@ async def main():
                 else: max_quote=flash_cap
                 opportunities=await asyncio.to_thread(engine.scan_max_profitable,chain_id=chain_id,quote_token=quote_token,base_token=base_token,max_quote_amount=max_quote,taker=taker,slippage_bps=slippage)
                 merge_rejections(engine.last_rejections)
+                logging.info("DEX scan complete: sources=%s candidates=%s opportunities=%s rejections=%s", sources, len(engine._candidate_amounts(int(max_quote * (Decimal(10) ** quote_decimals)))), len(opportunities), engine.last_rejections)
                 with LOCK: STATE["scans"]+=1; STATE["opportunities"]+=len(opportunities); STATE["last_scan"]=time.time(); STATE["last_error"]=None; STATE["quote_amount"]=str(opportunities[0].quote_amount/(Decimal(10)**quote_decimals)) if opportunities else None
                 if opportunities and live:
                     best=opportunities[0]; max_block=executor.w3.eth.block_number+max(1,int(os.getenv("DEX_MAX_BLOCKS_AHEAD","2")))
