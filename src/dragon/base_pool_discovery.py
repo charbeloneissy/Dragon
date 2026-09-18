@@ -50,6 +50,9 @@ def discover_recent_base_tokens(
     start = max(0, latest - lookback_blocks)
     discovered: dict[str, int] = {}
 
+    # The direct quote adapter currently supports Aerodrome's v2 factory.
+    # Slipstream factories are intentionally excluded until their CL quote path
+    # is implemented in the execution adapter.
     factories = (
         (UNISWAP_V3_FACTORY, UNI_POOL_CREATED),
         (AERODROME_DEFAULT_FACTORY, AERO_POOL_CREATED),
@@ -58,45 +61,44 @@ def discover_recent_base_tokens(
     for factory, event_topic in factories:
         for chunk_start in range(start, latest + 1, chunk_blocks):
             chunk_end = min(latest, chunk_start + chunk_blocks - 1)
-            for anchor in anchors_set:
-                anchor_topic = "0x" + anchor[2:].rjust(64, "0")
-                queries = (
-                    [event_topic, [anchor_topic], None],
-                    [event_topic, None, [anchor_topic]],
+            try:
+                logs = adapter._rpc_call(
+                    lambda w3, f=factory, a=chunk_start, b=chunk_end,
+                    topic=event_topic: w3.eth.get_logs({
+                        "fromBlock": a,
+                        "toBlock": b,
+                        "address": Web3.to_checksum_address(f),
+                        "topics": [topic],
+                    })
                 )
-                for topics_filter in queries:
-                    try:
-                        logs = adapter._rpc_call(
-                            lambda w3, f=factory, a=chunk_start, b=chunk_end,
-                            topics=topics_filter: w3.eth.get_logs({
-                                "fromBlock": a,
-                                "toBlock": b,
-                                "address": Web3.to_checksum_address(f),
-                                "topics": topics,
-                            })
-                        )
-                    except Exception as exc:
-                        logging.debug(
-                            "universe discovery query failed factory=%s blocks=%s-%s: %s",
-                            factory, chunk_start, chunk_end, exc,
-                        )
-                        continue
+            except Exception as exc:
+                logging.debug(
+                    "universe discovery query failed factory=%s blocks=%s-%s: %s",
+                    factory, chunk_start, chunk_end, exc,
+                )
+                continue
 
-                    for log in logs:
-                        topics = log.get("topics") or []
-                        if len(topics) < 3 or str(topics[0]).lower() != event_topic.lower():
-                            continue
-                        try:
-                            token0 = _topic_address(str(topics[1]))
-                            token1 = _topic_address(str(topics[2]))
-                            block = int(log["blockNumber"])
-                        except (KeyError, TypeError, ValueError):
-                            continue
-                        if anchor not in {token0.lower(), token1.lower()}:
-                            continue
-                        for token in (token0, token1):
-                            if token.lower() not in anchors_set:
-                                discovered[token.lower()] = max(block, discovered.get(token.lower(), 0))
+            for log in logs:
+                topics = log.get("topics") or []
+                if len(topics) < 3 or str(topics[0]).lower() != event_topic.lower():
+                    continue
+                try:
+                    token0 = _topic_address(str(topics[1]))
+                    token1 = _topic_address(str(topics[2]))
+                    block = int(log["blockNumber"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+
+                token0_l = token0.lower()
+                token1_l = token1.lower()
+                if token0_l not in anchors_set and token1_l not in anchors_set:
+                    continue
+
+                for token in (token0, token1):
+                    if token.lower() not in anchors_set:
+                        discovered[token.lower()] = max(
+                            block, discovered.get(token.lower(), 0)
+                        )
 
     ranked = sorted(discovered.items(), key=lambda item: item[1], reverse=True)
     result = [Web3.to_checksum_address(token) for token, _ in ranked[:max_tokens]]
