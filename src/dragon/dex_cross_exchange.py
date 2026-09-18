@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Iterable
@@ -73,12 +74,15 @@ class DexCrossExchangeEngine:
         return (gas_native / Decimal(10) ** 18) * native_to_quote_rate
 
     def _candidate_amounts(self, ceiling: int) -> list[int]:
+        """Return a small deterministic size grid; avoid quote-spam sweeps."""
         if ceiling <= 0: return []
-        amounts = {1, ceiling}; points = 64
-        for i in range(1, points): amounts.add(max(1, (ceiling * i) // points))
-        amount = 1
-        while amount < ceiling: amounts.add(amount); amount *= 2
-        return sorted(amounts)
+        max_candidates = max(1, min(16, int(os.getenv("DEX_MAX_QUOTE_CANDIDATES", "4"))))
+        if max_candidates == 1: return [ceiling]
+        if max_candidates == 2: return [max(1, ceiling // 2), ceiling]
+        amounts = []
+        for i in range(1, max_candidates + 1):
+            amounts.append(max(1, (ceiling * i) // max_candidates))
+        return sorted(set(amounts))
 
     def scan_max_profitable(self, *, chain_id: int, quote_token: str, base_token: str, max_quote_amount: Decimal, taker: str, slippage_bps: int = 50) -> list[DexOpportunity]:
         if max_quote_amount <= 0: raise ValueError("max_quote_amount must be positive")
