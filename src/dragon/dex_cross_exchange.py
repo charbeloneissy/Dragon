@@ -106,12 +106,22 @@ class DexCrossExchangeEngine:
         if len(self.sources) < 2: raise ValueError("DEX cross-exchange mode requires at least two DEX sources")
         if quote_amount <= 0: raise ValueError("quote_amount must be positive")
         if not 0 <= slippage_bps <= 5000: raise ValueError("slippage_bps must be between 0 and 5000")
+        quote_adapters = {}
+        if hasattr(self.adapter, "clone_for_concurrent_quotes"):
+            for source in self.sources:
+                try:
+                    quote_adapters[source] = self.adapter.clone_for_concurrent_quotes()
+                except Exception:
+                    quote_adapters[source] = self.adapter
+        else:
+            quote_adapters = {source: self.adapter for source in self.sources}
+
         buy_quotes: dict[str, tuple[DexQuote, DexExecution]] = {}
         sell_sources: set[str] = set()
         opportunities: list[DexOpportunity] = []
 
         def _buy(source):
-            return source, self.adapter.quote_single_source(
+            return source, quote_adapters.get(source, self.adapter).quote_single_source(
                 chain_id=chain_id, sell_token=quote_token, buy_token=base_token,
                 sell_amount=quote_amount, taker=taker, source=source, slippage_bps=slippage_bps,
             )
