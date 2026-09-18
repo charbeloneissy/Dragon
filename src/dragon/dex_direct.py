@@ -52,9 +52,22 @@ class DirectDexAdapter:
         self._rpc_index = 0
         self._rpc_failures = [0 for _ in urls]
         self._rpc_cooldown_until = [0.0 for _ in urls]
-        self.rpc_url = urls[0]
-        self._bind_rpc(self.rpc_url)
-        logging.info("Direct DEX RPC failover configured endpoints=%s", len(urls))
+        self.rpc_url = ""
+        startup_errors = []
+        connected = False
+        for idx, url in enumerate(urls):
+            self._rpc_index = idx
+            try:
+                self._bind_rpc(url)
+                connected = True
+                break
+            except Exception as exc:
+                startup_errors.append(f"endpoint={idx} url={url} error={type(exc).__name__}: {exc}")
+                self._rpc_cooldown_until[idx] = time.monotonic() + min(5.0, 0.5 * (idx + 1))
+                logging.warning("RPC startup endpoint failed index=%s url=%s error=%s", idx, url, exc)
+        if not connected:
+            raise RpcRateLimitError("all configured Base RPC endpoints failed at startup: " + " | ".join(startup_errors))
+        logging.info("Direct DEX RPC failover configured endpoints=%s active=%s", len(urls), self.rpc_url)
 
         self._native_rate_cache = {}
         # Short quote cache reduces duplicate RPC calls during one scan without
