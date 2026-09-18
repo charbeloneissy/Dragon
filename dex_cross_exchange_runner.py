@@ -75,8 +75,11 @@ def merge_rejections(stats):
 async def main():
     logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"),format="%(asctime)s %(levelname)s %(message)s")
     start_health_server()
-    adapter=DirectDexAdapter()
+    adapter=None
     try:
+        logging.info("Dragon scanner boot: initializing direct DEX adapter")
+        adapter=DirectDexAdapter()
+        logging.info("Direct DEX adapter connected: sources=%s", adapter.sources(int(os.getenv("DEX_CHAIN_ID","8453"))))
         chain_id=int(os.getenv("DEX_CHAIN_ID","8453")); taker_config=validate_evm_address("DEX_TAKER_ADDRESS",env_required("DEX_TAKER_ADDRESS")); quote_token=validate_evm_address("DEX_QUOTE_TOKEN",env_required("DEX_QUOTE_TOKEN")); base_token=validate_evm_address("DEX_BASE_TOKEN",env_required("DEX_BASE_TOKEN"))
         if quote_token.lower()==base_token.lower(): raise ValueError("DEX_QUOTE_TOKEN and DEX_BASE_TOKEN must be different")
         quote_decimals=int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS","6")); own_capital=env_decimal("DEX_OWN_CAPITAL_QUOTE","0")
