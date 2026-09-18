@@ -163,7 +163,7 @@ class DexCrossExchangeEngine:
                     self._reject("gas_unpriced"); continue
                 gross = Decimal(final_amount - quote_amount) / scale
                 net = gross - gas_cost_quote - flash_loan_fee_quote - self.safety_buffer_quote
-                logging.info("DEX calc buy=%s sell=%s token=%s amount=%s bought=%s conservative_bought=%s final=%s gross=%s gas=%s flash_fee=%s safety=%s net=%s", buy_source, source, base_token, quote_amount, bought_amount, conservative_bought_amount, final_amount, gross, gas_cost_quote, flash_loan_fee_quote, self.safety_buffer_quote, net)
+                logging.info("DEX calc buy=%s sell=%s token=%s amount=%s bought=%s final=%s gross=%s gas=%s flash_fee=%s safety=%s net=%s", buy_source, source, base_token, quote_amount, bought_amount, final_amount, gross, gas_cost_quote, flash_loan_fee_quote, self.safety_buffer_quote, net)
                 if not net.is_finite():
                     self._reject("nonfinite_net_profit"); continue
                 if net < self.min_profit:
