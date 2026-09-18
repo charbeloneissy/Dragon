@@ -264,6 +264,7 @@ class DirectDexAdapter:
         raise ValueError(f"unsupported direct DEX source: {source}")
 
     def close(self) -> None:
-        w3 = getattr(self, "w3", None)\n        provider = getattr(w3, "provider", None)
+        w3 = getattr(self, "w3", None)
+        provider = getattr(w3, "provider", None)
         if provider and hasattr(provider, "disconnect"):
             provider.disconnect()
