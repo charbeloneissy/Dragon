@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock, Thread
 
 from src.dragon.dex_direct import DirectDexAdapter
+from src.dragon.dex_composite import CompositeDexAdapter
 from src.dragon.dex_cross_exchange import DexCrossExchangeEngine
 from src.dragon.flash_executor import AaveFlashExecutor
 from src.dragon.base_pool_discovery import BASE_WETH, discover_recent_base_tokens
@@ -79,8 +80,9 @@ async def main():
     adapter=None
     try:
         logging.info("Dragon scanner boot: initializing direct DEX adapter")
-        adapter=DirectDexAdapter()
-        logging.info("Direct DEX adapter connected: sources=%s", adapter.sources(int(os.getenv("DEX_CHAIN_ID","8453"))))
+        direct_adapter=DirectDexAdapter()
+        adapter=CompositeDexAdapter(direct_adapter)
+        logging.info("Multi-DEX adapter connected: sources=%s", adapter.sources(int(os.getenv("DEX_CHAIN_ID","8453"))))
         chain_id=int(os.getenv("DEX_CHAIN_ID","8453")); taker_config=validate_evm_address("DEX_TAKER_ADDRESS",env_required("DEX_TAKER_ADDRESS")); quote_token=validate_evm_address("DEX_QUOTE_TOKEN",env_required("DEX_QUOTE_TOKEN")); base_token_raw=os.getenv("DEX_BASE_TOKEN","").strip(); base_token=validate_evm_address("DEX_BASE_TOKEN",base_token_raw) if base_token_raw else ""
         raw_base_tokens=os.getenv("DEX_BASE_TOKENS","").strip()
         configured_base_tokens=[validate_evm_address("DEX_BASE_TOKENS",x.strip()) for x in raw_base_tokens.split(",") if x.strip()] if raw_base_tokens else []
@@ -117,11 +119,11 @@ async def main():
             executor=None; taker=taker_config
             fee_bps=adapter.flash_loan_fee_bps() if flash_enabled else configured_fee
         if not flash_enabled and configured_fee!=0: raise ValueError("FLASH_LOAN_FEE_BPS requires FLASH_LOAN_ENABLED=true")
-        available=set(adapter.sources(chain_id)); configured=tuple(x.strip() for x in os.getenv("DEX_SOURCES","").split(",") if x.strip()); requested=configured or ("Uniswap_V3","Aerodrome")
+        available=set(adapter.sources(chain_id)); configured=tuple(x.strip() for x in os.getenv("DEX_SOURCES","").split(",") if x.strip()); requested=configured or adapter.sources(chain_id)
         sources=tuple(x for x in requested if x in available); unsupported=tuple(x for x in requested if x not in available)
         if unsupported: logging.warning("Ignoring unsupported DEX sources on chain %s: %s",chain_id,unsupported)
         if len(sources)<2: raise RuntimeError(f"fewer than two usable DEX sources found on chain {chain_id}: requested={requested}, available={sorted(available)}, usable={sources}")
-        sources=sources[:4]
+        sources=sources[:max(2,min(12,int(os.getenv("DEX_MAX_SOURCES","8")))]
         engine_kwargs=dict(
             min_profit=min_profit,
             quote_token_decimals=quote_decimals,
@@ -144,7 +146,7 @@ async def main():
                     current=list(base_tokens)
                     for token in discovered:
                         if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in current}: current.append(token)
-                    base_tokens=current[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","100")))]
+                    base_tokens=current[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","250")))]
                     for token in list(token_engines):
                         if token not in base_tokens: del token_engines[token]
                     for token in base_tokens:
