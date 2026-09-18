@@ -264,6 +264,35 @@ class DexCrossExchangeEngine:
                 second_leg=sell_execution,
             ))
 
+        # Sell legs are independent across buy/sell venue combinations. With isolated
+        # adapters, evaluate them concurrently; otherwise preserve safe sequential behavior.
+        if sell_jobs:
+            if self._isolated_quote_adapters:
+                with ThreadPoolExecutor(max_workers=len(sell_jobs)) as pool:
+                    futures = {pool.submit(_sell, job): job for job in sell_jobs}
+                    for future in as_completed(futures):
+                        job = futures[future]
+                        try:
+                            _process_sell(job, future.result())
+                        except Exception as exc:
+                            source = job[3]
+                            logging.warning(
+                                "DEX sell quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s",
+                                source, base_token, quote_token, job[4], type(exc).__name__, exc,
+                            )
+                            self._reject("sell_quote_error")
+            else:
+                for job in sell_jobs:
+                    try:
+                        _process_sell(job, _sell(job))
+                    except Exception as exc:
+                        source = job[3]
+                        logging.warning(
+                            "DEX sell quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s",
+                            source, base_token, quote_token, job[4], type(exc).__name__, exc,
+                        )
+                        self._reject("sell_quote_error")
+
         if not buy_quotes: self._reject("no_buy_sources")
         if not sell_sources and buy_quotes: self._reject("no_sell_sources")
         return sorted(opportunities, key=lambda x: x.net_profit_quote, reverse=True)
