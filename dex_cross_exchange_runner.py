@@ -88,8 +88,8 @@ async def main():
         for token in configured_base_tokens:
             if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
         auto_discovery=env_bool("DEX_AUTO_DISCOVERY",True)
-        discovery_lookback=int(os.getenv("DEX_DISCOVERY_BLOCKS","50000"))
-        discovery_chunk=int(os.getenv("DEX_DISCOVERY_CHUNK_BLOCKS","2000"))
+        discovery_lookback=int(os.getenv("DEX_DISCOVERY_BLOCKS","250000"))
+        discovery_chunk=int(os.getenv("DEX_DISCOVERY_CHUNK_BLOCKS","10000"))
         discovery_max=int(os.getenv("DEX_DISCOVERY_MAX_TOKENS","24"))
         discovery_refresh=float(os.getenv("DEX_DISCOVERY_REFRESH_SECONDS","300"))
         if auto_discovery:
