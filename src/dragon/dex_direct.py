@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import logging
 import os
 import time
-from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
 
 from web3 import Web3
 
@@ -64,21 +63,26 @@ class DirectDexAdapter:
 
     def _uni_quote(self, token_in: str, token_out: str, amount: int):
         best = None
+        errors = []
         for fee in self.uni_fees:
             try:
                 result = self.uni_quoter.functions.quoteExactInputSingle((self._addr(token_in), self._addr(token_out), int(amount), int(fee), 0)).call()
                 out, _, _, gas_est = result
                 if out > 0 and (best is None or out > best[0]):
                     best = (int(out), int(fee), int(gas_est))
-            except Exception:
-                continue
+            except Exception as exc:
+                errors.append(f"fee={fee}: {type(exc).__name__}: {exc}")
         if best is None:
-            raise RuntimeError("no Uniswap V3 pool/liquidity for pair")
+            detail = " | ".join(errors[-4:])
+            logging.warning("Uniswap V3 quote failed pair=%s->%s amount=%s errors=%s", token_in, token_out, amount, detail)
+            raise RuntimeError(f"no Uniswap V3 pool/liquidity for pair; {detail}")
+        logging.info("Uniswap V3 quote pair=%s->%s amount=%s out=%s fee=%s gas=%s", token_in, token_out, amount, best[0], best[1], best[2])
         return best
 
     def _aero_quote(self, token_in: str, token_out: str, amount: int):
         factory = self.aero.functions.defaultFactory().call()
         best = None
+        errors = []
         for stable in (False, True):
             route = [(self._addr(token_in), self._addr(token_out), stable, self._addr(factory))]
             try:
@@ -86,10 +90,13 @@ class DirectDexAdapter:
                 out = int(amounts[-1])
                 if out > 0 and (best is None or out > best[0]):
                     best = (out, stable, self.aero_gas_limit, self._addr(factory))
-            except Exception:
-                continue
+            except Exception as exc:
+                errors.append(f"stable={stable}: {type(exc).__name__}: {exc}")
         if best is None:
-            raise RuntimeError("no Aerodrome pool/liquidity for pair")
+            detail = " | ".join(errors[-2:])
+            logging.warning("Aerodrome quote failed pair=%s->%s amount=%s errors=%s", token_in, token_out, amount, detail)
+            raise RuntimeError(f"no Aerodrome pool/liquidity for pair; {detail}")
+        logging.info("Aerodrome quote pair=%s->%s amount=%s out=%s stable=%s factory=%s", token_in, token_out, amount, best[0], best[1], best[3])
         return best
 
     def quote_single_source(self, *, chain_id: int, sell_token: str, buy_token: str, sell_amount: int, taker: str, source: str, slippage_bps: int = 50):
