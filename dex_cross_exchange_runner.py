@@ -124,9 +124,9 @@ async def main():
                 scan_semaphore=asyncio.Semaphore(scan_concurrency)
                 async def scan_base_token(scan_base):
                     async with scan_semaphore:
-                    # Each concurrent asset gets an isolated engine state so rejection
+                        # Each concurrent asset gets an isolated engine state so rejection
                     # telemetry cannot race through the shared last_rejections dict.
-                    scan_engine=DexCrossExchangeEngine(
+                        scan_engine=DexCrossExchangeEngine(
                         adapter,
                         sources,
                         min_profit=min_profit,
@@ -136,7 +136,7 @@ async def main():
                         flash_loan_enabled=flash_enabled,
                         flash_loan_fee_bps=fee_bps,
                     )
-                    found=await asyncio.to_thread(
+                        found=await asyncio.to_thread(
                         scan_engine.scan_max_profitable,
                         chain_id=chain_id,
                         quote_token=quote_token,
@@ -145,7 +145,7 @@ async def main():
                         taker=taker,
                         slippage_bps=slippage,
                     )
-                    return scan_base, found, dict(scan_engine.last_rejections)
+                        return scan_base, found, dict(scan_engine.last_rejections)
                 scan_results=await asyncio.gather(*(scan_base_token(scan_base) for scan_base in base_tokens), return_exceptions=True)
                 for result in scan_results:
                     if isinstance(result, Exception):
