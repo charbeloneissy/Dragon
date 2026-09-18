@@ -206,6 +206,11 @@ async def main():
                 with LOCK: STATE["status"]="degraded"; STATE["last_error"]=str(exc)
                 await asyncio.sleep(2)
                 with LOCK: STATE["status"]="running"
-    finally: adapter.close()
+    finally:
+        if adapter is not None:
+            try:
+                adapter.close()
+            except Exception:
+                logging.exception("failed to close DEX adapter")
 
 if __name__=="__main__": asyncio.run(main())
