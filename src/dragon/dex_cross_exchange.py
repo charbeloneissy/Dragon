@@ -232,12 +232,18 @@ class DexCrossExchangeEngine:
                 return
 
             gross = Decimal(final_amount - quote_amount) / scale
-            net = gross - gas_cost_quote - flash_loan_fee_quote - self.safety_buffer_quote
+            cost_quote = gas_cost_quote + flash_loan_fee_quote + self.safety_buffer_quote
+            notional_quote = Decimal(quote_amount) / scale
+            gross_bps = (gross / notional_quote) * Decimal("10000") if notional_quote > 0 else Decimal("0")
+            cost_bps = (cost_quote / notional_quote) * Decimal("10000") if notional_quote > 0 else Decimal("0")
+            net_bps = gross_bps - cost_bps
+            net = gross - cost_quote
             logging.info(
-                "DEX calc buy=%s sell=%s token=%s amount=%s bought=%s final=%s gross=%s gas=%s flash_fee=%s safety=%s net=%s",
+                "DEX calc buy=%s sell=%s token=%s amount=%s bought=%s final=%s gross=%s gross_bps=%.3f cost=%s cost_bps=%.3f gas=%s flash_fee=%s safety=%s net=%s net_bps=%.3f",
                 buy_source, source, base_token, quote_amount, buy_execution.buy_amount,
-                final_amount, gross, gas_cost_quote, flash_loan_fee_quote,
-                self.safety_buffer_quote, net,
+                final_amount, gross, gross_bps, cost_quote, cost_bps,
+                gas_cost_quote, flash_loan_fee_quote, self.safety_buffer_quote,
+                net, net_bps,
             )
             if not net.is_finite():
                 self._reject("nonfinite_net_profit")
