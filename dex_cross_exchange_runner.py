@@ -120,10 +120,26 @@ async def main():
                 else: max_quote=flash_cap
                 all_opportunities=[]
                 aggregate_rejections={}
-                for scan_base in base_tokens:
-                    found=await asyncio.to_thread(engine.scan_max_profitable,chain_id=chain_id,quote_token=quote_token,base_token=scan_base,max_quote_amount=max_quote,taker=taker,slippage_bps=slippage)
+                async def scan_base_token(scan_base):
+                    return scan_base, await asyncio.to_thread(
+                        engine.scan_max_profitable,
+                        chain_id=chain_id,
+                        quote_token=quote_token,
+                        base_token=scan_base,
+                        max_quote_amount=max_quote,
+                        taker=taker,
+                        slippage_bps=slippage,
+                    ), dict(engine.last_rejections)
+                scan_results=await asyncio.gather(*(scan_base_token(scan_base) for scan_base in base_tokens), return_exceptions=True)
+                for result in scan_results:
+                    if isinstance(result, Exception):
+                        logging.exception("DEX base-token scan failed", exc_info=result)
+                        aggregate_rejections["base_token_scan_error"]=aggregate_rejections.get("base_token_scan_error",0)+1
+                        continue
+                    scan_base, found, rejections=result
                     all_opportunities.extend(found)
-                    for key,value in engine.last_rejections.items(): aggregate_rejections[key]=aggregate_rejections.get(key,0)+int(value)
+                    for key,value in rejections.items():
+                        aggregate_rejections[key]=aggregate_rejections.get(key,0)+int(value)
                 all_opportunities.sort(key=lambda x: x.net_profit_quote, reverse=True)
                 opportunities=all_opportunities[:max(1,int(os.getenv("DEX_MAX_OPPORTUNITIES","8")))]
                 merge_rejections(aggregate_rejections)
