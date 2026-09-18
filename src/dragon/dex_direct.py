@@ -102,7 +102,7 @@ class DirectDexAdapter:
             gas_native = Decimal(gas_limit) * Decimal(self.w3.eth.gas_price)
             min_out = out * (10_000 - int(slippage_bps)) // 10_000
             deadline = int(time.time()) + self.deadline_seconds
-            tx = self.uni_router.functions.exactInputSingle((self._addr(sell_token), self._addr(buy_token), fee, self._addr(taker), int(sell_amount), int(min_out), 0)).build_transaction({"from": self._addr(taker), "value": 0})
+            tx = self.uni_router.functions.exactInputSingle((self._addr(sell_token), self._addr(buy_token), fee, self._addr(taker), int(sell_amount), int(min_out), 0)).build_transaction({"from": self._addr(taker), "value": 0, "gas": gas_limit, "gasPrice": int(self.w3.eth.gas_price)})
             execution = DexExecution(8453, "Uniswap_V3", "Uniswap_V3", UNI_SWAP_ROUTER, tx["data"], 0, gas_limit, int(self.w3.eth.gas_price), sell_token, buy_token, int(sell_amount), out, UNI_SWAP_ROUTER, {"fee": fee, "deadline": deadline})
             return DexQuote("8453", "Uniswap_V3", sell_token, buy_token, Decimal(sell_amount), Decimal(out), gas_native, Decimal(0), Decimal("0"), Decimal(slippage_bps), Decimal(0)), execution
         if source == "Aerodrome":
