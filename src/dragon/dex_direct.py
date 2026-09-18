@@ -15,7 +15,7 @@ AERO_ROUTER = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
 UNI_QUOTER_V2 = "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
 UNI_SWAP_ROUTER = "0x2626664c2603336E57B271c5C0b26F421741e481"
 AAVE_BASE_POOL = "0xa238dd80c259a72e81d7e4664a9801593f98d1c5"
-RPC_CONCURRENCY_SEMAPHORE = __import__("threading").BoundedSemaphore(max(1, int(os.getenv("DEX_RPC_MAX_CONCURRENCY", "1"))))
+RPC_CONCURRENCY_SEMAPHORE = __import__("threading").BoundedSemaphore(max(1, int(os.getenv("DEX_RPC_MAX_CONCURRENCY", "4"))))
 AAVE_POOL_ABI = [{"inputs":[],"name":"FLASHLOAN_PREMIUM_TOTAL","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"}]
 
 ROUTER_ABI = [
@@ -267,15 +267,17 @@ class DirectDexAdapter:
         if source == "Uniswap_V3":
             quote_started = time.perf_counter()
             out, path, fees, gas_limit, encoded_path = self._uni_quote(sell_token, buy_token, int(sell_amount))
+            quote_latency_ms = (time.perf_counter() - quote_started) * 1000
             gas_native = Decimal(gas_limit) * Decimal(self._gas_price())
             min_out = out * (10_000 - int(slippage_bps)) // 10_000
             deadline = int(time.time()) + self.deadline_seconds
             tx = (self.uni_router.functions.exactInputSingle((self._addr(sell_token), self._addr(buy_token), int(fees[0]), self._addr(taker), int(sell_amount), int(min_out), 0)) if len(path) == 2 else self.uni_router.functions.exactInput((encoded_path, self._addr(taker), int(sell_amount), int(min_out)))).build_transaction({"from": self._addr(taker), "value": 0, "gas": gas_limit, "gasPrice": self._gas_price()})
             execution = DexExecution(8453, "Uniswap_V3", "Uniswap_V3", UNI_SWAP_ROUTER, tx["data"], 0, gas_limit, self._gas_price(), sell_token, buy_token, int(sell_amount), out, UNI_SWAP_ROUTER, {"path": path, "fees": fees, "deadline": deadline})
-            return DexQuote("8453", "Uniswap_V3", sell_token, buy_token, Decimal(sell_amount), Decimal(out), gas_native, Decimal(0), Decimal("0"), Decimal(slippage_bps), Decimal(str((time.perf_counter() - quote_started) * 1000))), execution
+            return DexQuote("8453", "Uniswap_V3", sell_token, buy_token, Decimal(sell_amount), Decimal(out), gas_native, Decimal(0), Decimal("0"), Decimal(slippage_bps), Decimal(str(quote_latency_ms))), execution
         if source == "Aerodrome":
             quote_started = time.perf_counter()
             out, route, gas_limit, factory = self._aero_quote(sell_token, buy_token, int(sell_amount))
+            quote_latency_ms = (time.perf_counter() - quote_started) * 1000
             gas_native = Decimal(gas_limit) * Decimal(self._gas_price())
             min_out = out * (10_000 - int(slippage_bps)) // 10_000
             deadline = int(time.time()) + self.deadline_seconds
