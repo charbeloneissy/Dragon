@@ -31,29 +31,31 @@ UNI_ROUTER_ABI = [
  {"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMinimum","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct IV3SwapRouter.ExactInputSingleParams","name":"params","type":"tuple"}],"name":"exactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"}],"stateMutability":"payable","type":"function"}
 ]
 
+class RpcRateLimitError(RuntimeError):
+    """Raised when all configured RPC attempts are rate-limited/transient."""
+
 class DirectDexAdapter:
     """Direct Base DEX adapter. No aggregator/API key is required."""
 
     def __init__(self, rpc_url: str | None = None, timeout: float = 4.0):
-        # Direct DEX mode must use the explicitly configured RPC. Do not silently
-        # fall back to Base's rate-limited public endpoint or another legacy RPC.
-        url = (rpc_url or os.getenv("DEX_RPC_URL") or "").strip()
-        if not url:
+        primary = (rpc_url or os.getenv("DEX_RPC_URL") or "").strip()
+        fallbacks = [x.strip() for x in os.getenv("DEX_RPC_URLS", "").split(",") if x.strip()]
+        urls = []
+        for url in [primary, *fallbacks]:
+            if url and url not in urls:
+                urls.append(url)
+        if not urls:
             raise RuntimeError("DEX_RPC_URL is required for direct DEX mode")
-        self.rpc_url = url
-        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url, request_kwargs={"timeout": float(timeout)}))
-        if not self.w3.is_connected():
-            raise RuntimeError("cannot connect to Base RPC")
-        if self.w3.eth.chain_id != 8453:
-            raise RuntimeError(f"direct DEX adapter requires Base chain 8453, got {self.w3.eth.chain_id}")
-        from urllib.parse import urlparse
-        rpc_host = urlparse(self.rpc_url).netloc or self.rpc_url
-        logging.info("Direct DEX RPC locked to configured endpoint host=%s", rpc_host)
-        self.aero = self.w3.eth.contract(address=Web3.to_checksum_address(AERO_ROUTER), abi=ROUTER_ABI)
-        self.aero_factory = self._addr(self.aero.functions.defaultFactory().call())
-        self.uni_quoter = self.w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2), abi=UNI_QUOTER_ABI)
-        self.uni_router = self.w3.eth.contract(address=Web3.to_checksum_address(UNI_SWAP_ROUTER), abi=UNI_ROUTER_ABI)
-        self.aave_pool = self.w3.eth.contract(address=Web3.to_checksum_address(os.getenv("DEX_AAVE_POOL_ADDRESS", AAVE_BASE_POOL)), abi=AAVE_POOL_ABI)
+        self._rpc_urls = urls
+        self._rpc_timeout = float(timeout)
+        self._rpc_index = 0
+        self._rpc_failures = [0 for _ in urls]
+        self._rpc_cooldown_until = [0.0 for _ in urls]
+        self.rpc_url = urls[0]
+        self._bind_rpc(self.rpc_url)
+        logging.info("Direct DEX RPC failover configured endpoints=%s", len(urls))
+
+        self._native_rate_cache = {}
         self._native_rate_cache = {}
         # Short quote cache reduces duplicate RPC calls during one scan without
         # turning the scanner into a stale-price engine. Live execution can disable it.
@@ -77,6 +79,56 @@ class DirectDexAdapter:
     def _addr(v: str) -> str:
         return Web3.to_checksum_address(v)
 
+    def _bind_rpc(self, url: str) -> None:
+        self.rpc_url = url
+        self.w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": self._rpc_timeout}))
+        if not self.w3.is_connected():
+            raise RuntimeError(f"cannot connect to Base RPC endpoint: {url}")
+        if self.w3.eth.chain_id != 8453:
+            raise RuntimeError(f"direct DEX adapter requires Base chain 8453, got {self.w3.eth.chain_id}")
+        self.aero = self.w3.eth.contract(address=Web3.to_checksum_address(AERO_ROUTER), abi=ROUTER_ABI)
+        self.uni_quoter = self.w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2), abi=UNI_QUOTER_ABI)
+        self.uni_router = self.w3.eth.contract(address=Web3.to_checksum_address(UNI_SWAP_ROUTER), abi=UNI_ROUTER_ABI)
+        self.aave_pool = self.w3.eth.contract(address=Web3.to_checksum_address(os.getenv("DEX_AAVE_POOL_ADDRESS", AAVE_BASE_POOL)), abi=AAVE_POOL_ABI)
+        self.aero_factory = self._addr(self.aero.functions.defaultFactory().call())
+
+    @staticmethod
+    def _is_transient_rpc_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return any(x in msg for x in ("429", "too many requests", "rate limit", "gateway timeout", "temporarily unavailable", "503 service unavailable"))
+
+    def _rpc_call(self, fn):
+        last_exc = None
+        for _ in range(len(self._rpc_urls)):
+            now = time.monotonic()
+            ready = [i for i in range(len(self._rpc_urls)) if self._rpc_cooldown_until[i] <= now]
+            if not ready:
+                time.sleep(min(0.25, max(0.0, min(self._rpc_cooldown_until) - now)))
+                ready = [min(range(len(self._rpc_urls)), key=lambda i: self._rpc_cooldown_until[i])]
+            idx = self._rpc_index if self._rpc_index in ready else ready[0]
+            self._rpc_index = idx
+            if self.rpc_url != self._rpc_urls[idx]:
+                try:
+                    self._bind_rpc(self._rpc_urls[idx])
+                except Exception as exc:
+                    last_exc = exc
+                    self._rpc_cooldown_until[idx] = time.monotonic() + 0.5
+                    continue
+            try:
+                result = fn(self.w3)
+                self._rpc_failures[idx] = 0
+                return result
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_transient_rpc_error(exc):
+                    raise
+                self._rpc_failures[idx] += 1
+                backoff = min(2.0, 0.25 * (2 ** min(self._rpc_failures[idx] - 1, 3)))
+                self._rpc_cooldown_until[idx] = time.monotonic() + backoff
+                logging.warning("RPC transient error endpoint=%s backoff=%.2fs error=%s", idx, backoff, exc)
+                self._rpc_index = (idx + 1) % len(self._rpc_urls)
+        raise RpcRateLimitError(f"all configured Base RPC endpoints failed after {len(self._rpc_urls)} attempts: {last_exc}")
+
     def sources(self, chain_id: int) -> tuple[str, ...]:
         if int(chain_id) != 8453:
             return ()
@@ -94,7 +146,7 @@ class DirectDexAdapter:
         return rate
 
     def flash_loan_fee_bps(self) -> Decimal:
-        raw=Decimal(str(self.aave_pool.functions.FLASHLOAN_PREMIUM_TOTAL().call()))
+        raw=Decimal(str(self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(os.getenv("DEX_AAVE_POOL_ADDRESS", AAVE_BASE_POOL)), abi=AAVE_POOL_ABI).functions.FLASHLOAN_PREMIUM_TOTAL().call())))
         if raw < 0 or raw > Decimal("1000"):
             raise RuntimeError(f"invalid Aave flash-loan premium: {raw} bps")
         return raw
@@ -129,9 +181,9 @@ class DirectDexAdapter:
                 try:
                     encoded = self._encode_uni_path(path, fees)
                     if len(path) == 2:
-                        result = self.uni_quoter.functions.quoteExactInputSingle((self._addr(token_in), self._addr(token_out), int(amount), int(fees[0]), 0)).call()
+                        result = self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2), abi=UNI_QUOTER_ABI).functions.quoteExactInputSingle((self._addr(token_in), self._addr(token_out), int(amount), int(fees[0]), 0)).call())
                     else:
-                        result = self.uni_quoter.functions.quoteExactInput(encoded, int(amount)).call()
+                        result = self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2), abi=UNI_QUOTER_ABI).functions.quoteExactInput(encoded, int(amount)).call())
                     out = int(result[0]); gas_est = int(result[-1])
                     if out > 0 and (best is None or out > best[0]): best = (out, tuple(path), tuple(fees), gas_est, encoded)
                 except Exception as exc: errors.append(f"path={len(path)} fees={fees}: {type(exc).__name__}: {exc}")
@@ -165,7 +217,7 @@ class DirectDexAdapter:
             for stable_flags in ([(False,)] if len(path) == 2 else [(False, False), (False, True), (True, False), (True, True)]):
                 route = [{"from": self._addr(path[i]), "to": self._addr(path[i+1]), "stable": bool(stable_flags[i]), "factory": self._addr(factory)} for i in range(len(path)-1)]
                 try:
-                    amounts = self.aero.functions.getAmountsOut(int(amount), route).call()
+                    amounts = self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(AERO_ROUTER), abi=ROUTER_ABI).functions.getAmountsOut(int(amount), route).call())
                     out = int(amounts[-1])
                     if out > 0 and (best is None or out > best[0]):
                         best = (out, tuple(route), self.aero_gas_limit + 60000 * (len(path)-1), self._addr(factory))
@@ -183,7 +235,7 @@ class DirectDexAdapter:
     def _gas_price(self) -> int:
         now = time.monotonic()
         if self._gas_price_cache <= 0 or now - self._gas_price_cache_at >= 1.0:
-            self._gas_price_cache = int(self.w3.eth.gas_price)
+            self._gas_price_cache = int(self._rpc_call(lambda w3: w3.eth.gas_price))
             self._gas_price_cache_at = now
         return self._gas_price_cache
 
