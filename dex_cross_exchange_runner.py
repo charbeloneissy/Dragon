@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock, Thread
 
-from src.dragon.dex_0x import ZeroXAdapter
+from src.dragon.dex_direct import DirectDexAdapter
 from src.dragon.dex_cross_exchange import DexCrossExchangeEngine
 from src.dragon.flash_executor import AaveFlashExecutor
 
@@ -75,15 +75,7 @@ def merge_rejections(stats):
 async def main():
     logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"),format="%(asctime)s %(levelname)s %(message)s")
     start_health_server()
-    adapter=ZeroXAdapter()
-    if not adapter.enabled:
-        message="ZEROX_API_KEY is missing; dashboard is alive, DEX scanning is paused until the API key is configured"
-        logging.error(message)
-        with LOCK:
-            STATE["status"]="degraded"
-            STATE["last_error"]=message
-        while True:
-            await asyncio.sleep(30)
+    adapter=DirectDexAdapter()
     try:
         chain_id=int(os.getenv("DEX_CHAIN_ID","8453")); taker_config=validate_evm_address("DEX_TAKER_ADDRESS",env_required("DEX_TAKER_ADDRESS")); quote_token=validate_evm_address("DEX_QUOTE_TOKEN",env_required("DEX_QUOTE_TOKEN")); base_token=validate_evm_address("DEX_BASE_TOKEN",env_required("DEX_BASE_TOKEN"))
         if quote_token.lower()==base_token.lower(): raise ValueError("DEX_QUOTE_TOKEN and DEX_BASE_TOKEN must be different")
@@ -104,7 +96,7 @@ async def main():
         else:
             executor=None; taker=taker_config; fee_bps=configured_fee
         if not flash_enabled and configured_fee!=0: raise ValueError("FLASH_LOAN_FEE_BPS requires FLASH_LOAN_ENABLED=true")
-        available=set(adapter.sources(chain_id)); configured=tuple(x.strip() for x in os.getenv("DEX_SOURCES","").split(",") if x.strip()); requested=configured or ("Uniswap_V3","Aerodrome","SushiSwap","Uniswap_V2","PancakeSwapV3")
+        available=set(adapter.sources(chain_id)); configured=tuple(x.strip() for x in os.getenv("DEX_SOURCES","").split(",") if x.strip()); requested=configured or ("Uniswap_V3","Aerodrome")
         sources=tuple(x for x in requested if x in available); unsupported=tuple(x for x in requested if x not in available)
         if unsupported: logging.warning("Ignoring unsupported DEX sources on chain %s: %s",chain_id,unsupported)
         if len(sources)<2: raise RuntimeError(f"fewer than two usable DEX sources found on chain {chain_id}: requested={requested}, available={sorted(available)}, usable={sources}")
