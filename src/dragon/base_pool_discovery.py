@@ -22,7 +22,7 @@ def discover_recent_base_tokens(
     *,
     quote_token: str,
     anchors: Iterable[str] = (),
-    lookback_blocks: int = 12000,
+    lookback_blocks: int = 250000,
     chunk_blocks: int = 2000,
     max_tokens: int = 24,
 ) -> list[str]:
@@ -35,8 +35,8 @@ def discover_recent_base_tokens(
     if not getattr(adapter, "w3", None):
         return []
 
-    lookback_blocks = max(100, min(int(lookback_blocks), 50000))
-    chunk_blocks = max(100, min(int(chunk_blocks), 5000))
+    lookback_blocks = max(100, min(int(lookback_blocks), 250000))
+    chunk_blocks = max(100, min(int(chunk_blocks), 10000))
     max_tokens = max(1, min(int(max_tokens), 100))
 
     anchors_set = {Web3.to_checksum_address(quote_token).lower()}
