@@ -23,6 +23,10 @@ class CompositeDexAdapter:
         if self._sources is not None:
             return self._sources
         sources = list(self.direct.sources(chain_id))
+        # Optional aggregated 0x venue: asks 0x for its best executable route
+        # across connected liquidity. Disabled unless explicitly enabled.
+        if self.zerox is not None and os.getenv("DEX_0X_AGGREGATED", "false").strip().lower() in {"1", "true", "yes", "on"}:
+            sources.append("0x:AGGREGATED")
         if self.zerox is not None:
             try:
                 external = []
@@ -55,6 +59,15 @@ class CompositeDexAdapter:
             if self.zerox is None:
                 raise RuntimeError("ZEROX_API_KEY is not configured")
             underlying = source.split(":", 1)[1]
+            if underlying == "AGGREGATED":
+                return self.zerox.quote(
+                    chain_id=chain_id,
+                    sell_token=sell_token,
+                    buy_token=buy_token,
+                    sell_amount=sell_amount,
+                    taker=taker,
+                    slippage_bps=slippage_bps,
+                )
             return self.zerox.quote_single_source(
                 chain_id=chain_id,
                 sell_token=sell_token,
