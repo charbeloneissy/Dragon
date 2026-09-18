@@ -217,7 +217,7 @@ class DirectDexAdapter:
         for path_index, path in enumerate(paths):
             if path_index > 0 and best is not None and not self.deep_route_always:
                 break
-            for stable_flags in ([(False,)] if len(path) == 2 else [(False, False), (False, True), (True, False), (True, True)]):
+            for stable_flags in ([(False,), (True,)] if len(path) == 2 else [(False, False), (False, True), (True, False), (True, True)]):
                 route = [{"from": self._addr(path[i]), "to": self._addr(path[i+1]), "stable": bool(stable_flags[i]), "factory": self._addr(factory)} for i in range(len(path)-1)]
                 try:
                     amounts = self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(AERO_ROUTER), abi=ROUTER_ABI).functions.getAmountsOut(int(amount), route).call())
