@@ -121,15 +121,28 @@ async def main():
                 all_opportunities=[]
                 aggregate_rejections={}
                 async def scan_base_token(scan_base):
-                    return scan_base, await asyncio.to_thread(
-                        engine.scan_max_profitable,
+                    # Each concurrent asset gets an isolated engine state so rejection
+                    # telemetry cannot race through the shared last_rejections dict.
+                    scan_engine=DexCrossExchangeEngine(
+                        adapter,
+                        sources,
+                        min_profit=min_profit,
+                        quote_token_decimals=quote_decimals,
+                        max_quote_latency_ms=latency,
+                        safety_buffer_quote=safety,
+                        flash_loan_enabled=flash_enabled,
+                        flash_loan_fee_bps=fee_bps,
+                    )
+                    found=await asyncio.to_thread(
+                        scan_engine.scan_max_profitable,
                         chain_id=chain_id,
                         quote_token=quote_token,
                         base_token=scan_base,
                         max_quote_amount=max_quote,
                         taker=taker,
                         slippage_bps=slippage,
-                    ), dict(engine.last_rejections)
+                    )
+                    return scan_base, found, dict(scan_engine.last_rejections)
                 scan_results=await asyncio.gather(*(scan_base_token(scan_base) for scan_base in base_tokens), return_exceptions=True)
                 for result in scan_results:
                     if isinstance(result, Exception):
