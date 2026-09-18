@@ -14,6 +14,8 @@ BASE_WETH = "0x4200000000000000000000000000000000000006"
 AERO_ROUTER = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
 UNI_QUOTER_V2 = "0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a"
 UNI_SWAP_ROUTER = "0x2626664c2603336E57B271c5C0b26F421741e481"
+AAVE_BASE_POOL = "0xA238Dd80C259a72e81d7e466a4a9801593F98d1c5"
+AAVE_POOL_ABI = [{"inputs":[],"name":"FLASHLOAN_PREMIUM_TOTAL","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"}]
 
 ROUTER_ABI = [
  {"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint256","name":"amountOutMin","type":"uint256"},{"components":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bool","name":"stable","type":"bool"},{"internalType":"address","name":"factory","type":"address"}],"internalType":"struct IRouter.Route[]","name":"routes","type":"tuple[]"},{"internalType":"address","name":"to","type":"address"},{"internalType":"uint256","name":"deadline","type":"uint256"}],"name":"swapExactTokensForTokens","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"nonpayable","type":"function"},
@@ -51,6 +53,8 @@ class DirectDexAdapter:
         self.aero_factory = self._addr(self.aero.functions.defaultFactory().call())
         self.uni_quoter = self.w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2), abi=UNI_QUOTER_ABI)
         self.uni_router = self.w3.eth.contract(address=Web3.to_checksum_address(UNI_SWAP_ROUTER), abi=UNI_ROUTER_ABI)
+        self.aave_pool = self.w3.eth.contract(address=Web3.to_checksum_address(os.getenv("DEX_AAVE_POOL_ADDRESS", AAVE_BASE_POOL)), abi=AAVE_POOL_ABI)
+        self._native_rate_cache = {}
         self.deadline_seconds = max(5, int(os.getenv("DEX_DEADLINE_SECONDS", "20")))
         self.aero_gas_limit = max(100_000, int(os.getenv("AERODROME_GAS_LIMIT", "250000")))
         self.uni_gas_limit = max(100_000, int(os.getenv("UNISWAP_GAS_LIMIT", "250000")))
@@ -74,8 +78,21 @@ class DirectDexAdapter:
         return ("Uniswap_V3", "Aerodrome")
 
     def native_to_quote_rate(self, *, chain_id: int, quote_token: str, sell_amount_native: int, taker: str) -> Decimal:
+        key=(int(chain_id), quote_token.lower())
+        cached=self._native_rate_cache.get(key)
+        now=time.monotonic()
+        if cached and now-cached[0] < 15.0:
+            return cached[1]
         q, _ = self.quote_single_source(chain_id=chain_id, sell_token=BASE_WETH, buy_token=quote_token, sell_amount=sell_amount_native, taker=taker, source="Uniswap_V3", slippage_bps=50)
-        return q.buy_amount / q.sell_amount
+        rate=q.buy_amount / q.sell_amount
+        self._native_rate_cache[key]=(now,rate)
+        return rate
+
+    def flash_loan_fee_bps(self) -> Decimal:
+        raw=Decimal(str(self.aave_pool.functions.FLASHLOAN_PREMIUM_TOTAL().call()))
+        if raw < 0 or raw > Decimal("1000"):
+            raise RuntimeError(f"invalid Aave flash-loan premium: {raw} bps")
+        return raw
 
     def _encode_uni_path(self, tokens, fees):
         data = bytearray()
@@ -165,7 +182,7 @@ class DirectDexAdapter:
             min_out = out * (10_000 - int(slippage_bps)) // 10_000
             deadline = int(time.time()) + self.deadline_seconds
             tx = self.aero.functions.swapExactTokensForTokens(int(sell_amount), int(min_out), route, self._addr(taker), deadline).build_transaction({"from": self._addr(taker), "value": 0, "gas": gas_limit, "gasPrice": self._gas_price()})
-            execution = DexExecution(8453, "Aerodrome", "Aerodrome", AERO_ROUTER, tx["data"], 0, gas_limit, int(self.w3.eth.gas_price), sell_token, buy_token, int(sell_amount), out, AERO_ROUTER, {"route": route, "hops": len(route), "factory": factory, "deadline": deadline})
+            execution = DexExecution(8453, "Aerodrome", "Aerodrome", AERO_ROUTER, tx["data"], 0, gas_limit, self._gas_price(), sell_token, buy_token, int(sell_amount), out, AERO_ROUTER, {"route": route, "hops": len(route), "factory": factory, "deadline": deadline})
             return DexQuote("8453", "Aerodrome", sell_token, buy_token, Decimal(sell_amount), Decimal(out), gas_native, Decimal(0), Decimal("0"), Decimal(slippage_bps), Decimal(0)), execution
         raise ValueError(f"unsupported direct DEX source: {source}")
 
