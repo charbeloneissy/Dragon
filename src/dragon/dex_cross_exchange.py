@@ -148,27 +148,14 @@ class DexCrossExchangeEngine:
                 if native_to_quote_rate < 0:
                     self._reject("negative_native_to_quote_rate"); continue
 
-                raw_final_amount = sell_execution.buy_amount
+                # Slippage is transaction protection, not an additional economic haircut.
+                # The adapter quote is the economic output; applying slippage again would
+                # double-count it and can manufacture artificial net losses.
                 buy_slippage_bps = max(Decimal(slippage_bps), Decimal(str(getattr(buy_quote, "slippage_bps", 0))))
                 sell_slippage_bps = max(Decimal(slippage_bps), Decimal(str(getattr(sell_quote, "slippage_bps", 0))))
                 if buy_slippage_bps > 5000 or sell_slippage_bps > 5000:
                     self._reject("slippage_too_wide"); continue
-                buy_slippage_factor = (Decimal(10000) - buy_slippage_bps) / Decimal(10000)
-                sell_slippage_factor = (Decimal(10000) - sell_slippage_bps) / Decimal(10000)
-                conservative_bought_amount = int(Decimal(bought_amount) * buy_slippage_factor)
-                if conservative_bought_amount <= 0:
-                    self._reject("slippage_zero_intermediate"); continue
-                try:
-                    if conservative_bought_amount != bought_amount:
-                        sell_quote_conservative, sell_execution_conservative = self.adapter.quote_single_source(chain_id=chain_id, sell_token=base_token, buy_token=quote_token, sell_amount=conservative_bought_amount, taker=taker, source=source, slippage_bps=slippage_bps)
-                        if self._quote_latency(sell_quote_conservative) > self.max_quote_latency_ms:
-                            self._reject("sell_quote_stale"); continue
-                        raw_final_amount = sell_execution_conservative.buy_amount
-                        sell_quote = sell_quote_conservative
-                        sell_execution = sell_execution_conservative
-                except Exception:
-                    self._reject("conservative_sell_quote_error"); continue
-                final_amount = int(Decimal(raw_final_amount) * sell_slippage_factor)
+                final_amount = int(sell_execution.buy_amount)
                 if final_amount <= 0:
                     self._reject("slippage_zero_output"); continue
                 gas_cost_quote = self._gas_cost_quote(buy_quote, buy_execution, native_to_quote_rate) + self._gas_cost_quote(sell_quote, sell_execution, native_to_quote_rate)
