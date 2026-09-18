@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from decimal import Decimal
@@ -101,7 +102,6 @@ class DexCrossExchangeEngine:
         for source in self.sources:
             try: quote, execution = self.adapter.quote_single_source(chain_id=chain_id, sell_token=quote_token, buy_token=base_token, sell_amount=quote_amount, taker=taker, source=source, slippage_bps=slippage_bps)
             except Exception as exc:
-                import logging
                 logging.warning(
                     "DEX buy quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s",
                     source, quote_token, base_token, quote_amount, type(exc).__name__, exc,
