@@ -75,34 +75,46 @@ class DexCrossExchangeEngine:
         return value if value.is_finite() and value >= 0 else Decimal("Infinity")
 
     def _quote_quality_ok(self, quote: DexQuote, *, sell_token: str, buy_token: str, sell_amount: int, stage: str) -> bool:
-        """Fail closed on malformed, stale, or economically absurd executable quotes."""
+        """Validate quote fields explicitly so real DEX quotes are not hidden behind a generic rejection."""
         try:
-            if str(getattr(quote, "sell_token", "")).lower() != sell_token.lower():
-                self._reject(f"{stage}_token_mismatch")
-                return False
-            if str(getattr(quote, "buy_token", "")).lower() != buy_token.lower():
-                self._reject(f"{stage}_token_mismatch")
-                return False
+            actual_sell = str(getattr(quote, "sell_token", "")).strip()
+            actual_buy = str(getattr(quote, "buy_token", "")).strip()
             quoted_in = Decimal(str(getattr(quote, "sell_amount", 0)))
             quoted_out = Decimal(str(getattr(quote, "buy_amount", 0)))
-            if not quoted_in.is_finite() or not quoted_out.is_finite() or quoted_in <= 0 or quoted_out <= 0:
-                self._reject(f"{stage}_invalid_amount")
-                return False
-            # Direct adapters quote in base units. A materially different input amount
-            # means the response is not the quote we requested.
-            if int(quoted_in) != int(sell_amount):
-                self._reject(f"{stage}_amount_mismatch")
-                return False
-            # Do not compare raw ERC-20 base-unit amounts: token decimals differ.
-            # Optional bounds are expressed in human-unit price and are disabled by default.
-            min_ratio_raw = os.getenv("DEX_MIN_QUOTE_PRICE_RATIO", "").strip()
-            max_ratio_raw = os.getenv("DEX_MAX_QUOTE_PRICE_RATIO", "").strip()
-            if min_ratio_raw or max_ratio_raw:
+        except (ValueError, TypeError, ArithmeticError) as exc:
+            self._reject(f"{stage}_invalid_quote")
+            logging.warning(
+                "DEX %s quote validation parse failed sell=%s buy=%s amount=%s error=%s: %s",
+                stage, sell_token, buy_token, sell_amount, type(exc).__name__, exc,
+            )
+            return False
+
+        if actual_sell.lower() != sell_token.lower():
+            self._reject(f"{stage}_token_mismatch")
+            logging.warning("DEX %s quote token mismatch sell expected=%s actual=%s", stage, sell_token, actual_sell)
+            return False
+        if actual_buy.lower() != buy_token.lower():
+            self._reject(f"{stage}_token_mismatch")
+            logging.warning("DEX %s quote token mismatch buy expected=%s actual=%s", stage, buy_token, actual_buy)
+            return False
+        if not quoted_in.is_finite() or not quoted_out.is_finite() or quoted_in <= 0 or quoted_out <= 0:
+            self._reject(f"{stage}_invalid_amount")
+            return False
+        if quoted_in != Decimal(int(sell_amount)):
+            self._reject(f"{stage}_amount_mismatch")
+            logging.warning("DEX %s quote amount mismatch expected=%s actual=%s", stage, sell_amount, quoted_in)
+            return False
+
+        # Raw ERC-20 unit ratios are invalid across tokens with different decimals.
+        # Optional bounds are expressed in human units and remain disabled by default.
+        min_ratio_raw = os.getenv("DEX_MIN_QUOTE_PRICE_RATIO", "").strip()
+        max_ratio_raw = os.getenv("DEX_MAX_QUOTE_PRICE_RATIO", "").strip()
+        if min_ratio_raw or max_ratio_raw:
+            try:
                 sell_decimals = int(os.getenv("DEX_SELL_TOKEN_DECIMALS", str(self.quote_token_decimals)))
                 buy_decimals = int(os.getenv("DEX_BUY_TOKEN_DECIMALS", str(self.quote_token_decimals)))
                 if not 0 <= sell_decimals <= 36 or not 0 <= buy_decimals <= 36:
-                    self._reject(f"{stage}_invalid_price_decimals")
-                    return False
+                    raise ValueError("price decimals out of range")
                 human_in = quoted_in / (Decimal(10) ** sell_decimals)
                 human_out = quoted_out / (Decimal(10) ** buy_decimals)
                 ratio = human_out / human_in
@@ -116,10 +128,11 @@ class DexCrossExchangeEngine:
                     if not max_ratio.is_finite() or max_ratio <= 0 or ratio > max_ratio:
                         self._reject(f"{stage}_quote_price_bound")
                         return False
-            return True
-        except Exception:
-            self._reject(f"{stage}_invalid_quote")
-            return False
+            except (ValueError, TypeError, ArithmeticError) as exc:
+                self._reject(f"{stage}_invalid_price_bound")
+                logging.warning("DEX %s price-bound validation failed error=%s: %s", stage, type(exc).__name__, exc)
+                return False
+        return True
 
     def _gas_cost_quote(self, quote: DexQuote, execution: DexExecution, native_to_quote_rate: Decimal) -> Decimal:
         direct = getattr(quote, "gas_quote", None)
