@@ -53,6 +53,8 @@ class DirectDexAdapter:
         self.aero_gas_limit = max(100_000, int(os.getenv("AERODROME_GAS_LIMIT", "250000")))
         self.uni_gas_limit = max(100_000, int(os.getenv("UNISWAP_GAS_LIMIT", "250000")))
         self.uni_fees = tuple(int(x) for x in os.getenv("UNISWAP_V3_FEES", "100,500,3000,10000").split(",") if x.strip())
+        raw_intermediates = os.getenv("DEX_ROUTE_INTERMEDIATES", "").strip()
+        self.route_intermediates = tuple(x.strip() for x in raw_intermediates.split(",") if x.strip())
 
     @staticmethod
     def _addr(v: str) -> str:
@@ -89,20 +91,25 @@ class DirectDexAdapter:
         factory = self.aero.functions.defaultFactory().call()
         best = None
         errors = []
-        for stable in (False, True):
-            route = [(self._addr(token_in), self._addr(token_out), stable, self._addr(factory))]
-            try:
-                amounts = self.aero.functions.getAmountsOut(int(amount), route).call()
-                out = int(amounts[-1])
-                if out > 0 and (best is None or out > best[0]):
-                    best = (out, stable, self.aero_gas_limit, self._addr(factory))
-            except Exception as exc:
-                errors.append(f"stable={stable}: {type(exc).__name__}: {exc}")
+        paths = [(token_in, token_out)]
+        for mid in self.route_intermediates:
+            if mid.lower() not in {token_in.lower(), token_out.lower()}:
+                paths.append((token_in, mid, token_out))
+        for path in paths:
+            for stable_flags in ([False] if len(path) == 2 else [(False, False), (False, True), (True, False), (True, True)]):
+                route = [(self._addr(path[i]), self._addr(path[i+1]), bool(stable_flags[i]), self._addr(factory)) for i in range(len(path)-1)]
+                try:
+                    amounts = self.aero.functions.getAmountsOut(int(amount), route).call()
+                    out = int(amounts[-1])
+                    if out > 0 and (best is None or out > best[0]):
+                        best = (out, tuple(route), self.aero_gas_limit + 60000 * (len(path)-1), self._addr(factory))
+                except Exception as exc:
+                    errors.append(f"path={len(path)} stable={stable_flags}: {type(exc).__name__}: {exc}")
         if best is None:
             detail = " | ".join(errors[-2:])
             logging.warning("Aerodrome quote failed pair=%s->%s amount=%s errors=%s", token_in, token_out, amount, detail)
             raise RuntimeError(f"no Aerodrome pool/liquidity for pair; {detail}")
-        logging.info("Aerodrome quote pair=%s->%s amount=%s out=%s stable=%s factory=%s", token_in, token_out, amount, best[0], best[1], best[3])
+        logging.info("Aerodrome quote pair=%s->%s amount=%s out=%s hops=%s factory=%s", token_in, token_out, amount, best[0], len(best[1]), best[3])
         return best
 
     def quote_single_source(self, *, chain_id: int, sell_token: str, buy_token: str, sell_amount: int, taker: str, source: str, slippage_bps: int = 50):
@@ -119,13 +126,12 @@ class DirectDexAdapter:
             execution = DexExecution(8453, "Uniswap_V3", "Uniswap_V3", UNI_SWAP_ROUTER, tx["data"], 0, gas_limit, int(self.w3.eth.gas_price), sell_token, buy_token, int(sell_amount), out, UNI_SWAP_ROUTER, {"fee": fee, "deadline": deadline})
             return DexQuote("8453", "Uniswap_V3", sell_token, buy_token, Decimal(sell_amount), Decimal(out), gas_native, Decimal(0), Decimal("0"), Decimal(slippage_bps), Decimal(0)), execution
         if source == "Aerodrome":
-            out, stable, gas_limit, factory = self._aero_quote(sell_token, buy_token, int(sell_amount))
+            out, route, gas_limit, factory = self._aero_quote(sell_token, buy_token, int(sell_amount))
             gas_native = Decimal(gas_limit) * Decimal(self.w3.eth.gas_price)
             min_out = out * (10_000 - int(slippage_bps)) // 10_000
             deadline = int(time.time()) + self.deadline_seconds
-            route = [(self._addr(sell_token), self._addr(buy_token), bool(stable), self._addr(factory))]
             tx = self.aero.functions.swapExactTokensForTokens(int(sell_amount), int(min_out), route, self._addr(taker), deadline).build_transaction({"from": self._addr(taker), "value": 0, "gas": gas_limit, "gasPrice": int(self.w3.eth.gas_price)})
-            execution = DexExecution(8453, "Aerodrome", "Aerodrome", AERO_ROUTER, tx["data"], 0, gas_limit, int(self.w3.eth.gas_price), sell_token, buy_token, int(sell_amount), out, AERO_ROUTER, {"stable": stable, "factory": factory, "deadline": deadline})
+            execution = DexExecution(8453, "Aerodrome", "Aerodrome", AERO_ROUTER, tx["data"], 0, gas_limit, int(self.w3.eth.gas_price), sell_token, buy_token, int(sell_amount), out, AERO_ROUTER, {"route": route, "hops": len(route), "factory": factory, "deadline": deadline})
             return DexQuote("8453", "Aerodrome", sell_token, buy_token, Decimal(sell_amount), Decimal(out), gas_native, Decimal(0), Decimal("0"), Decimal(slippage_bps), Decimal(0)), execution
         raise ValueError(f"unsupported direct DEX source: {source}")
 
