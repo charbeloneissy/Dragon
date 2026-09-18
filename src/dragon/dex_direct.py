@@ -111,7 +111,7 @@ class DirectDexAdapter:
             min_out = out * (10_000 - int(slippage_bps)) // 10_000
             deadline = int(time.time()) + self.deadline_seconds
             route = [(self._addr(sell_token), self._addr(buy_token), bool(stable), self._addr(factory))]
-            tx = self.aero.functions.swapExactTokensForTokens(int(sell_amount), int(min_out), route, self._addr(taker), deadline).build_transaction({"from": self._addr(taker), "value": 0})
+            tx = self.aero.functions.swapExactTokensForTokens(int(sell_amount), int(min_out), route, self._addr(taker), deadline).build_transaction({"from": self._addr(taker), "value": 0, "gas": gas_limit, "gasPrice": int(self.w3.eth.gas_price)})
             execution = DexExecution(8453, "Aerodrome", "Aerodrome", AERO_ROUTER, tx["data"], 0, gas_limit, int(self.w3.eth.gas_price), sell_token, buy_token, int(sell_amount), out, AERO_ROUTER, {"stable": stable, "factory": factory, "deadline": deadline})
             return DexQuote("8453", "Aerodrome", sell_token, buy_token, Decimal(sell_amount), Decimal(out), gas_native, Decimal(0), Decimal("0"), Decimal(slippage_bps), Decimal(0)), execution
         raise ValueError(f"unsupported direct DEX source: {source}")
