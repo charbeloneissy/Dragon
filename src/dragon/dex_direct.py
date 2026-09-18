@@ -32,14 +32,20 @@ class DirectDexAdapter:
     """Direct Base DEX adapter. No aggregator/API key is required."""
 
     def __init__(self, rpc_url: str | None = None, timeout: float = 4.0):
-        url = (rpc_url or os.getenv("DEX_RPC_URL") or os.getenv("BASE_RPC_URL") or "").strip()
+        # Direct DEX mode must use the explicitly configured RPC. Do not silently
+        # fall back to Base's rate-limited public endpoint or another legacy RPC.
+        url = (rpc_url or os.getenv("DEX_RPC_URL") or "").strip()
         if not url:
-            raise RuntimeError("DEX_RPC_URL (or BASE_RPC_URL) is required for direct DEX mode")
-        self.w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": float(timeout)}))
+            raise RuntimeError("DEX_RPC_URL is required for direct DEX mode")
+        self.rpc_url = url
+        self.w3 = Web3(Web3.HTTPProvider(self.rpc_url, request_kwargs={"timeout": float(timeout)}))
         if not self.w3.is_connected():
             raise RuntimeError("cannot connect to Base RPC")
         if self.w3.eth.chain_id != 8453:
             raise RuntimeError(f"direct DEX adapter requires Base chain 8453, got {self.w3.eth.chain_id}")
+        from urllib.parse import urlparse
+        rpc_host = urlparse(self.rpc_url).netloc or self.rpc_url
+        logging.info("Direct DEX RPC locked to configured endpoint host=%s", rpc_host)
         self.aero = self.w3.eth.contract(address=Web3.to_checksum_address(AERO_ROUTER), abi=ROUTER_ABI)
         self.uni_quoter = self.w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2), abi=UNI_QUOTER_ABI)
         self.uni_router = self.w3.eth.contract(address=Web3.to_checksum_address(UNI_SWAP_ROUTER), abi=UNI_ROUTER_ABI)
