@@ -47,6 +47,7 @@ class DirectDexAdapter:
         rpc_host = urlparse(self.rpc_url).netloc or self.rpc_url
         logging.info("Direct DEX RPC locked to configured endpoint host=%s", rpc_host)
         self.aero = self.w3.eth.contract(address=Web3.to_checksum_address(AERO_ROUTER), abi=ROUTER_ABI)
+        self.aero_factory = self._addr(self.aero.functions.defaultFactory().call())
         self.uni_quoter = self.w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2), abi=UNI_QUOTER_ABI)
         self.uni_router = self.w3.eth.contract(address=Web3.to_checksum_address(UNI_SWAP_ROUTER), abi=UNI_ROUTER_ABI)
         self.deadline_seconds = max(5, int(os.getenv("DEX_DEADLINE_SECONDS", "20")))
@@ -72,26 +73,38 @@ class DirectDexAdapter:
         q, _ = self.quote_single_source(chain_id=chain_id, sell_token=BASE_WETH, buy_token=quote_token, sell_amount=sell_amount_native, taker=taker, source="Uniswap_V3", slippage_bps=50)
         return q.buy_amount / q.sell_amount
 
+    def _encode_uni_path(self, tokens, fees):
+        data = bytearray()
+        for i, token in enumerate(tokens):
+            data.extend(bytes.fromhex(self._addr(token)[2:]))
+            if i < len(fees): data.extend(int(fees[i]).to_bytes(3, "big"))
+        return "0x" + data.hex()
+
     def _uni_quote(self, token_in: str, token_out: str, amount: int):
-        best = None
-        errors = []
-        for fee in self.uni_fees:
-            try:
-                result = self.uni_quoter.functions.quoteExactInputSingle((self._addr(token_in), self._addr(token_out), int(amount), int(fee), 0)).call()
-                out, _, _, gas_est = result
-                if out > 0 and (best is None or out > best[0]):
-                    best = (int(out), int(fee), int(gas_est))
-            except Exception as exc:
-                errors.append(f"fee={fee}: {type(exc).__name__}: {exc}")
+        best = None; errors = []
+        paths = [(token_in, token_out)]
+        for mid in self.route_intermediates:
+            if mid.lower() not in {token_in.lower(), token_out.lower()}: paths.append((token_in, mid, token_out))
+        for path in paths:
+            fee_sets = [(f,) for f in self.uni_fees] if len(path) == 2 else [(a,b) for a in self.uni_fees for b in self.uni_fees]
+            for fees in fee_sets:
+                try:
+                    encoded = self._encode_uni_path(path, fees)
+                    if len(path) == 2:
+                        result = self.uni_quoter.functions.quoteExactInputSingle((self._addr(token_in), self._addr(token_out), int(amount), int(fees[0]), 0)).call()
+                    else:
+                        result = self.uni_quoter.functions.quoteExactInput(encoded, int(amount)).call()
+                    out = int(result[0]); gas_est = int(result[-1])
+                    if out > 0 and (best is None or out > best[0]): best = (out, tuple(path), tuple(fees), gas_est, encoded)
+                except Exception as exc: errors.append(f"path={len(path)} fees={fees}: {type(exc).__name__}: {exc}")
         if best is None:
             detail = " | ".join(errors[-4:])
             logging.warning("Uniswap V3 quote failed pair=%s->%s amount=%s errors=%s", token_in, token_out, amount, detail)
             raise RuntimeError(f"no Uniswap V3 pool/liquidity for pair; {detail}")
-        logging.info("Uniswap V3 quote pair=%s->%s amount=%s out=%s fee=%s gas=%s", token_in, token_out, amount, best[0], best[1], best[2])
+        logging.info("Uniswap V3 quote pair=%s->%s amount=%s out=%s hops=%s fees=%s gas=%s", token_in, token_out, amount, best[0], len(best[1])-1, best[2], best[3])
         return best
-
     def _aero_quote(self, token_in: str, token_out: str, amount: int):
-        factory = self.aero.functions.defaultFactory().call()
+        factory = self.aero_factory
         best = None
         errors = []
         paths = [(token_in, token_out)]
@@ -121,12 +134,12 @@ class DirectDexAdapter:
         if int(sell_amount) <= 0:
             raise ValueError("sell_amount must be positive")
         if source == "Uniswap_V3":
-            out, fee, gas_limit = self._uni_quote(sell_token, buy_token, int(sell_amount))
+            out, path, fees, gas_limit, encoded_path = self._uni_quote(sell_token, buy_token, int(sell_amount))
             gas_native = Decimal(gas_limit) * Decimal(self.w3.eth.gas_price)
             min_out = out * (10_000 - int(slippage_bps)) // 10_000
             deadline = int(time.time()) + self.deadline_seconds
-            tx = self.uni_router.functions.exactInputSingle((self._addr(sell_token), self._addr(buy_token), fee, self._addr(taker), int(sell_amount), int(min_out), 0)).build_transaction({"from": self._addr(taker), "value": 0, "gas": gas_limit, "gasPrice": int(self.w3.eth.gas_price)})
-            execution = DexExecution(8453, "Uniswap_V3", "Uniswap_V3", UNI_SWAP_ROUTER, tx["data"], 0, gas_limit, int(self.w3.eth.gas_price), sell_token, buy_token, int(sell_amount), out, UNI_SWAP_ROUTER, {"fee": fee, "deadline": deadline})
+            tx = (self.uni_router.functions.exactInputSingle((self._addr(sell_token), self._addr(buy_token), int(fees[0]), self._addr(taker), int(sell_amount), int(min_out), 0)) if len(path) == 2 else self.uni_router.functions.exactInput((encoded_path, self._addr(taker), int(sell_amount), int(min_out)))).build_transaction({"from": self._addr(taker), "value": 0, "gas": gas_limit, "gasPrice": int(self.w3.eth.gas_price)})
+            execution = DexExecution(8453, "Uniswap_V3", "Uniswap_V3", UNI_SWAP_ROUTER, tx["data"], 0, gas_limit, int(self.w3.eth.gas_price), sell_token, buy_token, int(sell_amount), out, UNI_SWAP_ROUTER, {"path": path, "fees": fees, "deadline": deadline})
             return DexQuote("8453", "Uniswap_V3", sell_token, buy_token, Decimal(sell_amount), Decimal(out), gas_native, Decimal(0), Decimal("0"), Decimal(slippage_bps), Decimal(0)), execution
         if source == "Aerodrome":
             out, route, gas_limit, factory = self._aero_quote(sell_token, buy_token, int(sell_amount))
