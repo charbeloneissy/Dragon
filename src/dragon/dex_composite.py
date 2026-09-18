@@ -27,6 +27,8 @@ class CompositeDexAdapter:
         # across connected liquidity. Disabled unless explicitly enabled.
         if self.zerox is not None and os.getenv("DEX_0X_AGGREGATED", "false").strip().lower() in {"1", "true", "yes", "on"}:
             sources.append("0x:AGGREGATED")
+            import logging
+            logging.info("0x aggregated venue enabled on chain=%s", chain_id)
         if self.zerox is not None:
             try:
                 external = []
