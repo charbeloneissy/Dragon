@@ -191,7 +191,8 @@ class DexCrossExchangeEngine:
             )
             if native_to_quote_rate <= 0 and needs_native_rate:
                 try:
-                    raw_rate = Decimal(str(self.adapter.native_to_quote_rate(
+                    rate_adapter = quote_adapters.get(source, self.adapter)
+                    raw_rate = Decimal(str(rate_adapter.native_to_quote_rate(
                         chain_id=chain_id,
                         quote_token=quote_token,
                         sell_amount_native=10**15,
