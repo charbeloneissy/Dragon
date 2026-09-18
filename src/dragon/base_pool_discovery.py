@@ -24,7 +24,7 @@ def discover_recent_base_tokens(
     anchors: Iterable[str] = (),
     lookback_blocks: int = 250000,
     chunk_blocks: int = 2000,
-    max_tokens: int = 24,
+    max_tokens: int = 250,
 ) -> list[str]:
     """Discover recent tokens from Base pool-creation events.
 
@@ -37,7 +37,7 @@ def discover_recent_base_tokens(
 
     lookback_blocks = max(100, min(int(lookback_blocks), 250000))
     chunk_blocks = max(100, min(int(chunk_blocks), 10000))
-    max_tokens = max(1, min(int(max_tokens), 100))
+    max_tokens = max(1, min(int(max_tokens), 250))
 
     anchors_set = {Web3.to_checksum_address(quote_token).lower()}
     for value in anchors:
