@@ -246,6 +246,7 @@ class DirectDexAdapter:
         if int(sell_amount) <= 0:
             raise ValueError("sell_amount must be positive")
         if source == "Uniswap_V3":
+            quote_started = time.perf_counter()
             out, path, fees, gas_limit, encoded_path = self._uni_quote(sell_token, buy_token, int(sell_amount))
             gas_native = Decimal(gas_limit) * Decimal(self._gas_price())
             min_out = out * (10_000 - int(slippage_bps)) // 10_000
@@ -254,6 +255,7 @@ class DirectDexAdapter:
             execution = DexExecution(8453, "Uniswap_V3", "Uniswap_V3", UNI_SWAP_ROUTER, tx["data"], 0, gas_limit, self._gas_price(), sell_token, buy_token, int(sell_amount), out, UNI_SWAP_ROUTER, {"path": path, "fees": fees, "deadline": deadline})
             return DexQuote("8453", "Uniswap_V3", sell_token, buy_token, Decimal(sell_amount), Decimal(out), gas_native, Decimal(0), Decimal("0"), Decimal(slippage_bps), Decimal(str((time.perf_counter() - started) * 1000))), execution
         if source == "Aerodrome":
+            quote_started = time.perf_counter()
             out, route, gas_limit, factory = self._aero_quote(sell_token, buy_token, int(sell_amount))
             gas_native = Decimal(gas_limit) * Decimal(self._gas_price())
             min_out = out * (10_000 - int(slippage_bps)) // 10_000
