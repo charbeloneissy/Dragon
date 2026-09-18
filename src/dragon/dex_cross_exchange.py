@@ -93,11 +93,29 @@ class DexCrossExchangeEngine:
             if int(quoted_in) != int(sell_amount):
                 self._reject(f"{stage}_amount_mismatch")
                 return False
-            max_ratio = Decimal(os.getenv("DEX_MAX_QUOTE_PRICE_RATIO", "100"))
-            ratio = quoted_out / quoted_in
-            if not max_ratio.is_finite() or max_ratio <= 0 or ratio > max_ratio:
-                self._reject(f"{stage}_abnormal_price_ratio")
-                return False
+            # Do not compare raw ERC-20 base-unit amounts: token decimals differ.
+            # Optional bounds are expressed in human-unit price and are disabled by default.
+            min_ratio_raw = os.getenv("DEX_MIN_QUOTE_PRICE_RATIO", "").strip()
+            max_ratio_raw = os.getenv("DEX_MAX_QUOTE_PRICE_RATIO", "").strip()
+            if min_ratio_raw or max_ratio_raw:
+                sell_decimals = int(os.getenv("DEX_SELL_TOKEN_DECIMALS", str(self.quote_token_decimals)))
+                buy_decimals = int(os.getenv("DEX_BUY_TOKEN_DECIMALS", str(self.quote_token_decimals)))
+                if not 0 <= sell_decimals <= 36 or not 0 <= buy_decimals <= 36:
+                    self._reject(f"{stage}_invalid_price_decimals")
+                    return False
+                human_in = quoted_in / (Decimal(10) ** sell_decimals)
+                human_out = quoted_out / (Decimal(10) ** buy_decimals)
+                ratio = human_out / human_in
+                if min_ratio_raw:
+                    min_ratio = Decimal(min_ratio_raw)
+                    if not min_ratio.is_finite() or min_ratio <= 0 or ratio < min_ratio:
+                        self._reject(f"{stage}_quote_price_bound")
+                        return False
+                if max_ratio_raw:
+                    max_ratio = Decimal(max_ratio_raw)
+                    if not max_ratio.is_finite() or max_ratio <= 0 or ratio > max_ratio:
+                        self._reject(f"{stage}_quote_price_bound")
+                        return False
             return True
         except Exception:
             self._reject(f"{stage}_invalid_quote")
