@@ -12,6 +12,7 @@ from threading import Lock, Thread
 from src.dragon.dex_direct import DirectDexAdapter
 from src.dragon.dex_cross_exchange import DexCrossExchangeEngine
 from src.dragon.flash_executor import AaveFlashExecutor
+from src.dragon.base_pool_discovery import BASE_WETH, discover_recent_base_tokens
 
 STATE={"status":"starting","mode":"paper","chain_id":None,"sources":[],"scans":0,"opportunities":0,"last_scan":None,"last_error":None,"started_at":time.time(),"quote_amount":None,"quote_decimals":None,"min_net_profit":None,"safety_buffer":None,"own_capital":"0","flash_liquidity":None,"flash_loan_enabled":False,"last_tx_hash":None,"rejections":{},"base_tokens":[]}
 LOCK=Lock()
@@ -82,13 +83,24 @@ async def main():
         logging.info("Direct DEX adapter connected: sources=%s", adapter.sources(int(os.getenv("DEX_CHAIN_ID","8453"))))
         chain_id=int(os.getenv("DEX_CHAIN_ID","8453")); taker_config=validate_evm_address("DEX_TAKER_ADDRESS",env_required("DEX_TAKER_ADDRESS")); quote_token=validate_evm_address("DEX_QUOTE_TOKEN",env_required("DEX_QUOTE_TOKEN")); base_token=validate_evm_address("DEX_BASE_TOKEN",env_required("DEX_BASE_TOKEN"))
         raw_base_tokens=os.getenv("DEX_BASE_TOKENS","").strip()
-        configured_base_tokens=[validate_evm_address("DEX_BASE_TOKENS",x.strip()) for x in raw_base_tokens.split(",") if x.strip()] if raw_base_tokens else [base_token]
+        configured_base_tokens=[validate_evm_address("DEX_BASE_TOKENS",x.strip()) for x in raw_base_tokens.split(",") if x.strip()] if raw_base_tokens else []
         base_tokens=[]
         for token in configured_base_tokens:
             if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
-        if not base_tokens: raise ValueError("DEX_BASE_TOKENS must contain at least one token different from DEX_QUOTE_TOKEN")
+        auto_discovery=env_bool("DEX_AUTO_DISCOVERY",True)
+        discovery_lookback=int(os.getenv("DEX_DISCOVERY_BLOCKS","12000"))
+        discovery_chunk=int(os.getenv("DEX_DISCOVERY_CHUNK_BLOCKS","2000"))
+        discovery_max=int(os.getenv("DEX_DISCOVERY_MAX_TOKENS","24"))
+        discovery_refresh=float(os.getenv("DEX_DISCOVERY_REFRESH_SECONDS","300"))
+        if auto_discovery:
+            discovered=discover_recent_base_tokens(adapter,quote_token=quote_token,anchors=(BASE_WETH,),lookback_blocks=discovery_lookback,chunk_blocks=discovery_chunk,max_tokens=discovery_max)
+            for token in discovered:
+                if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
+        if not base_tokens: raise ValueError("No DEX base tokens configured or discovered")
+        base_tokens=base_tokens[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","32")))]
         quote_decimals=int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS","6")); own_capital=env_decimal("DEX_OWN_CAPITAL_QUOTE","0")
-        if own_capital!=0: raise ValueError("DEX_OWN_CAPITAL_QUOTE must remain exactly 0")
+        if own_capital<0: raise ValueError("DEX_OWN_CAPITAL_QUOTE cannot be negative")
+        if own_capital>0 and live: raise ValueError("owned-capital live execution is not enabled by the current executor; keep DEX_OWN_CAPITAL_QUOTE=0 until an owned-capital executor is installed")
         flash_cap=env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE","100"); live=env_bool("LIVE_TRADING",False)
         if flash_cap<0: raise ValueError("DEX_FLASH_LOAN_LIQUIDITY_QUOTE cannot be negative")
         min_profit=env_decimal("DEX_MIN_NET_PROFIT","0.005"); safety=env_decimal("DEX_SAFETY_BUFFER","0.001")
@@ -96,7 +108,7 @@ async def main():
         if safety<0: raise ValueError("DEX_SAFETY_BUFFER cannot be negative")
         slippage=int(os.getenv("DEX_SLIPPAGE_BPS","50")); latency=env_decimal("DEX_MAX_QUOTE_LATENCY_MS","1000")
         if not 0<=slippage<=5000 or latency<=0: raise ValueError("invalid slippage/latency configuration")
-        flash_enabled=env_bool("FLASH_LOAN_ENABLED",False); configured_fee=env_decimal("FLASH_LOAN_FEE_BPS","0")
+        flash_enabled=env_bool("FLASH_LOAN_ENABLED",False) and own_capital==0; configured_fee=env_decimal("FLASH_LOAN_FEE_BPS","0")
         if live:
             if not flash_enabled: raise RuntimeError("LIVE_TRADING requires FLASH_LOAN_ENABLED=true")
             if not env_bool("MEV_PROTECTION_REQUIRED",True) or not env_bool("ATOMIC_REPAYMENT_REQUIRED",True): raise RuntimeError("live execution requires MEV protection and atomic repayment")
@@ -124,9 +136,23 @@ async def main():
             token: DexCrossExchangeEngine(adapter,sources,**engine_kwargs)
             for token in base_tokens
         }
-        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":"0","flash_liquidity":str(flash_cap),"flash_loan_enabled":flash_enabled})
+        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"universe_refreshed_at":time.time(),"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":"0","flash_liquidity":str(flash_cap),"flash_loan_enabled":flash_enabled})
         while True:
             try:
+                if auto_discovery and time.time()-float(STATE.get("universe_refreshed_at") or 0) >= discovery_refresh:
+                    discovered=discover_recent_base_tokens(adapter,quote_token=quote_token,anchors=(BASE_WETH,),lookback_blocks=discovery_lookback,chunk_blocks=discovery_chunk,max_tokens=discovery_max)
+                    current=list(base_tokens)
+                    for token in discovered:
+                        if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in current}: current.append(token)
+                    base_tokens=current[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","32")))]
+                    for token in list(token_engines):
+                        if token not in base_tokens: del token_engines[token]
+                    for token in base_tokens:
+                        if token not in token_engines: token_engines[token]=DexCrossExchangeEngine(adapter,sources,**engine_kwargs)
+                    with LOCK:
+                        STATE["base_tokens"]=base_tokens
+                        STATE["universe_refreshed_at"]=time.time()
+                    logging.info("DEX universe refreshed base_tokens=%s",len(base_tokens))
                 if live:
                     actual=Decimal(executor.available_liquidity_units(quote_token))/(Decimal(10)**quote_decimals); max_quote=actual; fee_bps=executor.flash_loan_fee_bps()
                     for token_engine in token_engines.values():
@@ -136,7 +162,7 @@ async def main():
                 else: max_quote=flash_cap
                 all_opportunities=[]
                 aggregate_rejections={}
-                scan_concurrency=max(1,min(len(base_tokens),int(os.getenv("DEX_SCAN_CONCURRENCY","1"))))
+                scan_concurrency=max(1,min(len(base_tokens),int(os.getenv("DEX_SCAN_CONCURRENCY","4"))))
                 scan_semaphore=asyncio.Semaphore(scan_concurrency)
                 async def scan_base_token(scan_base):
                     async with scan_semaphore:
