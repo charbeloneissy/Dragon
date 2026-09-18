@@ -13,7 +13,7 @@ from src.dragon.dex_direct import DirectDexAdapter
 from src.dragon.dex_cross_exchange import DexCrossExchangeEngine
 from src.dragon.flash_executor import AaveFlashExecutor
 
-STATE={"status":"starting","mode":"paper","chain_id":None,"sources":[],"scans":0,"opportunities":0,"last_scan":None,"last_error":None,"started_at":time.time(),"quote_amount":None,"quote_decimals":None,"min_net_profit":None,"safety_buffer":None,"own_capital":"0","flash_liquidity":None,"flash_loan_enabled":False,"last_tx_hash":None,"rejections":{}}
+STATE={"status":"starting","mode":"paper","chain_id":None,"sources":[],"scans":0,"opportunities":0,"last_scan":None,"last_error":None,"started_at":time.time(),"quote_amount":None,"quote_decimals":None,"min_net_profit":None,"safety_buffer":None,"own_capital":"0","flash_liquidity":None,"flash_loan_enabled":False,"last_tx_hash":None,"rejections":{},"base_tokens":[]}
 LOCK=Lock()
 
 class Handler(BaseHTTPRequestHandler):
@@ -81,7 +81,12 @@ async def main():
         adapter=DirectDexAdapter()
         logging.info("Direct DEX adapter connected: sources=%s", adapter.sources(int(os.getenv("DEX_CHAIN_ID","8453"))))
         chain_id=int(os.getenv("DEX_CHAIN_ID","8453")); taker_config=validate_evm_address("DEX_TAKER_ADDRESS",env_required("DEX_TAKER_ADDRESS")); quote_token=validate_evm_address("DEX_QUOTE_TOKEN",env_required("DEX_QUOTE_TOKEN")); base_token=validate_evm_address("DEX_BASE_TOKEN",env_required("DEX_BASE_TOKEN"))
-        if quote_token.lower()==base_token.lower(): raise ValueError("DEX_QUOTE_TOKEN and DEX_BASE_TOKEN must be different")
+        raw_base_tokens=os.getenv("DEX_BASE_TOKENS","").strip()
+        configured_base_tokens=[validate_evm_address("DEX_BASE_TOKENS",x.strip()) for x in raw_base_tokens.split(",") if x.strip()] if raw_base_tokens else [base_token]
+        base_tokens=[]
+        for token in configured_base_tokens:
+            if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
+        if not base_tokens: raise ValueError("DEX_BASE_TOKENS must contain at least one token different from DEX_QUOTE_TOKEN")
         quote_decimals=int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS","6")); own_capital=env_decimal("DEX_OWN_CAPITAL_QUOTE","0")
         if own_capital!=0: raise ValueError("DEX_OWN_CAPITAL_QUOTE must remain exactly 0")
         flash_cap=env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE","100"); live=env_bool("LIVE_TRADING",False)
@@ -105,7 +110,7 @@ async def main():
         if len(sources)<2: raise RuntimeError(f"fewer than two usable DEX sources found on chain {chain_id}: requested={requested}, available={sorted(available)}, usable={sources}")
         sources=sources[:4]
         engine=DexCrossExchangeEngine(adapter,sources,min_profit=min_profit,quote_token_decimals=quote_decimals,max_quote_latency_ms=latency,safety_buffer_quote=safety,flash_loan_enabled=flash_enabled,flash_loan_fee_bps=fee_bps)
-        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":"0","flash_liquidity":str(flash_cap),"flash_loan_enabled":flash_enabled})
+        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":"0","flash_liquidity":str(flash_cap),"flash_loan_enabled":flash_enabled})
         while True:
             try:
                 if live:
@@ -113,9 +118,16 @@ async def main():
                     if max_quote<=0: raise RuntimeError("no flash-loan liquidity available for the quote token")
                     with LOCK: STATE["flash_liquidity"]=str(max_quote)
                 else: max_quote=flash_cap
-                opportunities=await asyncio.to_thread(engine.scan_max_profitable,chain_id=chain_id,quote_token=quote_token,base_token=base_token,max_quote_amount=max_quote,taker=taker,slippage_bps=slippage)
-                merge_rejections(engine.last_rejections)
-                logging.info("DEX scan complete: sources=%s candidates=%s opportunities=%s rejections=%s", sources, len(engine._candidate_amounts(int(max_quote * (Decimal(10) ** quote_decimals)))), len(opportunities), engine.last_rejections)
+                all_opportunities=[]
+                aggregate_rejections={}
+                for scan_base in base_tokens:
+                    found=await asyncio.to_thread(engine.scan_max_profitable,chain_id=chain_id,quote_token=quote_token,base_token=scan_base,max_quote_amount=max_quote,taker=taker,slippage_bps=slippage)
+                    all_opportunities.extend(found)
+                    for key,value in engine.last_rejections.items(): aggregate_rejections[key]=aggregate_rejections.get(key,0)+int(value)
+                all_opportunities.sort(key=lambda x: x.net_profit_quote, reverse=True)
+                opportunities=all_opportunities[:max(1,int(os.getenv("DEX_MAX_OPPORTUNITIES","8")))]
+                merge_rejections(aggregate_rejections)
+                logging.info("DEX scan complete: sources=%s base_tokens=%s candidates_per_token=%s opportunities=%s rejections=%s", sources, len(base_tokens), len(engine._candidate_amounts(int(max_quote * (Decimal(10) ** quote_decimals)))), len(opportunities), aggregate_rejections)
                 with LOCK: STATE["scans"]+=1; STATE["opportunities"]+=len(opportunities); STATE["last_scan"]=time.time(); STATE["last_error"]=None; STATE["quote_amount"]=str(opportunities[0].quote_amount/(Decimal(10)**quote_decimals)) if opportunities else None
                 if opportunities and live:
                     best=opportunities[0]; max_block=executor.w3.eth.block_number+max(1,int(os.getenv("DEX_MAX_BLOCKS_AHEAD","2")))
