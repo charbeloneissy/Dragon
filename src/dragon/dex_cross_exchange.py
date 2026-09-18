@@ -50,6 +50,18 @@ class DexCrossExchangeEngine:
         self.flash_loan_enabled = bool(flash_loan_enabled)
         self.flash_loan_fee_bps = Decimal(flash_loan_fee_bps)
         self.native_to_quote_rate = Decimal(native_to_quote_rate)
+        # Keep isolated RPC/Web3 adapters alive across scans. Rebuilding them per
+        # candidate caused repeated chain/factory discovery and added avoidable latency.
+        self._quote_adapters: dict[str, object] = {}
+        if hasattr(adapter, "clone_for_concurrent_quotes"):
+            for source in self.sources:
+                try:
+                    self._quote_adapters[source] = adapter.clone_for_concurrent_quotes()
+                except Exception as exc:
+                    logging.warning("DEX adapter clone failed source=%s; falling back to shared adapter: %s", source, exc)
+        if not self._quote_adapters:
+            self._quote_adapters = {source: adapter for source in self.sources}
+        self._isolated_quote_adapters = all(self._quote_adapters.get(source) is not adapter for source in self.sources)
         self.last_rejections: dict[str, int] = {}
 
     def _reject(self, reason: str) -> None:
@@ -106,16 +118,7 @@ class DexCrossExchangeEngine:
         if len(self.sources) < 2: raise ValueError("DEX cross-exchange mode requires at least two DEX sources")
         if quote_amount <= 0: raise ValueError("quote_amount must be positive")
         if not 0 <= slippage_bps <= 5000: raise ValueError("slippage_bps must be between 0 and 5000")
-        quote_adapters = {}
-        if hasattr(self.adapter, "clone_for_concurrent_quotes"):
-            for source in self.sources:
-                try:
-                    quote_adapters[source] = self.adapter.clone_for_concurrent_quotes()
-                except Exception:
-                    quote_adapters[source] = self.adapter
-        else:
-            quote_adapters = {source: self.adapter for source in self.sources}
-
+        quote_adapters = self._quote_adapters
         buy_quotes: dict[str, tuple[DexQuote, DexExecution]] = {}
         sell_sources: set[str] = set()
         opportunities: list[DexOpportunity] = []
@@ -143,22 +146,33 @@ class DexCrossExchangeEngine:
                     self._reject("buy_zero_output"); continue
                 buy_quotes[source] = (quote, execution)
 
+        sell_jobs = []
         for buy_source, (buy_quote, buy_execution) in buy_quotes.items():
             bought_amount = buy_execution.buy_amount
             for source in self.sources:
-                if source == buy_source: continue
-                try:
-                    sell_quote, sell_execution = self.adapter.quote_single_source(chain_id=chain_id, sell_token=base_token, buy_token=quote_token, sell_amount=bought_amount, taker=taker, source=source, slippage_bps=slippage_bps)
-                except Exception as exc:
-                    logging.warning("DEX sell quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s", source, base_token, quote_token, bought_amount, type(exc).__name__, exc)
-                    self._reject("sell_quote_error"); continue
-                if self._quote_latency(sell_quote) > self.max_quote_latency_ms:
-                    self._reject("sell_quote_stale"); continue
-                if sell_execution.buy_amount <= 0:
-                    self._reject("sell_zero_output"); continue
-                sell_sources.add(source)
+                if source == buy_source:
+                    continue
+                sell_jobs.append((buy_source, buy_quote, buy_execution, source, bought_amount))
 
-                scale = Decimal(10) ** self.quote_token_decimals
+        def _sell(job):
+            buy_source, buy_quote, buy_execution, source, bought_amount = job
+            sell_adapter = quote_adapters.get(source, self.adapter)
+            return buy_source, buy_quote, buy_execution, source, sell_adapter.quote_single_source(
+                chain_id=chain_id, sell_token=base_token, buy_token=quote_token,
+                sell_amount=bought_amount, taker=taker, source=source, slippage_bps=slippage_bps,
+            )
+
+        def _process_sell(job, result):
+            buy_source, buy_quote, buy_execution, source, (sell_quote, sell_execution) = result
+            if self._quote_latency(sell_quote) > self.max_quote_latency_ms:
+                self._reject("sell_quote_stale")
+                return
+            if sell_execution.buy_amount <= 0:
+                self._reject("sell_zero_output")
+                return
+            sell_sources.add(source)
+
+            scale = Decimal(10) ** self.quote_token_decimals
                 flash_loan_fee_quote = Decimal(quote_amount) / scale * self.flash_loan_fee_bps / Decimal("10000") if self.flash_loan_enabled else Decimal("0")
                 native_to_quote_rate = self.native_to_quote_rate
                 needs_native_rate = ((getattr(sell_quote, "gas_quote", None) is None or Decimal(str(getattr(sell_quote, "gas_quote", 0))) <= 0) and (Decimal(str(getattr(sell_quote, "gas_native", 0))) > 0 or Decimal(str(getattr(sell_execution, "gas", 0))) * Decimal(str(getattr(sell_execution, "gas_price", 0))) > 0))
@@ -191,7 +205,29 @@ class DexCrossExchangeEngine:
                     self._reject("nonfinite_net_profit"); continue
                 if net < self.min_profit:
                     self._reject("net_profit_below_min"); continue
-                opportunities.append(DexOpportunity(chain_id=chain_id, buy_source=buy_source, sell_source=source, base_token=base_token, quote_token=quote_token, quote_amount=quote_amount, bought_amount=bought_amount, final_amount=final_amount, gross_profit_quote=gross, net_profit_quote=net, gas_cost_quote=gas_cost_quote, flash_loan_fee_quote=flash_loan_fee_quote, safety_buffer_quote=self.safety_buffer_quote, first_leg=buy_execution, second_leg=sell_execution))
+                opportunities.append(DexOpportunity(chain_id=chain_id, buy_source=buy_source, sell_source=source, base_token=base_token, quote_token=quote_token, bought_amount=bought_amount, quote_amount=quote_amount, final_amount=final_amount, gross_profit_quote=gross, net_profit_quote=net, gas_cost_quote=gas_cost_quote, flash_loan_fee_quote=flash_loan_fee_quote, safety_buffer_quote=self.safety_buffer_quote, first_leg=buy_execution, second_leg=sell_execution))
+
+        if sell_jobs:
+            if self._isolated_quote_adapters:
+                with ThreadPoolExecutor(max_workers=max(1, len(sell_jobs))) as pool:
+                    futures = {pool.submit(_sell, job): job for job in sell_jobs}
+                    for future in as_completed(futures):
+                        job = futures[future]
+                        try:
+                            result = future.result()
+                            _process_sell(job, result)
+                        except Exception as exc:
+                            source = job[3]
+                            logging.warning("DEX sell quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s", source, base_token, quote_token, job[4], type(exc).__name__, exc)
+                            self._reject("sell_quote_error")
+            else:
+                for job in sell_jobs:
+                    try:
+                        _process_sell(job, _sell(job))
+                    except Exception as exc:
+                        source = job[3]
+                        logging.warning("DEX sell quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s", source, base_token, quote_token, job[4], type(exc).__name__, exc)
+                        self._reject("sell_quote_error")
 
         if not buy_quotes: self._reject("no_buy_sources")
         if not sell_sources and buy_quotes: self._reject("no_sell_sources")
