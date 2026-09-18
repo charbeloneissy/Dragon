@@ -90,14 +90,14 @@ async def main():
         auto_discovery=env_bool("DEX_AUTO_DISCOVERY",True)
         discovery_lookback=int(os.getenv("DEX_DISCOVERY_BLOCKS","250000"))
         discovery_chunk=int(os.getenv("DEX_DISCOVERY_CHUNK_BLOCKS","10000"))
-        discovery_max=int(os.getenv("DEX_DISCOVERY_MAX_TOKENS","24"))
+        discovery_max=int(os.getenv("DEX_DISCOVERY_MAX_TOKENS","100"))
         discovery_refresh=float(os.getenv("DEX_DISCOVERY_REFRESH_SECONDS","300"))
         if auto_discovery:
             discovered=discover_recent_base_tokens(adapter,quote_token=quote_token,anchors=(quote_token, BASE_WETH),lookback_blocks=discovery_lookback,chunk_blocks=discovery_chunk,max_tokens=discovery_max)
             for token in discovered:
                 if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
         if not base_tokens: raise ValueError("No DEX base tokens configured or discovered")
-        base_tokens=base_tokens[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","32")))]
+        base_tokens=base_tokens[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","100")))]
         quote_decimals=int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS","6")); own_capital=env_decimal("DEX_OWN_CAPITAL_QUOTE","0")
         if own_capital<0: raise ValueError("DEX_OWN_CAPITAL_QUOTE cannot be negative")
         flash_cap=env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE","100"); live=env_bool("LIVE_TRADING",False)
@@ -144,7 +144,7 @@ async def main():
                     current=list(base_tokens)
                     for token in discovered:
                         if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in current}: current.append(token)
-                    base_tokens=current[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","32")))]
+                    base_tokens=current[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","100")))]
                     for token in list(token_engines):
                         if token not in base_tokens: del token_engines[token]
                     for token in base_tokens:
