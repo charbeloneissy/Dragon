@@ -102,7 +102,8 @@ async def main():
             if not env_bool("MEV_PROTECTION_REQUIRED",True) or not env_bool("ATOMIC_REPAYMENT_REQUIRED",True): raise RuntimeError("live execution requires MEV protection and atomic repayment")
             executor=AaveFlashExecutor(); taker=executor.config.executor_address; fee_bps=executor.flash_loan_fee_bps()
         else:
-            executor=None; taker=taker_config; fee_bps=configured_fee
+            executor=None; taker=taker_config
+            fee_bps=adapter.flash_loan_fee_bps() if flash_enabled else configured_fee
         if not flash_enabled and configured_fee!=0: raise ValueError("FLASH_LOAN_FEE_BPS requires FLASH_LOAN_ENABLED=true")
         available=set(adapter.sources(chain_id)); configured=tuple(x.strip() for x in os.getenv("DEX_SOURCES","").split(",") if x.strip()); requested=configured or ("Uniswap_V3","Aerodrome")
         sources=tuple(x for x in requested if x in available); unsupported=tuple(x for x in requested if x not in available)
