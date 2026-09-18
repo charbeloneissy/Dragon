@@ -136,8 +136,14 @@ class DexCrossExchangeEngine:
                 # Profitability must survive the same slippage bound used by both executable legs.
                 # Apply the slippage haircut to each leg for conservative pre-trade accounting;
                 # calldata still enforces the exact minOut on-chain.
-                slippage_factor = (Decimal(10000 - slippage_bps) / Decimal(10000))
-                conservative_bought_amount = int(Decimal(bought_amount) * slippage_factor)
+                buy_slippage_bps = max(Decimal(slippage_bps), Decimal(str(getattr(buy_quote, "slippage_bps", 0))))
+                sell_slippage_bps = max(Decimal(slippage_bps), Decimal(str(getattr(sell_quote, "slippage_bps", 0))))
+                if buy_slippage_bps > 5000 or sell_slippage_bps > 5000:
+                    self._reject("slippage_too_wide")
+                    continue
+                buy_slippage_factor = (Decimal(10000) - buy_slippage_bps) / Decimal(10000)
+                sell_slippage_factor = (Decimal(10000) - sell_slippage_bps) / Decimal(10000)
+                conservative_bought_amount = int(Decimal(bought_amount) * buy_slippage_factor)
                 if conservative_bought_amount <= 0: self._reject("slippage_zero_intermediate"); continue
                 try:
                     if conservative_bought_amount != bought_amount:
@@ -147,12 +153,18 @@ class DexCrossExchangeEngine:
                         sell_quote = sell_quote_conservative
                         sell_execution = sell_execution_conservative
                 except Exception: self._reject("conservative_sell_quote_error"); continue
-                final_amount = int(Decimal(raw_final_amount) * slippage_factor)
+                final_amount = int(Decimal(raw_final_amount) * sell_slippage_factor)
                 if final_amount <= 0: self._reject("slippage_zero_output"); continue
                 gas_cost_quote = self._gas_cost_quote(buy_quote, buy_execution, native_to_quote_rate) + self._gas_cost_quote(sell_quote, sell_execution, native_to_quote_rate)
                 if not gas_cost_quote.is_finite(): self._reject("gas_unpriced"); continue
                 gross = Decimal(final_amount - quote_amount) / scale
                 net = gross - gas_cost_quote - flash_loan_fee_quote - self.safety_buffer_quote
+                logging.info(
+                    "DEX calc buy=%s sell=%s token=%s amount=%s bought=%s conservative_bought=%s final=%s gross=%s gas=%s flash_fee=%s safety=%s net=%s",
+                    buy_source, sell_source, base_token, quote_amount, bought_amount,
+                    conservative_bought_amount, final_amount, gross, gas_cost_quote,
+                    flash_loan_fee_quote, self.safety_buffer_quote, net,
+                )
                 if not net.is_finite(): self._reject("nonfinite_net_profit"); continue
                 if net < self.min_profit: self._reject("net_profit_below_min"); continue
                 opportunities.append(DexOpportunity(chain_id=chain_id, buy_source=buy_source, sell_source=sell_source, base_token=base_token, quote_token=quote_token, quote_amount=quote_amount, bought_amount=bought_amount, final_amount=final_amount, gross_profit_quote=gross, net_profit_quote=net, gas_cost_quote=gas_cost_quote, flash_loan_fee_quote=flash_loan_fee_quote, safety_buffer_quote=self.safety_buffer_quote, first_leg=buy_execution, second_leg=sell_execution))
