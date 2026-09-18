@@ -162,9 +162,10 @@ class DexCrossExchangeEngine:
                 sell_amount=quote_amount, taker=taker, source=source, slippage_bps=slippage_bps,
             )
 
-        # These two DEX quotes are independent. Run them concurrently to reduce
-        # scan latency; all accounting and rejection rules remain unchanged.
-        with ThreadPoolExecutor(max_workers=min(2, len(self.sources))) as pool:
+        # All venue quotes are independent. Run them concurrently with a bounded worker pool
+        # so adding venues improves coverage without creating unbounded threads.
+        max_quote_workers = max(2, min(len(self.sources), int(os.getenv("DEX_QUOTE_CONCURRENCY", "8"))))
+        with ThreadPoolExecutor(max_workers=max_quote_workers) as pool:
             futures = [pool.submit(_buy, source) for source in self.sources]
             for future in as_completed(futures):
                 source = "unknown"
@@ -308,10 +309,12 @@ class DexCrossExchangeEngine:
             ))
 
         # Sell legs are independent across buy/sell venue combinations. With isolated
-        # adapters, evaluate them concurrently; otherwise preserve safe sequential behavior.
+        # adapters, evaluate them concurrently with a bounded worker pool; otherwise
+        # preserve safe sequential behavior.
         if sell_jobs:
             if self._isolated_quote_adapters:
-                with ThreadPoolExecutor(max_workers=len(sell_jobs)) as pool:
+                max_sell_workers = max(2, min(len(sell_jobs), int(os.getenv("DEX_SELL_CONCURRENCY", "8"))))
+                with ThreadPoolExecutor(max_workers=max_sell_workers) as pool:
                     futures = {pool.submit(_sell, job): job for job in sell_jobs}
                     for future in as_completed(futures):
                         job = futures[future]
