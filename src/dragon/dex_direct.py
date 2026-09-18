@@ -55,6 +55,11 @@ class DirectDexAdapter:
         self.uni_router = self.w3.eth.contract(address=Web3.to_checksum_address(UNI_SWAP_ROUTER), abi=UNI_ROUTER_ABI)
         self.aave_pool = self.w3.eth.contract(address=Web3.to_checksum_address(os.getenv("DEX_AAVE_POOL_ADDRESS", AAVE_BASE_POOL)), abi=AAVE_POOL_ABI)
         self._native_rate_cache = {}
+        # Short quote cache reduces duplicate RPC calls during one scan without
+        # turning the scanner into a stale-price engine. Live execution can disable it.
+        self._quote_cache = {}
+        self._quote_cache_ttl = max(0.0, float(os.getenv("DEX_QUOTE_CACHE_SECONDS", "0.25")))
+        self._no_liquidity_cache = {}
         self.deadline_seconds = max(5, int(os.getenv("DEX_DEADLINE_SECONDS", "20")))
         self.aero_gas_limit = max(100_000, int(os.getenv("AERODROME_GAS_LIMIT", "250000")))
         self.uni_gas_limit = max(100_000, int(os.getenv("UNISWAP_GAS_LIMIT", "250000")))
@@ -102,6 +107,14 @@ class DirectDexAdapter:
         return "0x" + data.hex()
 
     def _uni_quote(self, token_in: str, token_out: str, amount: int):
+        cache_key=("uni", token_in.lower(), token_out.lower(), int(amount))
+        now=time.monotonic()
+        cached=self._quote_cache.get(cache_key)
+        if cached and now-cached[0] < self._quote_cache_ttl:
+            return cached[1]
+        no_liq=self._no_liquidity_cache.get(cache_key)
+        if no_liq and now-no_liq < 5.0:
+            raise RuntimeError("no Uniswap V3 pool/liquidity for pair (cached)")
         best = None; errors = []
         paths = [(token_in, token_out)]
         for mid in self.route_intermediates:
@@ -125,10 +138,20 @@ class DirectDexAdapter:
         if best is None:
             detail = " | ".join(errors[-4:])
             logging.warning("Uniswap V3 quote failed pair=%s->%s amount=%s errors=%s", token_in, token_out, amount, detail)
+            self._no_liquidity_cache[cache_key]=now
             raise RuntimeError(f"no Uniswap V3 pool/liquidity for pair; {detail}")
+        self._quote_cache[cache_key]=(now,best)
         logging.info("Uniswap V3 quote pair=%s->%s amount=%s out=%s hops=%s fees=%s gas=%s", token_in, token_out, amount, best[0], len(best[1])-1, best[2], best[3])
         return best
     def _aero_quote(self, token_in: str, token_out: str, amount: int):
+        cache_key=("aero", token_in.lower(), token_out.lower(), int(amount))
+        now=time.monotonic()
+        cached=self._quote_cache.get(cache_key)
+        if cached and now-cached[0] < self._quote_cache_ttl:
+            return cached[1]
+        no_liq=self._no_liquidity_cache.get(cache_key)
+        if no_liq and now-no_liq < 5.0:
+            raise RuntimeError("no Aerodrome pool/liquidity for pair (cached)")
         factory = self.aero_factory
         best = None
         errors = []
@@ -151,7 +174,9 @@ class DirectDexAdapter:
         if best is None:
             detail = " | ".join(errors[-2:])
             logging.warning("Aerodrome quote failed pair=%s->%s amount=%s errors=%s", token_in, token_out, amount, detail)
+            self._no_liquidity_cache[cache_key]=now
             raise RuntimeError(f"no Aerodrome pool/liquidity for pair; {detail}")
+        self._quote_cache[cache_key]=(now,best)
         logging.info("Aerodrome quote pair=%s->%s amount=%s out=%s hops=%s factory=%s", token_in, token_out, amount, best[0], len(best[1]), best[3])
         return best
 
