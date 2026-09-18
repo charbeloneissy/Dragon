@@ -79,10 +79,11 @@ class DexCrossExchangeEngine:
         configured = int(os.getenv("DEX_MAX_QUOTE_CANDIDATES", "12"))
         max_candidates = max(4, min(32, configured))
         if max_candidates == 1: return [ceiling]
+        # Always include both a small probe and the full flash-liquidity ceiling;
+        # the old fixed prefix stopped at 60% when candidates were reduced to 8.
         fractions = [
-            Decimal("0.05"), Decimal("0.10"), Decimal("0.15"), Decimal("0.20"),
-            Decimal("0.30"), Decimal("0.40"), Decimal("0.50"), Decimal("0.60"),
-            Decimal("0.70"), Decimal("0.80"), Decimal("0.90"), Decimal("1.00"),
+            Decimal("0.05"), Decimal("0.10"), Decimal("0.20"), Decimal("0.30"),
+            Decimal("0.40"), Decimal("0.50"), Decimal("0.75"), Decimal("1.00"),
         ]
         n = min(max_candidates, len(fractions))
         amounts = [max(1, int(Decimal(ceiling) * f)) for f in fractions[:n]]
