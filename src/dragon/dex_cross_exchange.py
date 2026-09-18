@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Iterable
@@ -109,17 +110,28 @@ class DexCrossExchangeEngine:
         sell_sources: set[str] = set()
         opportunities: list[DexOpportunity] = []
 
-        for source in self.sources:
-            try:
-                quote, execution = self.adapter.quote_single_source(chain_id=chain_id, sell_token=quote_token, buy_token=base_token, sell_amount=quote_amount, taker=taker, source=source, slippage_bps=slippage_bps)
-            except Exception as exc:
-                logging.warning("DEX buy quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s", source, quote_token, base_token, quote_amount, type(exc).__name__, exc)
-                self._reject("buy_quote_error"); continue
-            if self._quote_latency(quote) > self.max_quote_latency_ms:
-                self._reject("buy_quote_stale"); continue
-            if execution.buy_amount <= 0:
-                self._reject("buy_zero_output"); continue
-            buy_quotes[source] = (quote, execution)
+        def _buy(source):
+            return source, self.adapter.quote_single_source(
+                chain_id=chain_id, sell_token=quote_token, buy_token=base_token,
+                sell_amount=quote_amount, taker=taker, source=source, slippage_bps=slippage_bps,
+            )
+
+        # These two DEX quotes are independent. Run them concurrently to reduce
+        # scan latency; all accounting and rejection rules remain unchanged.
+        with ThreadPoolExecutor(max_workers=min(2, len(self.sources))) as pool:
+            futures = [pool.submit(_buy, source) for source in self.sources]
+            for future in as_completed(futures):
+                source = "unknown"
+                try:
+                    source, (quote, execution) = future.result()
+                except Exception as exc:
+                    logging.warning("DEX buy quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s", source, quote_token, base_token, quote_amount, type(exc).__name__, exc)
+                    self._reject("buy_quote_error"); continue
+                if self._quote_latency(quote) > self.max_quote_latency_ms:
+                    self._reject("buy_quote_stale"); continue
+                if execution.buy_amount <= 0:
+                    self._reject("buy_zero_output"); continue
+                buy_quotes[source] = (quote, execution)
 
         for buy_source, (buy_quote, buy_execution) in buy_quotes.items():
             bought_amount = buy_execution.buy_amount
