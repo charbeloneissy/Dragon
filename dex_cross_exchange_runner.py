@@ -136,7 +136,7 @@ async def main():
             token: DexCrossExchangeEngine(adapter,sources,**engine_kwargs)
             for token in base_tokens
         }
-        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"universe_refreshed_at":time.time(),"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":"0","flash_liquidity":str(flash_cap),"flash_loan_enabled":flash_enabled})
+        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"universe_refreshed_at":time.time(),"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":str(own_capital),"flash_liquidity":str(own_capital if own_capital>0 else flash_cap),"flash_loan_enabled":flash_enabled})
         while True:
             try:
                 if auto_discovery and time.time()-float(STATE.get("universe_refreshed_at") or 0) >= discovery_refresh:
@@ -159,7 +159,7 @@ async def main():
                         token_engine.flash_loan_fee_bps=fee_bps
                     if max_quote<=0: raise RuntimeError("no flash-loan liquidity available for the quote token")
                     with LOCK: STATE["flash_liquidity"]=str(max_quote)
-                else: max_quote=flash_cap
+                else: max_quote=own_capital if own_capital>0 else flash_cap
                 all_opportunities=[]
                 aggregate_rejections={}
                 scan_concurrency=max(1,min(len(base_tokens),int(os.getenv("DEX_SCAN_CONCURRENCY","4"))))
