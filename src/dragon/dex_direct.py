@@ -113,7 +113,7 @@ class DirectDexAdapter:
                 paths.append((token_in, mid, token_out))
         for path in paths:
             for stable_flags in ([(False,)] if len(path) == 2 else [(False, False), (False, True), (True, False), (True, True)]):
-                route = [(self._addr(path[i]), self._addr(path[i+1]), bool(stable_flags[i]), self._addr(factory)) for i in range(len(path)-1)]
+                route = [{"from": self._addr(path[i]), "to": self._addr(path[i+1]), "stable": bool(stable_flags[i]), "factory": self._addr(factory)} for i in range(len(path)-1)]
                 try:
                     amounts = self.aero.functions.getAmountsOut(int(amount), route).call()
                     out = int(amounts[-1])
