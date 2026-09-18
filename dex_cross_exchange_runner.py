@@ -88,12 +88,12 @@ async def main():
         for token in configured_base_tokens:
             if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
         auto_discovery=env_bool("DEX_AUTO_DISCOVERY",True)
-        discovery_lookback=int(os.getenv("DEX_DISCOVERY_BLOCKS","12000"))
+        discovery_lookback=int(os.getenv("DEX_DISCOVERY_BLOCKS","50000"))
         discovery_chunk=int(os.getenv("DEX_DISCOVERY_CHUNK_BLOCKS","2000"))
         discovery_max=int(os.getenv("DEX_DISCOVERY_MAX_TOKENS","24"))
         discovery_refresh=float(os.getenv("DEX_DISCOVERY_REFRESH_SECONDS","300"))
         if auto_discovery:
-            discovered=discover_recent_base_tokens(adapter,quote_token=quote_token,anchors=(BASE_WETH,),lookback_blocks=discovery_lookback,chunk_blocks=discovery_chunk,max_tokens=discovery_max)
+            discovered=discover_recent_base_tokens(adapter,quote_token=quote_token,anchors=(quote_token, BASE_WETH),lookback_blocks=discovery_lookback,chunk_blocks=discovery_chunk,max_tokens=discovery_max)
             for token in discovered:
                 if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
         if not base_tokens: raise ValueError("No DEX base tokens configured or discovered")
@@ -140,7 +140,7 @@ async def main():
         while True:
             try:
                 if auto_discovery and time.time()-float(STATE.get("universe_refreshed_at") or 0) >= discovery_refresh:
-                    discovered=discover_recent_base_tokens(adapter,quote_token=quote_token,anchors=(BASE_WETH,),lookback_blocks=discovery_lookback,chunk_blocks=discovery_chunk,max_tokens=discovery_max)
+                    discovered=discover_recent_base_tokens(adapter,quote_token=quote_token,anchors=(quote_token, BASE_WETH),lookback_blocks=discovery_lookback,chunk_blocks=discovery_chunk,max_tokens=discovery_max)
                     current=list(base_tokens)
                     for token in discovered:
                         if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in current}: current.append(token)
