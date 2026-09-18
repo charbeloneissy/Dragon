@@ -33,7 +33,13 @@ services:
       - key: DEX_MAX_QUOTE_LATENCY_MS
         value: "1000"
       - key: DEX_POLL_SECONDS
-        value: "0.5"
+        value: "4.0"
+      - key: DEX_MAX_QUOTE_CANDIDATES
+        value: "4"
+      - key: ZEROX_MAX_RPS
+        value: "4"
+      - key: ZEROX_SOURCES_CACHE_SECONDS
+        value: "900"
       - key: DEX_SOURCES
         value: "Uniswap_V3,Aerodrome"
       - key: FLASH_LOAN_ENABLED
