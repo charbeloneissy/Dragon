@@ -68,7 +68,40 @@ class DexCrossExchangeEngine:
         self.last_rejections[reason] = self.last_rejections.get(reason, 0) + 1
 
     def _quote_latency(self, quote: DexQuote) -> Decimal:
-        return Decimal(str(getattr(quote, "latency_ms", 0)))
+        try:
+            value = Decimal(str(getattr(quote, "latency_ms", 0)))
+        except Exception:
+            return Decimal("Infinity")
+        return value if value.is_finite() and value >= 0 else Decimal("Infinity")
+
+    def _quote_quality_ok(self, quote: DexQuote, *, sell_token: str, buy_token: str, sell_amount: int, stage: str) -> bool:
+        """Fail closed on malformed, stale, or economically absurd executable quotes."""
+        try:
+            if str(getattr(quote, "sell_token", "")).lower() != sell_token.lower():
+                self._reject(f"{stage}_token_mismatch")
+                return False
+            if str(getattr(quote, "buy_token", "")).lower() != buy_token.lower():
+                self._reject(f"{stage}_token_mismatch")
+                return False
+            quoted_in = Decimal(str(getattr(quote, "sell_amount", 0)))
+            quoted_out = Decimal(str(getattr(quote, "buy_amount", 0)))
+            if not quoted_in.is_finite() or not quoted_out.is_finite() or quoted_in <= 0 or quoted_out <= 0:
+                self._reject(f"{stage}_invalid_amount")
+                return False
+            # Direct adapters quote in base units. A materially different input amount
+            # means the response is not the quote we requested.
+            if int(quoted_in) != int(sell_amount):
+                self._reject(f"{stage}_amount_mismatch")
+                return False
+            max_ratio = Decimal(os.getenv("DEX_MAX_QUOTE_PRICE_RATIO", "100"))
+            ratio = quoted_out / quoted_in
+            if not max_ratio.is_finite() or max_ratio <= 0 or ratio > max_ratio:
+                self._reject(f"{stage}_abnormal_price_ratio")
+                return False
+            return True
+        except Exception:
+            self._reject(f"{stage}_invalid_quote")
+            return False
 
     def _gas_cost_quote(self, quote: DexQuote, execution: DexExecution, native_to_quote_rate: Decimal) -> Decimal:
         direct = getattr(quote, "gas_quote", None)
@@ -142,6 +175,8 @@ class DexCrossExchangeEngine:
                     self._reject("buy_quote_error"); continue
                 if self._quote_latency(quote) > self.max_quote_latency_ms:
                     self._reject("buy_quote_stale"); continue
+                if not self._quote_quality_ok(quote, sell_token=quote_token, buy_token=base_token, sell_amount=quote_amount, stage="buy"):
+                    continue
                 if execution.buy_amount <= 0:
                     self._reject("buy_zero_output"); continue
                 buy_quotes[source] = (quote, execution)
@@ -166,6 +201,8 @@ class DexCrossExchangeEngine:
             buy_source, buy_quote, buy_execution, source, (sell_quote, sell_execution) = result
             if self._quote_latency(sell_quote) > self.max_quote_latency_ms:
                 self._reject("sell_quote_stale")
+                return
+            if not self._quote_quality_ok(sell_quote, sell_token=base_token, buy_token=quote_token, sell_amount=buy_execution.buy_amount, stage="sell"):
                 return
             if sell_execution.buy_amount <= 0:
                 self._reject("sell_zero_output")
