@@ -173,61 +173,95 @@ class DexCrossExchangeEngine:
             sell_sources.add(source)
 
             scale = Decimal(10) ** self.quote_token_decimals
-                flash_loan_fee_quote = Decimal(quote_amount) / scale * self.flash_loan_fee_bps / Decimal("10000") if self.flash_loan_enabled else Decimal("0")
-                native_to_quote_rate = self.native_to_quote_rate
-                needs_native_rate = ((getattr(sell_quote, "gas_quote", None) is None or Decimal(str(getattr(sell_quote, "gas_quote", 0))) <= 0) and (Decimal(str(getattr(sell_quote, "gas_native", 0))) > 0 or Decimal(str(getattr(sell_execution, "gas", 0))) * Decimal(str(getattr(sell_execution, "gas_price", 0))) > 0))
-                if native_to_quote_rate <= 0 and needs_native_rate:
-                    try:
-                        raw_rate = Decimal(str(self.adapter.native_to_quote_rate(chain_id=chain_id, quote_token=quote_token, sell_amount_native=10**15, taker=taker)))
-                        native_to_quote_rate = raw_rate * (Decimal(10) ** 18) / scale
-                    except Exception:
-                        self._reject("native_to_quote_rate_error"); continue
-                if native_to_quote_rate < 0:
-                    self._reject("negative_native_to_quote_rate"); continue
+            flash_loan_fee_quote = (
+                Decimal(quote_amount) / scale * self.flash_loan_fee_bps / Decimal("10000")
+                if self.flash_loan_enabled else Decimal("0")
+            )
+            native_to_quote_rate = self.native_to_quote_rate
+            needs_native_rate = (
+                (
+                    getattr(sell_quote, "gas_quote", None) is None
+                    or Decimal(str(getattr(sell_quote, "gas_quote", 0))) <= 0
+                )
+                and (
+                    Decimal(str(getattr(sell_quote, "gas_native", 0))) > 0
+                    or Decimal(str(getattr(sell_execution, "gas", 0)))
+                    * Decimal(str(getattr(sell_execution, "gas_price", 0))) > 0
+                )
+            )
+            if native_to_quote_rate <= 0 and needs_native_rate:
+                try:
+                    raw_rate = Decimal(str(self.adapter.native_to_quote_rate(
+                        chain_id=chain_id,
+                        quote_token=quote_token,
+                        sell_amount_native=10**15,
+                        taker=taker,
+                    )))
+                    native_to_quote_rate = raw_rate * (Decimal(10) ** 18) / scale
+                except Exception:
+                    self._reject("native_to_quote_rate_error")
+                    return
+            if native_to_quote_rate < 0:
+                self._reject("negative_native_to_quote_rate")
+                return
 
-                # Slippage is transaction protection, not an additional economic haircut.
-                # The adapter quote is the economic output; applying slippage again would
-                # double-count it and can manufacture artificial net losses.
-                buy_slippage_bps = max(Decimal(slippage_bps), Decimal(str(getattr(buy_quote, "slippage_bps", 0))))
-                sell_slippage_bps = max(Decimal(slippage_bps), Decimal(str(getattr(sell_quote, "slippage_bps", 0))))
-                if buy_slippage_bps > 5000 or sell_slippage_bps > 5000:
-                    self._reject("slippage_too_wide"); continue
-                final_amount = int(sell_execution.buy_amount)
-                if final_amount <= 0:
-                    self._reject("slippage_zero_output"); continue
-                gas_cost_quote = self._gas_cost_quote(buy_quote, buy_execution, native_to_quote_rate) + self._gas_cost_quote(sell_quote, sell_execution, native_to_quote_rate)
-                if not gas_cost_quote.is_finite():
-                    self._reject("gas_unpriced"); continue
-                gross = Decimal(final_amount - quote_amount) / scale
-                net = gross - gas_cost_quote - flash_loan_fee_quote - self.safety_buffer_quote
-                logging.info("DEX calc buy=%s sell=%s token=%s amount=%s bought=%s final=%s gross=%s gas=%s flash_fee=%s safety=%s net=%s", buy_source, source, base_token, quote_amount, bought_amount, final_amount, gross, gas_cost_quote, flash_loan_fee_quote, self.safety_buffer_quote, net)
-                if not net.is_finite():
-                    self._reject("nonfinite_net_profit"); continue
-                if net < self.min_profit:
-                    self._reject("net_profit_below_min"); continue
-                opportunities.append(DexOpportunity(chain_id=chain_id, buy_source=buy_source, sell_source=source, base_token=base_token, quote_token=quote_token, bought_amount=bought_amount, quote_amount=quote_amount, final_amount=final_amount, gross_profit_quote=gross, net_profit_quote=net, gas_cost_quote=gas_cost_quote, flash_loan_fee_quote=flash_loan_fee_quote, safety_buffer_quote=self.safety_buffer_quote, first_leg=buy_execution, second_leg=sell_execution))
+            # Slippage is transaction protection, not an additional economic haircut.
+            buy_slippage_bps = max(
+                Decimal(slippage_bps),
+                Decimal(str(getattr(buy_quote, "slippage_bps", 0))),
+            )
+            sell_slippage_bps = max(
+                Decimal(slippage_bps),
+                Decimal(str(getattr(sell_quote, "slippage_bps", 0))),
+            )
+            if buy_slippage_bps > 5000 or sell_slippage_bps > 5000:
+                self._reject("slippage_too_wide")
+                return
+            final_amount = int(sell_execution.buy_amount)
+            if final_amount <= 0:
+                self._reject("slippage_zero_output")
+                return
 
-        if sell_jobs:
-            if self._isolated_quote_adapters:
-                with ThreadPoolExecutor(max_workers=max(1, len(sell_jobs))) as pool:
-                    futures = {pool.submit(_sell, job): job for job in sell_jobs}
-                    for future in as_completed(futures):
-                        job = futures[future]
-                        try:
-                            result = future.result()
-                            _process_sell(job, result)
-                        except Exception as exc:
-                            source = job[3]
-                            logging.warning("DEX sell quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s", source, base_token, quote_token, job[4], type(exc).__name__, exc)
-                            self._reject("sell_quote_error")
-            else:
-                for job in sell_jobs:
-                    try:
-                        _process_sell(job, _sell(job))
-                    except Exception as exc:
-                        source = job[3]
-                        logging.warning("DEX sell quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s", source, base_token, quote_token, job[4], type(exc).__name__, exc)
-                        self._reject("sell_quote_error")
+            gas_cost_quote = (
+                self._gas_cost_quote(buy_quote, buy_execution, native_to_quote_rate)
+                + self._gas_cost_quote(sell_quote, sell_execution, native_to_quote_rate)
+            )
+            if not gas_cost_quote.is_finite():
+                self._reject("gas_unpriced")
+                return
+
+            gross = Decimal(final_amount - quote_amount) / scale
+            net = gross - gas_cost_quote - flash_loan_fee_quote - self.safety_buffer_quote
+            logging.info(
+                "DEX calc buy=%s sell=%s token=%s amount=%s bought=%s final=%s gross=%s gas=%s flash_fee=%s safety=%s net=%s",
+                buy_source, source, base_token, quote_amount, buy_execution.buy_amount,
+                final_amount, gross, gas_cost_quote, flash_loan_fee_quote,
+                self.safety_buffer_quote, net,
+            )
+            if not net.is_finite():
+                self._reject("nonfinite_net_profit")
+                return
+            if net < self.min_profit:
+                self._reject("net_profit_below_min")
+                return
+
+            opportunities.append(DexOpportunity(
+                chain_id=chain_id,
+                buy_source=buy_source,
+                sell_source=source,
+                base_token=base_token,
+                quote_token=quote_token,
+                quote_amount=quote_amount,
+                bought_amount=buy_execution.buy_amount,
+                final_amount=final_amount,
+                gross_profit_quote=gross,
+                net_profit_quote=net,
+                gas_cost_quote=gas_cost_quote,
+                flash_loan_fee_quote=flash_loan_fee_quote,
+                safety_buffer_quote=self.safety_buffer_quote,
+                first_leg=buy_execution,
+                second_leg=sell_execution,
+            ))
 
         if not buy_quotes: self._reject("no_buy_sources")
         if not sell_sources and buy_quotes: self._reject("no_sell_sources")
