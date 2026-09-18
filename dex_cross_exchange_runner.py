@@ -120,7 +120,10 @@ async def main():
                 else: max_quote=flash_cap
                 all_opportunities=[]
                 aggregate_rejections={}
+                scan_concurrency=max(1,min(len(base_tokens),int(os.getenv("DEX_SCAN_CONCURRENCY","1"))))
+                scan_semaphore=asyncio.Semaphore(scan_concurrency)
                 async def scan_base_token(scan_base):
+                    async with scan_semaphore:
                     # Each concurrent asset gets an isolated engine state so rejection
                     # telemetry cannot race through the shared last_rejections dict.
                     scan_engine=DexCrossExchangeEngine(
