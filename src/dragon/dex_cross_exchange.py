@@ -398,29 +398,17 @@ class DexCrossExchangeEngine:
                 second_leg=sell_execution,
             ))
 
-        # Sell legs are independent across buy/sell venue combinations. With isolated
-        # adapters, evaluate them concurrently with a bounded worker pool; otherwise
-        # preserve safe sequential behavior.
+        # Sell legs are independent. Run them concurrently even when the adapter
+        # is shared. The adapter serializes individual RPC calls with its bounded
+        # semaphore, while concurrency removes the unnecessary venue-by-venue wait.
         if sell_jobs:
-            if self._isolated_quote_adapters:
-                max_sell_workers = max(2, min(len(sell_jobs), int(os.getenv("DEX_SELL_CONCURRENCY", "8"))))
-                with ThreadPoolExecutor(max_workers=max_sell_workers) as pool:
-                    futures = {pool.submit(_sell, job): job for job in sell_jobs}
-                    for future in as_completed(futures):
-                        job = futures[future]
-                        try:
-                            _process_sell(job, future.result())
-                        except Exception as exc:
-                            source = job[3]
-                            logging.warning(
-                                "DEX sell quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s",
-                                source, base_token, quote_token, job[4], type(exc).__name__, exc,
-                            )
-                            self._reject("sell_quote_error")
-            else:
-                for job in sell_jobs:
+            max_sell_workers = max(2, min(len(sell_jobs), int(os.getenv("DEX_SELL_CONCURRENCY", "4"))))
+            with ThreadPoolExecutor(max_workers=max_sell_workers) as pool:
+                futures = {pool.submit(_sell, job): job for job in sell_jobs}
+                for future in as_completed(futures):
+                    job = futures[future]
                     try:
-                        _process_sell(job, _sell(job))
+                        _process_sell(job, future.result())
                     except Exception as exc:
                         source = job[3]
                         logging.warning(
