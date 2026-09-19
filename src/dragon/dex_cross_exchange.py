@@ -355,11 +355,12 @@ class DexCrossExchangeEngine:
             return source, quote_adapters.get(source, self.adapter).quote_single_source(
                 chain_id=chain_id, sell_token=quote_token, buy_token=base_token,
                 sell_amount=quote_amount, taker=taker, source=source, slippage_bps=slippage_bps,
+                deadline=time.perf_counter() + float(self.max_quote_latency_ms) / 1000.0,
             )
 
         # All venue quotes are independent. Run them concurrently with a bounded worker pool
         # so adding venues improves coverage without creating unbounded threads.
-        max_quote_workers = max(2, min(len(self.sources), int(os.getenv("DEX_QUOTE_CONCURRENCY", "1"))))
+        max_quote_workers = max(1, min(len(self.sources), int(os.getenv("DEX_QUOTE_CONCURRENCY", "1"))))
         pool = ThreadPoolExecutor(max_workers=max_quote_workers)
         futures = [pool.submit(_buy, source) for source in self.sources]
         done, pending = wait(futures, timeout=float(self.max_quote_latency_ms) / 1000)
@@ -406,6 +407,7 @@ class DexCrossExchangeEngine:
             return buy_source, buy_quote, buy_execution, source, sell_adapter.quote_single_source(
                 chain_id=chain_id, sell_token=base_token, buy_token=quote_token,
                 sell_amount=bought_amount, taker=taker, source=source, slippage_bps=slippage_bps,
+                deadline=time.perf_counter() + float(self.max_quote_latency_ms) / 1000.0,
             )
 
         def _process_sell(job, result):
