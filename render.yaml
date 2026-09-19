@@ -6,7 +6,7 @@ services:
     plan: free
     branch: main
     buildCommand: pip install --no-cache-dir -r requirements.txt
-    startCommand: python dex_cross_exchange_runner.py
+    startCommand: python dragon_supervisor.py
     autoDeploy: true
     healthCheckPath: /health
     envVars:
@@ -63,4 +63,6 @@ services:
       - key: ATOMIC_REPAYMENT_REQUIRED
         value: "true"
       - key: LIVE_TRADING
+        value: "false"
+      - key: DEX_LOCAL_ENGINE
         value: "false"
