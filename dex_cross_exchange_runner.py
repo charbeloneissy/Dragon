@@ -102,14 +102,14 @@ async def main():
         auto_discovery=env_bool("DEX_AUTO_DISCOVERY",True)
         discovery_lookback=int(os.getenv("DEX_DISCOVERY_BLOCKS","250000"))
         discovery_chunk=int(os.getenv("DEX_DISCOVERY_CHUNK_BLOCKS","10000"))
-        discovery_max=int(os.getenv("DEX_DISCOVERY_MAX_TOKENS","60"))
+        discovery_max=int(os.getenv("DEX_DISCOVERY_MAX_TOKENS","40"))
         discovery_refresh=float(os.getenv("DEX_DISCOVERY_REFRESH_SECONDS","300"))
         if auto_discovery:
             discovered=discover_recent_base_tokens(adapter,quote_token=quote_token,anchors=(quote_token, BASE_WETH),lookback_blocks=discovery_lookback,chunk_blocks=discovery_chunk,max_tokens=discovery_max)
             for token in discovered:
                 if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
         if not base_tokens: raise ValueError("No DEX base tokens configured or discovered")
-        base_tokens=base_tokens[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","60")))]
+        base_tokens=base_tokens[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","8")))]
         quote_decimals=int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS","6")); own_capital=env_decimal("DEX_OWN_CAPITAL_QUOTE","0")
         if own_capital<0: raise ValueError("DEX_OWN_CAPITAL_QUOTE cannot be negative")
         flash_cap=env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE","100"); live=env_bool("LIVE_TRADING",False)
@@ -156,7 +156,7 @@ async def main():
                     current=list(base_tokens)
                     for token in discovered:
                         if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in current}: current.append(token)
-                    base_tokens=current[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","250")))]
+                    base_tokens=current[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","8")))]
                     for token in list(token_engines):
                         if token not in base_tokens: del token_engines[token]
                     for token in base_tokens:
@@ -174,7 +174,7 @@ async def main():
                 else: max_quote=own_capital if own_capital>0 else flash_cap
                 all_opportunities=[]
                 aggregate_rejections={}
-                scan_concurrency=max(1,min(len(base_tokens),int(os.getenv("DEX_SCAN_CONCURRENCY","8"))))
+                scan_concurrency=max(1,min(len(base_tokens),int(os.getenv("DEX_SCAN_CONCURRENCY","2"))))
                 scan_semaphore=asyncio.Semaphore(scan_concurrency)
                 async def scan_base_token(scan_base):
                     async with scan_semaphore:
