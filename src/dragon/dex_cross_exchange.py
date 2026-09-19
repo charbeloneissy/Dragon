@@ -158,7 +158,14 @@ class DexCrossExchangeEngine:
         return (gas_native / Decimal(10) ** 18) * native_to_quote_rate
 
     def _candidate_amounts(self, ceiling: int) -> list[int]:
-        """Adaptive deterministic size grid with denser coverage near both ends."""
+        """Build a dynamic size grid from available capital/liquidity.
+
+        The grid is deliberately independent of a fixed dollar size. It samples
+        small, medium and near-ceiling notionals, then the optimizer can refine
+        around the best observed region. This lets the same engine adapt from
+        small balances to larger executable liquidity without pretending that
+        a single size is optimal for every route.
+        """
         if ceiling <= 0: return []
         configured = int(os.getenv("DEX_MAX_QUOTE_CANDIDATES", "4"))
         max_candidates = max(4, min(32, configured))
@@ -187,6 +194,22 @@ class DexCrossExchangeEngine:
             for i in range(len(fractions) + 1, max_candidates + 1):
                 amounts.append(max(1, (ceiling * i) // max_candidates))
         return sorted(set(amounts))
+
+    def _refinement_amounts(self, best_amount: int, ceiling: int, candidates: list[int]) -> list[int]:
+        """Generate a local refinement grid around the best coarse size."""
+        if best_amount <= 0 or ceiling <= 0:
+            return []
+        radius = Decimal(os.getenv("DEX_OPTIMIZER_RADIUS", "0.25"))
+        steps = max(2, min(8, int(os.getenv("DEX_OPTIMIZER_STEPS", "4"))))
+        radius = max(Decimal("0.05"), min(Decimal("0.75"), radius))
+        lo = max(1, int(Decimal(best_amount) * (Decimal("1") - radius)))
+        hi = min(ceiling, int(Decimal(best_amount) * (Decimal("1") + radius)))
+        if hi <= lo:
+            return []
+        span = hi - lo
+        refined = [lo + (span * i) // (steps + 1) for i in range(1, steps + 1)]
+        refined.extend([best_amount, (lo + hi) // 2])
+        return sorted(set(x for x in refined if 0 < x <= ceiling and x not in candidates))
 
     def fast_probe(self, *, chain_id: int, quote_token: str, base_token: str, quote_amount: int, taker: str, slippage_bps: int = 50) -> Decimal:
         """Fast gross-spread probe used to rank candidates before expensive sizing scans.
@@ -285,7 +308,37 @@ class DexCrossExchangeEngine:
                 results = list(pool.map(_scan, candidates))
         for result in results:
             profitable.extend(result)
-        return [max(profitable, key=lambda x: (x.net_profit_quote, x.quote_amount))] if profitable else []
+
+        # Dynamic second pass: refine around the best executable coarse size.
+        # Every refined size goes through the same hard profitability gates.
+        if profitable:
+            best = max(profitable, key=lambda x: (x.net_profit_quote, x.quote_amount))
+            refined = self._refinement_amounts(best.quote_amount, ceiling, candidates)
+            if refined:
+                logging.info(
+                    "DEX dynamic optimizer coarse_best=%s refined_candidates=%s ceiling=%s",
+                    best.quote_amount, refined, ceiling,
+                )
+                if max_workers == 1:
+                    refined_results = [_scan(candidate) for candidate in refined]
+                else:
+                    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                        refined_results = list(pool.map(_scan, refined))
+                for result in refined_results:
+                    profitable.extend(result)
+
+        if not profitable:
+            logging.info(
+                "DEX dynamic optimizer found no executable positive route base=%s candidates=%s",
+                base_token, candidates,
+            )
+            return []
+        best = max(profitable, key=lambda x: (x.net_profit_quote, x.net_profit_quote / Decimal(x.quote_amount)))
+        logging.info(
+            "DEX dynamic optimizer selected buy=%s sell=%s base=%s amount_raw=%s net=%s",
+            best.buy_source, best.sell_source, base_token, best.quote_amount, best.net_profit_quote,
+        )
+        return [best]
 
     def scan_once(self, *, chain_id: int, quote_token: str, base_token: str, quote_amount: int, taker: str, slippage_bps: int = 50) -> list[DexOpportunity]:
         if len(self.sources) < 2: raise ValueError("DEX cross-exchange mode requires at least two DEX sources")
