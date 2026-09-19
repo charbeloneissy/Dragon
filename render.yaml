@@ -54,6 +54,10 @@ services:
         value: "false"
       - key: DEX_0X_OPT_IN
         value: "false"
+      - key: DEX_DISCOVERY_OPT_IN
+        value: "false"
+      - key: DEX_AUTO_DISCOVERY
+        value: "false"
       - key: DEX_SOURCES
         value: "Uniswap_V3,Aerodrome"
       - key: DEX_COMPOUND_PROFITS

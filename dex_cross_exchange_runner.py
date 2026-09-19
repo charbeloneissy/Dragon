@@ -121,9 +121,14 @@ async def main():
         raw_base_tokens=os.getenv("DEX_BASE_TOKENS","").strip()
         configured_base_tokens=[validate_evm_address("DEX_BASE_TOKENS",x.strip()) for x in raw_base_tokens.split(",") if x.strip()] if raw_base_tokens else []
         base_tokens=[]
+        if base_token and base_token.lower()!=quote_token.lower():
+            base_tokens.append(base_token)
         for token in configured_base_tokens:
             if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
-        auto_discovery=env_bool("DEX_AUTO_DISCOVERY",True)
+        auto_discovery=(
+            env_bool("DEX_DISCOVERY_OPT_IN",False)
+            and env_bool("DEX_AUTO_DISCOVERY",True)
+        )
         discovery_lookback=int(os.getenv("DEX_DISCOVERY_BLOCKS","250000"))
         discovery_chunk=int(os.getenv("DEX_DISCOVERY_CHUNK_BLOCKS","10000"))
         discovery_max=int(os.getenv("DEX_DISCOVERY_MAX_TOKENS","40"))
@@ -132,11 +137,14 @@ async def main():
             discovered=discover_recent_base_tokens(adapter,quote_token=quote_token,anchors=(quote_token, BASE_WETH),lookback_blocks=discovery_lookback,chunk_blocks=discovery_chunk,max_tokens=discovery_max)
             for token in discovered:
                 if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
-        if not base_tokens: raise ValueError("No DEX base tokens configured or discovered")
+        if not base_tokens:
+            # Start with the deepest canonical Base asset when discovery is not
+            # explicitly enabled. This avoids probing random recent tokens.
+            base_tokens=[BASE_WETH]
         base_tokens=base_tokens[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","8")))]
         quote_decimals=int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS","6")); own_capital=env_decimal("DEX_OWN_CAPITAL_QUOTE","0")
         if own_capital<0: raise ValueError("DEX_OWN_CAPITAL_QUOTE cannot be negative")
-        flash_cap=env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE","100"); live=env_bool("LIVE_TRADING",False)
+        flash_cap=env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE","1000"); live=env_bool("LIVE_TRADING",False)
         compound_enabled=env_bool("DEX_COMPOUND_PROFITS",True)
         compound_ratio=env_decimal("DEX_COMPOUND_RATIO","1")
         compound_max=env_decimal("DEX_MAX_COMPOUND_QUOTE","100")
