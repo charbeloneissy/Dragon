@@ -203,7 +203,10 @@ async def main():
             token: DexCrossExchangeEngine(adapter,sources,**engine_kwargs)
             for token in base_tokens
         }
-        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"universe_mode":universe_mode,"universe_refreshed_at":time.time(),"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":str(own_capital),"flash_liquidity":str(own_capital if own_capital>0 else flash_cap),"flash_cap":str(flash_cap),"flash_loan_enabled":flash_enabled,"compounding_enabled":bool(live and compound_enabled),"compound_ratio":str(compound_ratio),"compound_max_quote":str(compound_max)})
+        rpc_pool_size=len(getattr(direct_adapter,"_rpc_urls",[]) or [])
+        rpc_keyed=bool(getattr(direct_adapter,"_has_keyed_endpoint",False))
+        logging.info("DEX RPC pool ready endpoints=%s keyed_provider=%s timeout_s=%.2f",rpc_pool_size,rpc_keyed,getattr(direct_adapter,"_rpc_timeout",0.0))
+        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"universe_mode":universe_mode,"universe_refreshed_at":time.time(),"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":str(own_capital),"flash_liquidity":str(own_capital if own_capital>0 else flash_cap),"flash_cap":str(flash_cap),"flash_loan_enabled":flash_enabled,"compounding_enabled":bool(live and compound_enabled),"compound_ratio":str(compound_ratio),"compound_max_quote":str(compound_max),"rpc_endpoints":rpc_pool_size,"rpc_keyed_provider":rpc_keyed})
         while True:
             try:
                 if auto_discovery and time.time()-float(STATE.get("universe_refreshed_at") or 0) >= discovery_refresh:

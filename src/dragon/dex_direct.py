@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal
@@ -55,8 +56,21 @@ class DirectDexAdapter:
         self._rpc_urls = urls
         if len(urls) < 2:
             logging.warning("Only one DEX_RPC endpoint configured; 429 resilience has no failover target")
-        self._rpc_timeout = float(os.getenv("DEX_RPC_TIMEOUT_SECONDS", "0.40"))
-        self._rpc_timeout = max(0.15, min(0.45, self._rpc_timeout))
+        # Providers with a paid key tolerate far more traffic than the shared
+        # public endpoint, so allow a wider timeout and a cheaper cool-down when
+        # a keyed endpoint is present. Detection is intentionally simple: any
+        # provider URL contains a path segment after /v2/ or /v3/ other than the
+        # public demo key.
+        self._keyed_endpoints = [self._is_keyed_rpc_endpoint(url) for url in urls]
+        self._has_keyed_endpoint = any(self._keyed_endpoints)
+        if self._has_keyed_endpoint:
+            logging.info("DEX RPC pool includes a keyed provider endpoint; paid-tier limits enabled")
+        configured_timeout = float(os.getenv("DEX_RPC_TIMEOUT_SECONDS", "0.40"))
+        # A dedicated provider answers fast, but a slightly larger ceiling keeps
+        # healthy paid endpoints from being marked unavailable under bursty
+        # concurrent quoting. The shared public RPC keeps the tighter bound.
+        timeout_ceiling = 1.0 if self._has_keyed_endpoint else 0.45
+        self._rpc_timeout = max(0.15, min(timeout_ceiling, configured_timeout))
         self._rpc_index = 0
         self._rpc_failures = [0 for _ in urls]
         self._rpc_cooldown_until = [0.0 for _ in urls]
@@ -129,6 +143,14 @@ class DirectDexAdapter:
         self._bound_rpc_cache[url] = (self.rpc_url, self.w3, self.aero, self.uni_quoter, self.uni_router, self.aave_pool, self.aero_factory, self.multicall3)
 
     @staticmethod
+    def _is_keyed_rpc_endpoint(url: str) -> bool:
+        """Detect a paid/keyed provider URL, ignoring public and demo keys."""
+        if not re.search(r"/(v2|v3)/[A-Za-z0-9_-]{8,}", url):
+            return False
+        tail = url.rstrip("/").rsplit("/", 1)[-1].lower()
+        return tail not in {"docs-demo", "demo", "your-key", "your_key", "yourkey"}
+
+    @staticmethod
     def _is_transient_rpc_error(exc: Exception) -> bool:
         msg = str(exc).lower()
         return any(x in msg for x in ("429", "too many requests", "rate limit", "rate limit exceeded", "usage limit", "reached the usage limit", "-32001", "gateway timeout", "timed out", "read timeout", "timeout", "temporarily unavailable", "503 service unavailable", "service unavailable", "connection reset", "connection aborted"))
@@ -160,12 +182,17 @@ class DirectDexAdapter:
                 # Do not sleep for the full provider cooldown inside a quote.
                 idx = min(remaining, key=lambda i: self._rpc_cooldown_until[i])
             else:
+                # Prefer keyed provider endpoints over the shared public RPC.
+                # The public endpoint is a last-resort fallback, so a leftover
+                # public URL in the pool must never lead the rotation.
+                keyed_ready = [i for i in ready if self._keyed_endpoints[i]]
+                candidates = keyed_ready or ready
                 # Round-robin across ready endpoints instead of pinning every
                 # successful request to the current endpoint. This is critical
                 # for shared/public RPC pools where one endpoint can return 429
                 # while another remains healthy.
                 with self._rpc_selection_lock:
-                    ordered = ready
+                    ordered = candidates
                     idx = next((i for i in ordered if i >= self._rpc_index), ordered[0])
                     self._rpc_index = (idx + 1) % len(self._rpc_urls)
             if deadline is not None and time.monotonic() >= deadline:
@@ -192,10 +219,14 @@ class DirectDexAdapter:
                     raise
                 self._rpc_failures[idx] += 1
                 # Public endpoints need a meaningful cool-down. Hammering a
-                # 429 endpoint every 250ms only extends the outage.
-                backoff = min(30.0, 5.0 * (2 ** min(self._rpc_failures[idx] - 1, 2)))
+                # 429 endpoint every 250ms only extends the outage. A keyed
+                # provider recovers quickly, so it should not be parked for
+                # 30s after one transient blip.
+                base_backoff = 1.5 if self._keyed_endpoints[idx] else 5.0
+                cap = 10.0 if self._keyed_endpoints[idx] else 30.0
+                backoff = min(cap, base_backoff * (2 ** min(self._rpc_failures[idx] - 1, 2)))
                 self._rpc_cooldown_until[idx] = time.monotonic() + backoff
-                logging.warning("RPC transient error endpoint=%s cooldown=%.2fs error=%s", idx, backoff, exc)
+                logging.warning("RPC transient error endpoint=%s keyed=%s cooldown=%.2fs error=%s", idx, self._keyed_endpoints[idx], backoff, exc)
                 self._rpc_index = (idx + 1) % len(self._rpc_urls)
         raise RpcRateLimitError(
             f"all configured Base RPC endpoints unavailable after {len(attempted)} fast attempts: {last_exc}"
