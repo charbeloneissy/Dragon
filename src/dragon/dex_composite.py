@@ -47,7 +47,7 @@ class CompositeDexAdapter:
     def quote_single_source(
         self, *, chain_id: int, sell_token: str, buy_token: str,
         sell_amount: int, taker: str, source: str, slippage_bps: int = 50,
-        deadline: float | None = None
+        deadline: float | None = None, probe: bool = False
     ):
         if source.startswith("0x:"):
             if self.zerox is None:
@@ -67,7 +67,7 @@ class CompositeDexAdapter:
             chain_id=chain_id, sell_token=sell_token, buy_token=buy_token,
             sell_amount=sell_amount, taker=taker, source=source,
             slippage_bps=slippage_bps,
-            deadline=deadline,
+            deadline=deadline, probe=probe,
         )
 
     def native_to_quote_rate(self, *, chain_id: int, quote_token: str,

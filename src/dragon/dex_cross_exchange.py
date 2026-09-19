@@ -245,6 +245,7 @@ class DexCrossExchangeEngine:
                     chain_id=chain_id, sell_token=quote_token, buy_token=base_token,
                     sell_amount=quote_amount, taker=taker, source=source, slippage_bps=slippage_bps,
                     deadline=time.perf_counter() + float(self.max_quote_latency_ms) / 1000.0,
+                    probe=True,
                 )
                 latency = self._quote_latency(quote)
                 if latency > self.max_quote_latency_ms:
@@ -281,6 +282,7 @@ class DexCrossExchangeEngine:
                         sell_amount=buy_execution.buy_amount, taker=taker, source=sell_source,
                         slippage_bps=slippage_bps,
                         deadline=time.perf_counter() + float(self.max_quote_latency_ms) / 1000.0,
+                        probe=True,
                     )
                     latency = self._quote_latency(sell_quote)
                     if latency > self.max_quote_latency_ms:
