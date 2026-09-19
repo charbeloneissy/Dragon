@@ -21,7 +21,7 @@ services:
       - key: DEX_OWN_CAPITAL_QUOTE
         value: "0"
       - key: DEX_FLASH_LOAN_LIQUIDITY_QUOTE
-        value: "100"
+        value: "1000"
       - key: DEX_QUOTE_TOKEN_DECIMALS
         value: "6"
       - key: DEX_MIN_NET_PROFIT
@@ -51,9 +51,15 @@ services:
       - key: ZEROX_SOURCES_CACHE_SECONDS
         value: "900"
       - key: DEX_0X_AGGREGATED
-        value: "true"
+        value: "false"
       - key: DEX_SOURCES
-        value: "Uniswap_V3,Aerodrome,0x:AGGREGATED"
+        value: "Uniswap_V3,Aerodrome"
+      - key: DEX_COMPOUND_PROFITS
+        value: "true"
+      - key: DEX_COMPOUND_RATIO
+        value: "1"
+      - key: DEX_MAX_COMPOUND_QUOTE
+        value: "100"
       - key: FLASH_LOAN_ENABLED
         value: "true"
       - key: FLASH_LOAN_FEE_BPS

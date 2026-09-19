@@ -8,18 +8,19 @@ interface IFlashLoanSimpleReceiver { function executeOperation(address asset,uin
 contract DragonAaveV3Executor is IFlashLoanSimpleReceiver {
     error NotOwner(); error NotPool(); error InvalidAsset(); error InvalidAmount(); error InvalidTarget(); error InvalidBlock(); error PreExistingBalance(); error FirstLegFailed(); error SecondLegFailed(); error FirstLegSlippage(); error SecondLegSlippage(); error RepaymentShortfall(); error ProfitTooSmall(); error TransferFailed(); error Reentrancy(); error ProfitRecipientMismatch();
     struct Call { address target; bytes data; address sellToken; address buyToken; address allowanceTarget; uint256 sellAmount; uint256 minBuyAmount; }
-    struct FlashParams { address owner; uint256 minProfit; uint256 maxBlockNumber; Call first; Call second; }
+    struct FlashParams { address owner; uint256 minProfit; uint256 maxBlockNumber; uint256 compoundAmount; bool compoundProfit; Call first; Call second; }
     address public immutable POOL; address public owner; bool private entered;
     event OwnershipTransferred(address indexed oldOwner,address indexed newOwner);
-    event FlashArbitrageExecuted(address indexed asset,uint256 amount,uint256 premium,uint256 profit,address indexed firstTarget,address indexed secondTarget);
+    event FlashArbitrageExecuted(address indexed asset,uint256 amount,uint256 premium,uint256 profit,uint256 compoundAmount,uint256 retainedProfit,address indexed firstTarget,address indexed secondTarget);
     modifier onlyOwner(){if(msg.sender!=owner)revert NotOwner();_;}
     modifier nonReentrant(){if(entered)revert Reentrancy();entered=true;_;entered=false;}
     constructor(address pool,address initialOwner){if(pool==address(0)||initialOwner==address(0))revert InvalidTarget();POOL=pool;owner=initialOwner;emit OwnershipTransferred(address(0),initialOwner);}
     function transferOwnership(address newOwner) external onlyOwner {if(newOwner==address(0))revert InvalidTarget();emit OwnershipTransferred(owner,newOwner);owner=newOwner;}
     function executeFlashArbitrage(address asset,uint256 amount,FlashParams calldata params) external onlyOwner nonReentrant {
         if(params.owner!=owner)revert ProfitRecipientMismatch();
+        if(!params.compoundProfit&&params.compoundAmount!=0)revert InvalidAmount();
         if(asset==address(0)||asset!=params.first.sellToken||asset!=params.second.buyToken)revert InvalidAsset();
-        if(amount==0||params.first.sellAmount!=amount)revert InvalidAmount(); if(params.maxBlockNumber<block.number)revert InvalidBlock();
+        if(amount==0||params.first.sellAmount!=amount+params.compoundAmount)revert InvalidAmount(); if(params.maxBlockNumber<block.number)revert InvalidBlock();
         _validateCall(params.first);_validateCall(params.second);if(params.first.buyToken!=params.second.sellToken)revert InvalidAsset();
         IAaveV3Pool(POOL).flashLoanSimple(address(this),asset,amount,abi.encode(params),0);
     }
@@ -28,11 +29,11 @@ contract DragonAaveV3Executor is IFlashLoanSimpleReceiver {
         FlashParams memory params=abi.decode(rawParams,(FlashParams));
         if(params.owner!=owner)revert ProfitRecipientMismatch();
         if(params.maxBlockNumber<block.number)revert InvalidBlock();
-        if(params.first.sellToken!=asset||params.second.buyToken!=asset||params.first.sellAmount!=amount)revert InvalidAsset();
+        if(params.first.sellToken!=asset||params.second.buyToken!=asset||params.first.sellAmount!=amount+params.compoundAmount)revert InvalidAsset();
         if(params.first.buyToken!=params.second.sellToken)revert InvalidAsset();_validateCall(params.first);_validateCall(params.second);
-        // Flash liquidity only: the executor must have had exactly the loan amount before the callback.
-        if(IERC20(asset).balanceOf(address(this))!=amount)revert PreExistingBalance();
-        _approve(params.first.sellToken,params.first.allowanceTarget,amount);
+        uint256 balanceAfterLoan=IERC20(asset).balanceOf(address(this));
+        if(balanceAfterLoan<amount||balanceAfterLoan-amount<params.compoundAmount)revert PreExistingBalance();
+        _approve(params.first.sellToken,params.first.allowanceTarget,amount+params.compoundAmount);
         uint256 baseBefore=IERC20(params.first.buyToken).balanceOf(address(this));
         (bool okFirst,)=params.first.target.call(params.first.data);if(!okFirst)revert FirstLegFailed();
         uint256 baseAfter=IERC20(params.first.buyToken).balanceOf(address(this));
@@ -43,10 +44,12 @@ contract DragonAaveV3Executor is IFlashLoanSimpleReceiver {
         (bool okSecond,)=params.second.target.call(params.second.data);if(!okSecond)revert SecondLegFailed();
         uint256 quoteAfterSecond=IERC20(asset).balanceOf(address(this));
         if(quoteAfterSecond<quoteBeforeSecond||quoteAfterSecond-quoteBeforeSecond<params.second.minBuyAmount)revert SecondLegSlippage();
-        uint256 repayment=amount+premium;if(quoteAfterSecond<repayment)revert RepaymentShortfall();
-        uint256 profit=quoteAfterSecond-repayment;if(profit<params.minProfit)revert ProfitTooSmall();
-        _approve(asset,POOL,repayment);if(profit>0)_safeTransfer(asset,params.owner,profit);
-        emit FlashArbitrageExecuted(asset,amount,premium,profit,params.first.target,params.second.target);return true;
+        uint256 repayment=amount+premium;uint256 roundTripOutput=quoteAfterSecond-quoteBeforeSecond;
+        if(roundTripOutput<repayment+params.compoundAmount)revert RepaymentShortfall();
+        uint256 profit=roundTripOutput-repayment-params.compoundAmount;if(profit<params.minProfit)revert ProfitTooSmall();
+        _approve(asset,POOL,repayment);uint256 retainedProfit=params.compoundProfit?profit:0;
+        if(!params.compoundProfit&&profit>0)_safeTransfer(asset,params.owner,profit);
+        emit FlashArbitrageExecuted(asset,amount,premium,profit,params.compoundAmount,retainedProfit,params.first.target,params.second.target);return true;
     }
     function rescueToken(address token,address to,uint256 amount) external onlyOwner {if(token==address(0)||to==address(0))revert InvalidTarget();_safeTransfer(token,to,amount);}
     function _validateCall(Call memory c) internal view {if(c.target==address(0)||c.target==POOL||c.allowanceTarget==address(0))revert InvalidTarget();if(c.sellToken==address(0)||c.buyToken==address(0)||c.sellToken==c.buyToken)revert InvalidAsset();if(c.sellAmount==0||c.minBuyAmount==0||c.data.length==0)revert InvalidAmount();}

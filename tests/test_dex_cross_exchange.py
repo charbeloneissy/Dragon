@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from src.dragon.dex import DexQuote
 from src.dragon.dex_0x import DexExecution
 from src.dragon.dex_cross_exchange import DexCrossExchangeEngine
 
@@ -26,7 +27,13 @@ class FakeAdapter:
             allowance_target=None,
             issues={},
         )
-        return type("Q", (), {"gas_quote": Decimal("0")})(), execution
+        quote = DexQuote(
+            chain="8453", venue=source, sell_token=sell_token, buy_token=buy_token,
+            sell_amount=Decimal(sell_amount), buy_amount=Decimal(buy_amount),
+            gas_native=Decimal("0"), gas_quote=Decimal("0"), fee_bps=Decimal("0"),
+            slippage_bps=Decimal("50"), latency_ms=Decimal("1"),
+        )
+        return quote, execution
 
 
 def test_cross_dex_requires_two_sources():

@@ -79,6 +79,10 @@ Dragon will not start live execution when credentials are missing, when `LIVE_TR
 
 A Binance API error `-2015` is an exchange-side credential, permission, or IP restriction failure. Code cannot manufacture a valid key. The Render secret must be a valid Binance Spot trading key with the required permissions and compatible IP restrictions.
 
+## DEX hybrid compounding
+
+The active Base DEX path can combine an Aave flash loan with a bounded quote-token reserve retained by the executor. Set `DEX_COMPOUND_PROFITS=true` to retain realized profit, `DEX_COMPOUND_RATIO` to select the fraction reused on the next trade, and `DEX_MAX_COMPOUND_QUOTE` to cap retained-profit exposure. The flash-loan portion is still borrowed and repaid atomically on every trade; a retained reserve does not remove the need for owner-wallet gas. The updated `FlashParams` ABI requires a newly deployed `DragonAaveV3Executor` before live use.
+
 ## Important limitation
 
 Triangular Spot arbitrage is sequential. There is no atomic three-leg order on Binance Spot, so market movement between legs remains execution risk. Dragon therefore sizes from current free USDT, uses depth-aware estimates, enforces strict stale-book and risk gates, and records every completed/error cycle.
