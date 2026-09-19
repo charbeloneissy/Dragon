@@ -45,7 +45,7 @@ class ZeroXAdapter:
 
     def __init__(self, api_key: str | None = None, timeout: float = 4.0):
         self.api_key = (api_key or os.getenv("ZEROX_API_KEY", "")).strip()
-        self.timeout = float(timeout)
+        self.timeout = max(0.15, min(0.45, float(timeout)))
         if self.timeout <= 0:
             raise ValueError("timeout must be positive")
         self.flash_loan_mode = os.getenv("FLASH_LOAN_ENABLED", "false").strip().lower() == "true"
