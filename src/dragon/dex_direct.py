@@ -191,10 +191,10 @@ class DirectDexAdapter:
             f"all configured Base RPC endpoints unavailable after {len(attempted)} fast attempts: {last_exc}"
         )
 
-    def _multicall(self, calls):
+    def _multicall(self, calls, deadline: float | None = None):
         if not self.multicall_enabled: raise RuntimeError("Multicall3 disabled")
         payload=[(self._addr(t),bool(a),d) for t,a,d in calls]
-        return self._rpc_call(lambda w3: self.multicall3.functions.aggregate3(payload).call())
+        return self._rpc_call(lambda w3: self.multicall3.functions.aggregate3(payload).call(), deadline=deadline)
 
     def _uni_calldata(self, token_in, token_out, amount, fee):
         return self.uni_quoter.encode_abi("quoteExactInputSingle", args=[(self._addr(token_in),self._addr(token_out),int(amount),int(fee),0)])
@@ -240,7 +240,7 @@ class DirectDexAdapter:
             fee_sets=[(f,) for f in self.uni_fees] if len(path)==2 else [(a,b) for a in self.uni_fees for b in self.uni_fees]
             if len(path)==2 and self.multicall_enabled:
                 try:
-                    results=self._multicall([(UNI_QUOTER_V2,True,self._uni_calldata(token_in,token_out,amount,f[0])) for f in fee_sets])
+                    results=self._multicall([(UNI_QUOTER_V2,True,self._uni_calldata(token_in,token_out,amount,f[0])) for f in fee_sets], deadline=deadline)
                     for fees,(success,data) in zip(fee_sets,results):
                         if not success: continue
                         d=self.w3.codec.decode(["uint256","uint160","uint32","uint256"],bytes(data)); out=int(d[0]); gas_est=int(d[3])
@@ -279,7 +279,7 @@ class DirectDexAdapter:
                     for flags in stable_sets:
                         route=[{"from":self._addr(path[i]),"to":self._addr(path[i+1]),"stable":bool(flags[i]),"factory":self._addr(factory)} for i in range(len(path)-1)]
                         routes.append(route); calls.append((AERO_ROUTER,True,self.aero.encode_abi("getAmountsOut",args=[int(amount),route])))
-                    results=self._multicall(calls)
+                    results=self._multicall(calls, deadline=deadline)
                     for route,(success,data) in zip(routes,results):
                         if not success: continue
                         out=int(self.w3.codec.decode(["uint256[]"],bytes(data))[0][-1])
@@ -301,32 +301,34 @@ class DirectDexAdapter:
         self._quote_cache[cache_key]=(now,best)
         logging.info("Aerodrome quote pair=%s->%s amount=%s out=%s multicall=%s",token_in,token_out,amount,best[0],self.multicall_enabled)
         return best
-    def _gas_price(self) -> int:
+    def _gas_price(self, deadline: float | None = None) -> int:
         now = time.monotonic()
         if self._gas_price_cache <= 0 or now - self._gas_price_cache_at >= 1.0:
-            self._gas_price_cache = int(self._rpc_call(lambda w3: w3.eth.gas_price))
+            self._gas_price_cache = int(self._rpc_call(lambda w3: w3.eth.gas_price, deadline=deadline))
             self._gas_price_cache_at = now
         return self._gas_price_cache
 
-    def quote_single_source(self, *, chain_id: int, sell_token: str, buy_token: str, sell_amount: int, taker: str, source: str, slippage_bps: int = 50):
+    def quote_single_source(self, *, chain_id: int, sell_token: str, buy_token: str, sell_amount: int, taker: str, source: str, slippage_bps: int = 50, deadline: float | None = None):
         started = time.perf_counter()
+        if deadline is None:
+            deadline = started + float(os.getenv("DEX_MAX_QUOTE_LATENCY_MS", "1000")) / 1000.0
         if int(chain_id) != 8453:
             raise ValueError("direct adapter supports Base only")
         if int(sell_amount) <= 0:
             raise ValueError("sell_amount must be positive")
         if source == "Uniswap_V3":
             quote_started = time.perf_counter()
-            out, path, fees, gas_limit, encoded_path = self._uni_quote(sell_token, buy_token, int(sell_amount))
+            out, path, fees, gas_limit, encoded_path = self._uni_quote(sell_token, buy_token, int(sell_amount), deadline=deadline)
             quote_latency_ms = (time.perf_counter() - quote_started) * 1000
-            gas_native = Decimal(gas_limit) * Decimal(self._gas_price())
+            gas_native = Decimal(gas_limit) * Decimal(self._gas_price(deadline=deadline))
             min_out = out * (10_000 - int(slippage_bps)) // 10_000
             deadline = int(time.time()) + self.deadline_seconds
             tx = (self.uni_router.functions.exactInputSingle((self._addr(sell_token), self._addr(buy_token), int(fees[0]), self._addr(taker), int(sell_amount), int(min_out), 0)) if len(path) == 2 else self.uni_router.functions.exactInput((encoded_path, self._addr(taker), int(sell_amount), int(min_out)))).build_transaction({"from": self._addr(taker), "value": 0, "gas": gas_limit, "gasPrice": self._gas_price()})
             execution = DexExecution(8453, "Uniswap_V3", "Uniswap_V3", UNI_SWAP_ROUTER, tx["data"], 0, gas_limit, self._gas_price(), sell_token, buy_token, int(sell_amount), out, UNI_SWAP_ROUTER, {"path": path, "fees": fees, "deadline": deadline})
-            return DexQuote("8453", "Uniswap_V3", sell_token, buy_token, Decimal(sell_amount), Decimal(out), gas_native, Decimal(0), Decimal("0"), Decimal(slippage_bps), Decimal(str(quote_latency_ms))), execution
+            return DexQuote("8453", "Uniswap_V3", sell_token, buy_token, Decimal(sell_amount), Decimal(out), gas_native, Decimal(0), Decimal("0"), Decimal(slippage_bps), Decimal(str((time.perf_counter() - started) * 1000))), execution
         if source == "Aerodrome":
             quote_started = time.perf_counter()
-            out, route, gas_limit, factory = self._aero_quote(sell_token, buy_token, int(sell_amount))
+            out, route, gas_limit, factory = self._aero_quote(sell_token, buy_token, int(sell_amount), deadline=deadline)
             quote_latency_ms = (time.perf_counter() - quote_started) * 1000
             gas_native = Decimal(gas_limit) * Decimal(self._gas_price())
             min_out = out * (10_000 - int(slippage_bps)) // 10_000
