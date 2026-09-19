@@ -49,12 +49,6 @@ class ZeroXAdapter:
         if self.timeout <= 0:
             raise ValueError("timeout must be positive")
         self.flash_loan_mode = os.getenv("FLASH_LOAN_ENABLED", "false").strip().lower() == "true"
-        # 0x Standard is approximately 5 requests/second across all endpoints.
-        # Pace at 4 RPS to leave headroom for retries and startup calls.
-        self.max_rps = max(1, min(5, int(os.getenv("ZEROX_MAX_RPS", "4"))))
-        self.window_started = time.monotonic()
-        self.window_calls = 0
-        self.rate_lock = threading.Lock()
         self.sources_ttl = max(30.0, float(os.getenv("ZEROX_SOURCES_CACHE_SECONDS", "900")))
         self.client = httpx.Client(timeout=self.timeout, headers={"Accept": "application/json", "0x-version": "v2", **({"0x-api-key": self.api_key} if self.api_key else {}), "User-Agent": "Dragon-Arbitrage/2.1"})
 
@@ -87,20 +81,6 @@ class ZeroXAdapter:
             raise RuntimeError(f"invalid non-negative numeric value for {name}")
         return result
 
-    def _pace(self) -> None:
-        """Stay below the provider fixed one-second request window."""
-        while True:
-            with self.rate_lock:
-                now = time.monotonic()
-                if now - self.window_started >= 1.0:
-                    self.window_started = now
-                    self.window_calls = 0
-                if self.window_calls < self.max_rps:
-                    self.window_calls += 1
-                    return
-                sleep_for = max(0.01, 1.0 - (now - self.window_started))
-            time.sleep(sleep_for)
-
     @staticmethod
     def _retry_after(response: httpx.Response | None) -> float:
         if response is not None:
@@ -115,34 +95,15 @@ class ZeroXAdapter:
     def _get(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.enabled:
             raise RuntimeError("ZEROX_API_KEY is not configured")
-        last_error = None
-        for attempt in range(4):
-            self._pace()
-            try:
-                response = self.client.get(url, params=params)
-                if response.status_code == 429:
-                    if attempt < 3:
-                        time.sleep(min(15.0, self._retry_after(response) * (2 ** attempt)))
-                        continue
-                response.raise_for_status()
-                payload = response.json()
-                if not isinstance(payload, dict):
-                    raise RuntimeError("0x returned a non-object response")
-                return payload
-            except httpx.HTTPStatusError as exc:
-                last_error = exc
-                if exc.response.status_code == 429 and attempt < 3:
-                    time.sleep(min(15.0, self._retry_after(exc.response) * (2 ** attempt)))
-                    continue
-                raise RuntimeError(f"0x API request failed: {exc}") from exc
-            except (httpx.HTTPError, ValueError) as exc:
-                last_error = exc
-                if attempt < 3:
-                    time.sleep(min(8.0, 0.5 * (2 ** attempt)))
-                    continue
-                raise RuntimeError(f"0x API request failed: {exc}") from exc
-        raise RuntimeError(f"0x API request failed after retries: {last_error}")
-
+        try:
+            response = self.client.get(url, params=params)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("0x returned a non-object response")
+            return payload
+        except (httpx.HTTPError, ValueError) as exc:
+            raise RuntimeError(f"0x API request failed: {exc}") from exc
     def sources(self, chain_id: int) -> tuple[str, ...]:
         if int(chain_id) <= 0:
             raise ValueError("chain_id must be positive")
