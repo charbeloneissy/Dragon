@@ -239,10 +239,13 @@ class BasePoolWebSocket:
                 continue
 
             if topic0 == init_topic and len(data) >= 64:
-                await self.state.apply_v3_slot(
-                    address,
-                    int.from_bytes(data[:32], "big"),
-                    0,
-                    int.from_bytes(data[32:64], "big", signed=True),
-                    block
-                )
+                snap = await self.state.snapshot()
+                p = snap.get(address)
+                if p:
+                    await self.state.apply_v3_slot(
+                        address,
+                        int.from_bytes(data[:32], "big"),
+                        p.state.liquidity,
+                        int.from_bytes(data[32:64], "big", signed=True),
+                        block
+                    )
