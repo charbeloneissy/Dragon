@@ -47,7 +47,7 @@ class DexCrossExchangeEngine:
         self.sources = tuple(dict.fromkeys(s.strip() for s in sources if s.strip()))
         self.min_profit = Decimal(min_profit)
         self.quote_token_decimals = quote_token_decimals
-        self.max_quote_latency_ms = min(Decimal("500"), Decimal(max_quote_latency_ms))
+        self.max_quote_latency_ms = Decimal(max_quote_latency_ms)
         self.safety_buffer_quote = Decimal(safety_buffer_quote)
         self.flash_loan_enabled = bool(flash_loan_enabled)
         self.flash_loan_fee_bps = Decimal(flash_loan_fee_bps)
