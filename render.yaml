@@ -5,7 +5,7 @@ services:
     region: frankfurt
     plan: free
     branch: main
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --no-cache-dir -r requirements.txt
     startCommand: python dex_cross_exchange_runner.py
     autoDeploy: true
     healthCheckPath: /health
@@ -33,7 +33,7 @@ services:
       - key: DEX_MAX_QUOTE_LATENCY_MS
         value: "1000"
       - key: DEX_POLL_SECONDS
-        value: "4.0"
+        value: "2.0"
       - key: DEX_MAX_QUOTE_CANDIDATES
         value: "4"
       - key: ZEROX_MAX_RPS
