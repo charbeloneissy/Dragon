@@ -342,17 +342,21 @@ class DexCrossExchangeEngine:
                 self._reject("gas_unpriced")
                 return
 
+            # Explicit two-leg round-trip accounting: quote -> base -> quote.
+            # Profit is measured only from the final quote-token amount versus
+            # the original quote-token amount, after both legs have been quoted.
+            round_trip_return = Decimal(final_amount) / Decimal(quote_amount)
             gross = Decimal(final_amount - quote_amount) / scale
             cost_quote = gas_cost_quote + flash_loan_fee_quote + self.safety_buffer_quote
             notional_quote = Decimal(quote_amount) / scale
-            gross_bps = (gross / notional_quote) * Decimal("10000") if notional_quote > 0 else Decimal("0")
+            gross_bps = (round_trip_return - Decimal("1")) * Decimal("10000")
             cost_bps = (cost_quote / notional_quote) * Decimal("10000") if notional_quote > 0 else Decimal("0")
             net_bps = gross_bps - cost_bps
             net = gross - cost_quote
             logging.info(
-                "DEX calc buy=%s sell=%s token=%s amount=%s bought=%s final=%s gross=%s gross_bps=%.3f cost=%s cost_bps=%.3f gas=%s flash_fee=%s safety=%s net=%s net_bps=%.3f",
+                "DEX ROUND_TRIP buy=%s sell=%s token=%s start_quote_raw=%s leg1_base_raw=%s leg2_quote_raw=%s return=%.8f gross=%s gross_bps=%.3f cost=%s cost_bps=%.3f gas=%s flash_fee=%s safety=%s net=%s net_bps=%.3f",
                 buy_source, source, base_token, quote_amount, buy_execution.buy_amount,
-                final_amount, gross, gross_bps, cost_quote, cost_bps,
+                final_amount, round_trip_return, gross, gross_bps, cost_quote, cost_bps,
                 gas_cost_quote, flash_loan_fee_quote, self.safety_buffer_quote,
                 net, net_bps,
             )
