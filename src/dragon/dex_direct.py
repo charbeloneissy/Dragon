@@ -60,6 +60,9 @@ class DirectDexAdapter:
         self._rpc_index = 0
         self._rpc_failures = [0 for _ in urls]
         self._rpc_cooldown_until = [0.0 for _ in urls]
+        # Endpoint selection is shared by concurrent quote workers. Protect the
+        # cursor so concurrent requests do not all hammer the same public RPC.
+        self._rpc_selection_lock = __import__("threading").Lock()
         self.rpc_url = ""
         self._bound_rpc_cache = {}
         startup_errors = []
@@ -147,7 +150,14 @@ class DirectDexAdapter:
                 # Do not sleep for the full provider cooldown inside a quote.
                 idx = min(remaining, key=lambda i: self._rpc_cooldown_until[i])
             else:
-                idx = self._rpc_index if self._rpc_index in ready else ready[0]
+                # Round-robin across ready endpoints instead of pinning every
+                # successful request to the current endpoint. This is critical
+                # for shared/public RPC pools where one endpoint can return 429
+                # while another remains healthy.
+                with self._rpc_selection_lock:
+                    ordered = ready
+                    idx = next((i for i in ordered if i >= self._rpc_index), ordered[0])
+                    self._rpc_index = (idx + 1) % len(self._rpc_urls)
             if deadline is not None and time.monotonic() >= deadline:
                 break
             attempted.add(idx)
