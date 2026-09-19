@@ -50,6 +50,8 @@ class DirectDexAdapter:
         if not urls:
             raise RuntimeError("DEX_RPC_URL is required for direct DEX mode")
         self._rpc_urls = urls
+        if len(urls) < 2:
+            logging.warning("Only one DEX_RPC endpoint configured; 429 resilience has no failover target")
         self._rpc_timeout = float(timeout)
         self._rpc_index = 0
         self._rpc_failures = [0 for _ in urls]
@@ -240,15 +242,20 @@ class DirectDexAdapter:
         for path_index, path in enumerate(paths):
             if path_index > 0 and best is not None and not self.deep_route_always:
                 break
-            for stable_flags in ([(False,), (True,)] if len(path) == 2 else [(False, False), (False, True), (True, False), (True, True)]):
+            stable_sets = ([(False,), (True,)] if len(path) == 2 else [(False, False), (False, True), (True, False), (True, True)])
+            def probe_aero(stable_flags):
                 route = [{"from": self._addr(path[i]), "to": self._addr(path[i+1]), "stable": bool(stable_flags[i]), "factory": self._addr(factory)} for i in range(len(path)-1)]
-                try:
-                    amounts = self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(AERO_ROUTER), abi=ROUTER_ABI).functions.getAmountsOut(int(amount), route).call())
-                    out = int(amounts[-1])
-                    if out > 0 and (best is None or out > best[0]):
-                        best = (out, tuple(route), self.aero_gas_limit + 60000 * (len(path)-1), self._addr(factory))
-                except Exception as exc:
-                    errors.append(f"path={len(path)} stable={stable_flags}: {type(exc).__name__}: {exc}")
+                amounts = self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(AERO_ROUTER), abi=ROUTER_ABI).functions.getAmountsOut(int(amount), route).call())
+                return stable_flags, route, int(amounts[-1])
+            with ThreadPoolExecutor(max_workers=min(4, len(stable_sets))) as pool:
+                futures = [pool.submit(probe_aero, stable_flags) for stable_flags in stable_sets]
+                for future in as_completed(futures):
+                    try:
+                        stable_flags, route, out = future.result()
+                        if out > 0 and (best is None or out > best[0]):
+                            best = (out, tuple(route), self.aero_gas_limit + 60000 * (len(path)-1), self._addr(factory))
+                    except Exception as exc:
+                        errors.append(f"path={len(path)} stable_probe: {type(exc).__name__}: {exc}")
         if best is None:
             detail = " | ".join(errors[-2:])
             logging.warning("Aerodrome quote failed pair=%s->%s amount=%s errors=%s", token_in, token_out, amount, detail)
