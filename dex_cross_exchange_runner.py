@@ -73,6 +73,14 @@ def env_decimal(name,default):
 
 def env_bool(name,default=False): return os.getenv(name,str(default)).strip().lower() in {"1","true","yes","on"}
 
+def quote_latency_ms(live):
+    latency=env_decimal("DEX_MAX_QUOTE_LATENCY_MS","1500")
+    if latency<=0: raise ValueError("DEX_MAX_QUOTE_LATENCY_MS must be positive")
+    if not live and latency<Decimal("1500"):
+        logging.warning("DEX_MAX_QUOTE_LATENCY_MS=%s is below the paper-mode minimum; using 1500",latency)
+        return Decimal("1500")
+    return latency
+
 def merge_rejections(stats):
     with LOCK:
         for key,value in stats.items(): STATE["rejections"][key]=int(value)
@@ -157,8 +165,8 @@ async def main():
         min_profit=env_decimal("DEX_MIN_NET_PROFIT","0.005"); safety=env_decimal("DEX_SAFETY_BUFFER","0.001")
         if min_profit<Decimal("0.005"): raise ValueError("DEX_MIN_NET_PROFIT cannot be below 0.005")
         if safety<0: raise ValueError("DEX_SAFETY_BUFFER cannot be negative")
-        slippage=int(os.getenv("DEX_SLIPPAGE_BPS","50")); latency=env_decimal("DEX_MAX_QUOTE_LATENCY_MS","500")
-        if not 0<=slippage<=5000 or latency<=0: raise ValueError("invalid slippage/latency configuration")
+        slippage=int(os.getenv("DEX_SLIPPAGE_BPS","50")); latency=quote_latency_ms(live)
+        if not 0<=slippage<=5000: raise ValueError("invalid slippage/latency configuration")
         flash_enabled=env_bool("FLASH_LOAN_ENABLED",False) and own_capital==0; configured_fee=env_decimal("FLASH_LOAN_FEE_BPS","0")
         if live:
             if not flash_enabled: raise RuntimeError("LIVE_TRADING requires FLASH_LOAN_ENABLED=true")
