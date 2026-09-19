@@ -27,6 +27,11 @@ class LegMeasurement:
     fee_quote: D
     impact_bps: D
 
+    @property
+    def output_base(self) -> D:
+        """Compatibility alias for callers that consume leg output directly."""
+        return self.net_output
+
 
 @dataclass(frozen=True)
 class TriangleMeasurement:

@@ -136,11 +136,19 @@ def _ticker_volumes(client):
 
 
 def _select_stream_universe(triangles, volumes, cap):
+    def ordered_symbols(rows):
+        seen, result = set(), []
+        for triangle in rows:
+            for symbol in triangle.symbols:
+                if symbol not in seen:
+                    seen.add(symbol)
+                    result.append(symbol)
+        return result
+
     if not triangles:
         return [], []
     if int(cap) <= 0:
-        symbols = sorted({s for triangle in triangles for s in triangle.symbols})
-        return list(triangles), symbols
+        return list(triangles), ordered_symbols(triangles)
     cap = max(3, int(cap))
     ranked = sorted(triangles, key=lambda t: sum((volumes.get(s, Decimal("0")) for s in t.symbols), Decimal("0")), reverse=True)
     selected_symbols, selected_triangles = set(), []
@@ -155,7 +163,7 @@ def _select_stream_universe(triangles, volumes, cap):
     if not selected_triangles:
         selected_triangles = [ranked[0]]
         selected_symbols = set(ranked[0].symbols)
-    return selected_triangles, sorted(selected_symbols)
+    return selected_triangles, ordered_symbols(selected_triangles)
 
 
 async def _refresh_balance(client):

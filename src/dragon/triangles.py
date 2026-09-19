@@ -152,6 +152,13 @@ def evaluate_triangle(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=Non
     for i, symbol in enumerate(t.symbols):
         meta = symbol_meta.get(symbol)
         if not meta:
+            normalized = symbol.replace("/", "").replace("-", "").replace("_", "").upper()
+            src, dst = t.assets[i], t.assets[(i + 1) % 3]
+            if normalized == f"{dst}{src}".upper():
+                meta = (dst, src)
+            elif normalized == f"{src}{dst}".upper():
+                meta = (src, dst)
+        if not meta:
             return None
         src = t.assets[i]
         dst = t.assets[(i + 1) % 3]

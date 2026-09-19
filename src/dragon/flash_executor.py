@@ -10,11 +10,50 @@ from web3 import Web3
 from web3.contract import Contract
 
 
+_CALL_COMPONENTS = [
+    {"internalType": "address", "name": "target", "type": "address"},
+    {"internalType": "bytes", "name": "data", "type": "bytes"},
+    {"internalType": "address", "name": "sellToken", "type": "address"},
+    {"internalType": "address", "name": "buyToken", "type": "address"},
+    {"internalType": "address", "name": "allowanceTarget", "type": "address"},
+    {"internalType": "uint256", "name": "sellAmount", "type": "uint256"},
+    {"internalType": "uint256", "name": "minBuyAmount", "type": "uint256"},
+]
+_FLASH_PARAMS_COMPONENTS = [
+    {"internalType": "address", "name": "owner", "type": "address"},
+    {"internalType": "uint256", "name": "minProfit", "type": "uint256"},
+    {"internalType": "uint256", "name": "maxBlockNumber", "type": "uint256"},
+    {"internalType": "uint256", "name": "compoundAmount", "type": "uint256"},
+    {"internalType": "bool", "name": "compoundProfit", "type": "bool"},
+    {"components": _CALL_COMPONENTS, "internalType": "struct DragonAaveV3Executor.Call", "name": "first", "type": "tuple"},
+    {"components": _CALL_COMPONENTS, "internalType": "struct DragonAaveV3Executor.Call", "name": "second", "type": "tuple"},
+]
 EXECUTOR_ABI = [
-    {"inputs":[{"internalType":"address","name":"asset","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"},{"components":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"uint256","name":"minProfit","type":"uint256"},{"internalType":"uint256","name":"maxBlockNumber","type":"uint256"},{"components":[{"internalType":"address","name":"target","type":"address"},{"internalType":"bytes","name":"data","type":"bytes"},{"internalType":"address","name":"sellToken","type":"address"},{"internalType":"address","name":"buyToken","type":"address"},{"internalType":"address","name":"allowanceTarget","type":"address"},{"internalType":"uint256","name":"sellAmount","type":"uint256"},{"internalType":"uint256","name":"minBuyAmount","type":"uint256"}],"internalType":"struct DragonAaveV3Executor.Call","name":"first","type":"tuple"},{"components":[{"internalType":"address","name":"target","type":"address"},{"internalType":"bytes","name":"data","type":"bytes"},{"internalType":"address","name":"sellToken","type":"address"},{"internalType":"address","name":"buyToken","type":"address"},{"internalType":"address","name":"allowanceTarget","type":"address"},{"internalType":"uint256","name":"sellAmount","type":"uint256"},{"internalType":"uint256","name":"minBuyAmount","type":"uint256"}],"internalType":"struct DragonAaveV3Executor.Call","name":"second","type":"tuple"}],"internalType":"struct DragonAaveV3Executor.FlashParams","name":"params","type":"tuple"}],"name":"executeFlashArbitrage","outputs":[],"stateMutability":"nonpayable","type":"function"}
+    {"inputs": [
+        {"internalType": "address", "name": "asset", "type": "address"},
+        {"internalType": "uint256", "name": "amount", "type": "uint256"},
+        {"components": _FLASH_PARAMS_COMPONENTS, "internalType": "struct DragonAaveV3Executor.FlashParams", "name": "params", "type": "tuple"},
+    ], "name": "executeFlashArbitrage", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+    {"anonymous": False, "inputs": [
+        {"indexed": True, "internalType": "address", "name": "asset", "type": "address"},
+        {"indexed": False, "internalType": "uint256", "name": "amount", "type": "uint256"},
+        {"indexed": False, "internalType": "uint256", "name": "premium", "type": "uint256"},
+        {"indexed": False, "internalType": "uint256", "name": "profit", "type": "uint256"},
+        {"indexed": False, "internalType": "uint256", "name": "compoundAmount", "type": "uint256"},
+        {"indexed": False, "internalType": "uint256", "name": "retainedProfit", "type": "uint256"},
+        {"indexed": True, "internalType": "address", "name": "firstTarget", "type": "address"},
+        {"indexed": True, "internalType": "address", "name": "secondTarget", "type": "address"},
+    ], "name": "FlashArbitrageExecuted", "type": "event"},
 ]
 ERC20_ABI = [{"constant":True,"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
 AAVE_POOL_ABI = [{"inputs":[],"name":"FLASHLOAN_PREMIUM_TOTAL","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"}]
+
+
+class FlashTransactionReverted(RuntimeError):
+    def __init__(self, tx_hash: str, receipt: Any):
+        super().__init__(f"flash transaction reverted: {tx_hash}")
+        self.tx_hash = tx_hash
+        self.receipt = dict(receipt)
 
 
 @dataclass(frozen=True)
@@ -31,6 +70,7 @@ class FlashExecutorConfig:
     max_fee_multiplier: Decimal = Decimal("1.20")
     max_priority_fee_gwei: Decimal = Decimal("0.001")
     mev_required: bool = True
+    compound_profits: bool = True
 
     @classmethod
     def from_env(cls) -> "FlashExecutorConfig":
@@ -54,6 +94,7 @@ class FlashExecutorConfig:
             gas_limit=int(os.getenv("DEX_EXECUTOR_GAS_LIMIT", "0")) or None,
             max_fee_multiplier=multiplier, max_priority_fee_gwei=Decimal(os.getenv("DEX_MAX_PRIORITY_FEE_GWEI", "0.001")),
             mev_required=os.getenv("MEV_PROTECTION_REQUIRED", "true").lower() in {"1","true","yes","on"},
+            compound_profits=os.getenv("DEX_COMPOUND_PROFITS", "true").lower() in {"1","true","yes","on"},
         )
 
 
@@ -79,6 +120,10 @@ class AaveFlashExecutor:
         token_contract = self.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
         return int(token_contract.functions.balanceOf(self.config.pool_address).call())
 
+    def compound_balance_units(self, token: str) -> int:
+        token_contract = self.w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
+        return int(token_contract.functions.balanceOf(self.config.executor_address).call())
+
     def flash_loan_fee_bps(self) -> Decimal:
         """Read Aave V3 FLASHLOAN_PREMIUM_TOTAL as basis points.
 
@@ -101,20 +146,27 @@ class AaveFlashExecutor:
         )
 
     def build_and_send(self, opportunity: Any, *, max_block_number: int) -> str:
-        if opportunity.quote_amount <= 0:
+        total_amount = int(opportunity.quote_amount)
+        compound_amount = int(getattr(opportunity, "compound_amount", 0))
+        flash_amount = total_amount - compound_amount
+        if total_amount <= 0 or flash_amount <= 0:
             raise ValueError("flash amount must be positive")
+        if compound_amount < 0:
+            raise ValueError("compound amount cannot be negative")
+        if compound_amount and not self.config.compound_profits:
+            raise ValueError("compound amount requires DEX_COMPOUND_PROFITS=true")
         if opportunity.net_profit_quote < self.config.min_profit_quote:
             raise ValueError("opportunity is below minimum net profit")
         if max_block_number < self.w3.eth.block_number:
             raise ValueError("max_block_number is already expired")
         if opportunity.first_leg.value != 0 or opportunity.second_leg.value != 0:
             raise ValueError("native-value DEX calls are disabled for atomic ERC20 flash execution")
-        if opportunity.first_leg.sell_amount != opportunity.quote_amount:
-            raise ValueError("first leg sell amount does not match flash amount")
+        if opportunity.first_leg.sell_amount != total_amount:
+            raise ValueError("first leg sell amount does not match total flash-plus-compound amount")
         if opportunity.first_leg.buy_amount < opportunity.second_leg.sell_amount:
             raise ValueError("second leg attempts to sell more base than the first leg produces")
-        if opportunity.second_leg.buy_amount < opportunity.quote_amount:
-            raise ValueError("second leg quote output is below the flash principal")
+        if opportunity.second_leg.buy_amount < total_amount:
+            raise ValueError("second leg quote output is below the total principal")
 
         scale = Decimal(10) ** self.config.quote_token_decimals
         gas_reserve = Decimal(str(getattr(opportunity, "gas_cost_quote", 0)))
@@ -125,10 +177,11 @@ class AaveFlashExecutor:
 
         params = (
             self.config.owner_address, int(required_profit * scale), int(max_block_number),
+            compound_amount, self.config.compound_profits,
             self._call(opportunity.first_leg), self._call(opportunity.second_leg),
         )
         fn = self.contract.functions.executeFlashArbitrage(
-            Web3.to_checksum_address(opportunity.quote_token), int(opportunity.quote_amount), params
+            Web3.to_checksum_address(opportunity.quote_token), flash_amount, params
         )
         nonce = self.w3.eth.get_transaction_count(self.account.address, "pending")
         latest = self.w3.eth.get_block("latest")
@@ -138,11 +191,42 @@ class AaveFlashExecutor:
         tx: dict[str, Any] = {"from":self.account.address,"nonce":nonce,"chainId":self.config.chain_id,"maxFeePerGas":max_fee,"maxPriorityFeePerGas":priority,"value":0}
         tx.update(fn.build_transaction(tx))
         tx["gas"] = self.config.gas_limit or int(self.w3.eth.estimate_gas(tx) * Decimal("1.10"))
+        # estimate_gas is not enough for lifecycle observability. Run the exact
+        # calldata through eth_call immediately before signing so a later record
+        # can distinguish simulation failure from submission failure.
+        self.w3.eth.call({
+            "from": self.account.address,
+            "to": self.config.executor_address,
+            "data": tx["data"],
+            "value": 0,
+            "gas": tx["gas"],
+            "maxFeePerGas": tx["maxFeePerGas"],
+            "maxPriorityFeePerGas": tx["maxPriorityFeePerGas"],
+        })
         signed = self.account.sign_transaction(tx)
         return self.w3.eth.send_raw_transaction(signed.raw_transaction).hex()
 
     def wait_for_success(self, tx_hash: str, timeout: int = 30) -> dict[str, Any]:
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
         if int(receipt.get("status", 0)) != 1:
-            raise RuntimeError(f"flash transaction reverted: {tx_hash}")
-        return dict(receipt)
+            reverted = dict(receipt)
+            gas_used = int(receipt.get("gasUsed", 0) or 0)
+            gas_price = int(receipt.get("effectiveGasPrice", receipt.get("gasPrice", 0)) or 0)
+            reverted["gas_cost_native"] = str(gas_used * gas_price)
+            raise FlashTransactionReverted(tx_hash, reverted)
+        result = dict(receipt)
+        gas_used = int(receipt.get("gasUsed", 0) or 0)
+        gas_price = int(receipt.get("effectiveGasPrice", receipt.get("gasPrice", 0)) or 0)
+        result["gas_cost_native"] = str(gas_used * gas_price)
+        try:
+            events = self.contract.events.FlashArbitrageExecuted().process_receipt(receipt)
+            if events:
+                result["arb_profit_raw"] = str(events[-1]["args"].get("profit", 0))
+                result["arb_premium_raw"] = str(events[-1]["args"].get("premium", 0))
+                result["compound_amount_raw"] = str(events[-1]["args"].get("compoundAmount", 0))
+                result["retained_profit_raw"] = str(events[-1]["args"].get("retainedProfit", 0))
+        except Exception:
+            # A successful receipt without the executor event is still included,
+            # but the dashboard must show that realized token proceeds are unknown.
+            pass
+        return result
