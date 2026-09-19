@@ -55,8 +55,8 @@ class DirectDexAdapter:
         self._rpc_urls = urls
         if len(urls) < 2:
             logging.warning("Only one DEX_RPC endpoint configured; 429 resilience has no failover target")
-        self._rpc_timeout = float(os.getenv("DEX_RPC_TIMEOUT_SECONDS", str(timeout)))
-        self._rpc_timeout = max(0.75, min(4.0, self._rpc_timeout))
+        self._rpc_timeout = float(os.getenv("DEX_RPC_TIMEOUT_SECONDS", "0.40"))
+        self._rpc_timeout = max(0.15, min(0.45, self._rpc_timeout))
         self._rpc_index = 0
         self._rpc_failures = [0 for _ in urls]
         self._rpc_cooldown_until = [0.0 for _ in urls]
@@ -130,13 +130,13 @@ class DirectDexAdapter:
         msg = str(exc).lower()
         return any(x in msg for x in ("429", "too many requests", "rate limit", "rate limit exceeded", "usage limit", "reached the usage limit", "-32001", "gateway timeout", "timed out", "read timeout", "timeout", "temporarily unavailable", "503 service unavailable", "service unavailable", "connection reset", "connection aborted"))
 
-    def _rpc_call(self, fn):
+    def _rpc_call(self, fn, deadline: float | None = None):
         # Fail fast across the endpoint pool. Never spend several seconds
         # retrying rate-limited public RPCs inside a single quote, because that
         # turns a transient 429 into a false 6-10s quote-latency failure.
         last_exc = None
         attempted = set()
-        max_attempts = max(1, min(len(self._rpc_urls), int(os.getenv("DEX_RPC_MAX_ATTEMPTS", "3"))))
+        max_attempts = max(1, min(len(self._rpc_urls), int(os.getenv("DEX_RPC_MAX_ATTEMPTS", "2"))))
         for _ in range(max_attempts):
             now = time.monotonic()
             ready = [i for i in range(len(self._rpc_urls)) if i not in attempted and self._rpc_cooldown_until[i] <= now]
@@ -148,6 +148,8 @@ class DirectDexAdapter:
                 idx = min(remaining, key=lambda i: self._rpc_cooldown_until[i])
             else:
                 idx = self._rpc_index if self._rpc_index in ready else ready[0]
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             attempted.add(idx)
             self._rpc_index = idx
             if self.rpc_url != self._rpc_urls[idx]:
@@ -158,6 +160,8 @@ class DirectDexAdapter:
                     self._rpc_cooldown_until[idx] = time.monotonic() + 10.0
                     continue
             try:
+                if deadline is not None and time.monotonic() + self._rpc_timeout > deadline:
+                    raise RpcRateLimitError("RPC call skipped: quote deadline exhausted")
                 with RPC_CONCURRENCY_SEMAPHORE:
                     result = fn(self.w3)
                 self._rpc_failures[idx] = 0
@@ -214,7 +218,7 @@ class DirectDexAdapter:
             if i < len(fees): data.extend(int(fees[i]).to_bytes(3, "big"))
         return "0x" + data.hex()
 
-    def _uni_quote(self, token_in: str, token_out: str, amount: int):
+    def _uni_quote(self, token_in: str, token_out: str, amount: int, deadline: float | None = None):
         cache_key=("uni",token_in.lower(),token_out.lower(),int(amount)); now=time.monotonic()
         cached=self._quote_cache.get(cache_key)
         if cached and now-cached[0] < self._quote_cache_ttl: return cached[1]
@@ -236,7 +240,7 @@ class DirectDexAdapter:
                 def quote_fee(fees):
                     encoded=self._encode_uni_path(path,fees)
                     if len(path)==2: result=self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2),abi=UNI_QUOTER_ABI).functions.quoteExactInputSingle((self._addr(token_in),self._addr(token_out),int(amount),int(fees[0]),0)).call())
-                    else: result=self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2),abi=UNI_QUOTER_ABI).functions.quoteExactInput(encoded,int(amount)).call())
+                    else: result=self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2),abi=UNI_QUOTER_ABI).functions.quoteExactInput(encoded,int(amount)).call(), deadline=deadline)
                     return fees,encoded,result
                 with ThreadPoolExecutor(max_workers=min(4,len(fee_sets))) as pool:
                     futures=[pool.submit(quote_fee,fees) for fees in fee_sets]
@@ -249,7 +253,7 @@ class DirectDexAdapter:
         self._quote_cache[cache_key]=(now,best)
         logging.info("Uniswap V3 quote pair=%s->%s amount=%s out=%s fees=%s multicall=%s",token_in,token_out,amount,best[0],best[2],self.multicall_enabled)
         return best
-    def _aero_quote(self, token_in: str, token_out: str, amount: int):
+    def _aero_quote(self, token_in: str, token_out: str, amount: int, deadline: float | None = None):
         cache_key=("aero",token_in.lower(),token_out.lower(),int(amount)); now=time.monotonic()
         cached=self._quote_cache.get(cache_key)
         if cached and now-cached[0] < self._quote_cache_ttl: return cached[1]
@@ -274,7 +278,7 @@ class DirectDexAdapter:
             if best is None:
                 def probe(flags):
                     route=[{"from":self._addr(path[i]),"to":self._addr(path[i+1]),"stable":bool(flags[i]),"factory":self._addr(factory)} for i in range(len(path)-1)]
-                    amounts=self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(AERO_ROUTER),abi=ROUTER_ABI).functions.getAmountsOut(int(amount),route).call())
+                    amounts=self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(AERO_ROUTER),abi=ROUTER_ABI).functions.getAmountsOut(int(amount),route).call(), deadline=deadline)
                     return route,int(amounts[-1])
                 with ThreadPoolExecutor(max_workers=min(4,len(stable_sets))) as pool:
                     futures=[pool.submit(probe,s) for s in stable_sets]
