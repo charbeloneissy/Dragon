@@ -55,16 +55,19 @@ class CompositeDexAdapter:
                 return self.zerox.quote(
                     chain_id=chain_id, sell_token=sell_token, buy_token=buy_token,
                     sell_amount=sell_amount, taker=taker, slippage_bps=slippage_bps,
+                    deadline=deadline,
                 )
             return self.zerox.quote_single_source(
                 chain_id=chain_id, sell_token=sell_token, buy_token=buy_token,
                 sell_amount=sell_amount, taker=taker, source=underlying,
                 slippage_bps=slippage_bps,
+                deadline=deadline,
             )
         return self.direct.quote_single_source(
             chain_id=chain_id, sell_token=sell_token, buy_token=buy_token,
             sell_amount=sell_amount, taker=taker, source=source,
             slippage_bps=slippage_bps,
+            deadline=deadline,
         )
 
     def native_to_quote_rate(self, *, chain_id: int, quote_token: str,
