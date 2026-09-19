@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal
 
 from web3 import Web3
@@ -196,16 +197,22 @@ class DirectDexAdapter:
             if path_index > 0 and best is not None and not self.deep_route_always:
                 break
             fee_sets = [(f,) for f in self.uni_fees] if len(path) == 2 else [(a,b) for a in self.uni_fees for b in self.uni_fees]
-            for fees in fee_sets:
-                try:
-                    encoded = self._encode_uni_path(path, fees)
-                    if len(path) == 2:
-                        result = self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2), abi=UNI_QUOTER_ABI).functions.quoteExactInputSingle((self._addr(token_in), self._addr(token_out), int(amount), int(fees[0]), 0)).call())
-                    else:
-                        result = self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2), abi=UNI_QUOTER_ABI).functions.quoteExactInput(encoded, int(amount)).call())
-                    out = int(result[0]); gas_est = int(result[-1])
-                    if out > 0 and (best is None or out > best[0]): best = (out, tuple(path), tuple(fees), gas_est, encoded)
-                except Exception as exc: errors.append(f"path={len(path)} fees={fees}: {type(exc).__name__}: {exc}")
+            def quote_fee(fees):
+                encoded = self._encode_uni_path(path, fees)
+                if len(path) == 2:
+                    result = self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2), abi=UNI_QUOTER_ABI).functions.quoteExactInputSingle((self._addr(token_in), self._addr(token_out), int(amount), int(fees[0]), 0)).call())
+                else:
+                    result = self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2), abi=UNI_QUOTER_ABI).functions.quoteExactInput(encoded, int(amount)).call())
+                return fees, encoded, result
+            with ThreadPoolExecutor(max_workers=min(4, len(fee_sets))) as pool:
+                futures = [pool.submit(quote_fee, fees) for fees in fee_sets]
+                for future in as_completed(futures):
+                    try:
+                        fees, encoded, result = future.result()
+                        out = int(result[0]); gas_est = int(result[-1])
+                        if out > 0 and (best is None or out > best[0]): best = (out, tuple(path), tuple(fees), gas_est, encoded)
+                    except Exception as exc:
+                        errors.append(f"path={len(path)} fee_probe: {type(exc).__name__}: {exc}")
         if best is None:
             detail = " | ".join(errors[-4:])
             logging.warning("Uniswap V3 quote failed pair=%s->%s amount=%s errors=%s", token_in, token_out, amount, detail)
