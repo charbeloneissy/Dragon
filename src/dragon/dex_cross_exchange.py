@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Iterable
@@ -34,7 +34,7 @@ class DexOpportunity:
 class DexCrossExchangeEngine:
     """Two-leg cross-DEX scanner with conservative net-profit accounting."""
 
-    def __init__(self, adapter, sources: Iterable[str], min_profit: Decimal = Decimal("0.005"), quote_token_decimals: int = 6, max_quote_latency_ms: Decimal = Decimal("1000"), safety_buffer_quote: Decimal = Decimal("0.001"), flash_loan_enabled: bool = False, flash_loan_fee_bps: Decimal = Decimal("0"), native_to_quote_rate: Decimal = Decimal("0"), min_net_bps: Decimal = Decimal("15")):
+    def __init__(self, adapter, sources: Iterable[str], min_profit: Decimal = Decimal("0.005"), quote_token_decimals: int = 6, max_quote_latency_ms: Decimal = Decimal("500"), safety_buffer_quote: Decimal = Decimal("0.001"), flash_loan_enabled: bool = False, flash_loan_fee_bps: Decimal = Decimal("0"), native_to_quote_rate: Decimal = Decimal("0"), min_net_bps: Decimal = Decimal("15")):
         if quote_token_decimals < 0 or quote_token_decimals > 36: raise ValueError("quote_token_decimals must be between 0 and 36")
         if Decimal(min_profit) < Decimal("0.005"): raise ValueError("min_profit cannot be below 0.005")
         if Decimal(max_quote_latency_ms) <= 0: raise ValueError("max_quote_latency_ms must be positive")
@@ -47,7 +47,7 @@ class DexCrossExchangeEngine:
         self.sources = tuple(dict.fromkeys(s.strip() for s in sources if s.strip()))
         self.min_profit = Decimal(min_profit)
         self.quote_token_decimals = quote_token_decimals
-        self.max_quote_latency_ms = Decimal(max_quote_latency_ms)
+        self.max_quote_latency_ms = min(Decimal("500"), Decimal(max_quote_latency_ms))
         self.safety_buffer_quote = Decimal(safety_buffer_quote)
         self.flash_loan_enabled = bool(flash_loan_enabled)
         self.flash_loan_fee_bps = Decimal(flash_loan_fee_bps)
@@ -358,9 +358,10 @@ class DexCrossExchangeEngine:
         # All venue quotes are independent. Run them concurrently with a bounded worker pool
         # so adding venues improves coverage without creating unbounded threads.
         max_quote_workers = max(2, min(len(self.sources), int(os.getenv("DEX_QUOTE_CONCURRENCY", "2"))))
-        with ThreadPoolExecutor(max_workers=max_quote_workers) as pool:
-            futures = [pool.submit(_buy, source) for source in self.sources]
-            for future in as_completed(futures):
+        pool = ThreadPoolExecutor(max_workers=max_quote_workers)
+        futures = [pool.submit(_buy, source) for source in self.sources]
+        done, pending = wait(futures, timeout=float(self.max_quote_latency_ms) / 1000)
+        for future in done:
                 source = "unknown"
                 try:
                     source, (quote, execution) = future.result()
@@ -383,6 +384,11 @@ class DexCrossExchangeEngine:
                 if execution.buy_amount <= 0:
                     self._reject("buy_zero_output"); continue
                 buy_quotes[source] = (quote, execution)
+
+        if pending:
+            self._reject("buy_quote_timeout")
+            logging.info("DEX buy quote deadline expired pending=%s limit_ms=%s", len(pending), self.max_quote_latency_ms)
+        pool.shutdown(wait=False, cancel_futures=True)
 
         sell_jobs = []
         for buy_source, (buy_quote, buy_execution) in buy_quotes.items():
