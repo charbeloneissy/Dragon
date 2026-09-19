@@ -54,8 +54,12 @@ class DexCrossExchangeEngine:
         self.min_net_bps = Decimal(os.getenv("DEX_MIN_NET_BPS", str(min_net_bps)))
         # Keep isolated RPC/Web3 adapters alive across scans. Rebuilding them per
         # candidate caused repeated chain/factory discovery and added avoidable latency.
+        # Reuse the already-connected adapter by default. Fresh Web3 adapters perform
+        # chain-id/factory RPC calls during initialization and can overwhelm public RPCs.
+        # Isolation remains available for debugging with DEX_ISOLATE_QUOTE_ADAPTERS=true.
         self._quote_adapters: dict[str, object] = {}
-        if hasattr(adapter, "clone_for_concurrent_quotes"):
+        isolate = os.getenv("DEX_ISOLATE_QUOTE_ADAPTERS", "false").strip().lower() in {"1", "true", "yes", "on"}
+        if isolate and hasattr(adapter, "clone_for_concurrent_quotes"):
             for source in self.sources:
                 try:
                     self._quote_adapters[source] = adapter.clone_for_concurrent_quotes()
@@ -63,7 +67,7 @@ class DexCrossExchangeEngine:
                     logging.warning("DEX adapter clone failed source=%s; falling back to shared adapter: %s", source, exc)
         if not self._quote_adapters:
             self._quote_adapters = {source: adapter for source in self.sources}
-        self._isolated_quote_adapters = all(self._quote_adapters.get(source) is not adapter for source in self.sources)
+        self._isolated_quote_adapters = isolate and all(self._quote_adapters.get(source) is not adapter for source in self.sources)
         self.last_rejections: dict[str, int] = {}
 
     def _reject(self, reason: str) -> None:
