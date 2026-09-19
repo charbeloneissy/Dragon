@@ -35,6 +35,10 @@ services:
       - key: DEX_POLL_SECONDS
         value: "1.0"
       - key: DEX_MAX_QUOTE_CANDIDATES
+        value: "8"
+      - key: DEX_OPTIMIZER_RADIUS
+        value: "0.25"
+      - key: DEX_OPTIMIZER_STEPS
         value: "4"
       - key: DEX_RPC_MAX_ATTEMPTS
         value: "4"
