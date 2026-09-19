@@ -369,6 +369,12 @@ class DexCrossExchangeEngine:
             if not net.is_finite():
                 self._reject("nonfinite_net_profit")
                 return
+            # Explicitly classify negative crosses for telemetry. These are
+            # observations, not trade signals, and never bypass profit gates.
+            if gross <= 0:
+                self._reject("cross_gross_negative")
+            elif net <= 0:
+                self._reject("cross_net_negative_after_costs")
             if net < self.min_profit:
                 self._reject("net_profit_below_min")
                 return
