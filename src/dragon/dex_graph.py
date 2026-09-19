@@ -8,7 +8,7 @@ from typing import Iterable
 
 @dataclass(frozen=True)
 class DexGraphEdge:
-    """Executable, size-specific quote edge for route discovery."""
+    """Executable, size-specific quote edge for fast route discovery."""
     source: str
     venue: str
     sell_token: str
@@ -28,7 +28,6 @@ class DexGraphEdge:
         rate = self.rate
         if rate <= 0 or not rate.is_finite():
             return math.inf
-        # Product(rate) > 1 is equivalent to sum(-ln(rate)) < 0.
         return -math.log(float(rate))
 
 
@@ -40,16 +39,21 @@ class DexNegativeCycle:
 
 
 class DexGraph:
-    """Bellman-Ford candidate discovery over executable DEX quote edges.
+    """Fast Bellman-Ford discovery over executable DEX quote edges.
 
-    Tokens are graph nodes and venue stays on each edge. This deliberately
-    allows a cycle to switch venues between legs, which is required for
-    cross-DEX arbitrage. The result is only a candidate: the full route must
-    be re-quoted and pass Dragon's existing net-profit/latency safety gates.
+    This is a discovery/prioritization layer only. Every returned cycle must
+    be re-quoted through Dragon's normal execution path and pass latency,
+    gas, slippage, minimum-net-profit and execution-safety gates.
     """
 
     def __init__(self, edges: Iterable[DexGraphEdge] = ()):
         self.edges = tuple(e for e in edges if self._valid(e))
+        self._nodes = tuple({
+            e.sell_token.lower() for e in self.edges
+        } | {
+            e.buy_token.lower() for e in self.edges
+        })
+        self._index = {node: i for i, node in enumerate(self._nodes)}
 
     @staticmethod
     def _valid(edge: DexGraphEdge) -> bool:
@@ -60,87 +64,95 @@ class DexGraph:
             and edge.rate.is_finite() and edge.rate > 0
         )
 
-    @staticmethod
-    def _node(token: str) -> str:
-        return token.lower()
-
     def negative_cycles(self, max_cycles: int = 32) -> list[DexNegativeCycle]:
-        if max_cycles <= 0 or not self.edges:
+        """Find negative cycles without scanning every possible start vertex.
+
+        Uses a zero-cost super-source (all distances start at zero), so every
+        connected component is considered. The predecessor walk is performed
+        only for vertices relaxed on the final pass, avoiding the previous
+        O(V^2) cycle-extraction scan.
+        """
+        if max_cycles <= 0 or not self.edges or not self._nodes:
             return []
 
-        nodes = {self._node(e.sell_token) for e in self.edges}
-        nodes.update(self._node(e.buy_token) for e in self.edges)
-        node_list = list(nodes)
-        index = {node: i for i, node in enumerate(node_list)}
+        n = len(self._nodes)
+        dist = [0.0] * n
+        predecessor = [-1] * n
+        predecessor_edge: list[DexGraphEdge | None] = [None] * n
+        relaxed_last: list[int] = []
 
-        # Add a synthetic zero-cost super-source so disconnected token
-        # components are all considered.
-        dist = [0.0] * len(node_list)
-        predecessor: list[int | None] = [None] * len(node_list)
-        predecessor_edge: list[DexGraphEdge | None] = [None] * len(node_list)
-        changed_vertex: int | None = None
-
-        for _ in range(len(node_list)):
-            changed_vertex = None
+        # Standard Bellman-Ford negative-cycle test. Early exit when a full
+        # pass makes no change. A final-pass relaxation proves a negative cycle.
+        for iteration in range(n):
+            changed = False
+            relaxed_last = []
             for edge in self.edges:
-                u = index[self._node(edge.sell_token)]
-                v = index[self._node(edge.buy_token)]
+                u = self._index[edge.sell_token.lower()]
+                v = self._index[edge.buy_token.lower()]
                 candidate = dist[u] + edge.weight
                 if candidate < dist[v] - 1e-12:
                     dist[v] = candidate
                     predecessor[v] = u
                     predecessor_edge[v] = edge
-                    changed_vertex = v
-            if changed_vertex is None:
-                break
-
-        if changed_vertex is None:
-            return []
+                    changed = True
+                    if iteration == n - 1:
+                        relaxed_last.append(v)
+            if not changed:
+                return []
 
         cycles: list[DexNegativeCycle] = []
         seen: set[tuple[tuple[str, str, str], ...]] = set()
 
-        # There can be multiple negative cycles. Walk predecessors from each
-        # relaxed vertex until a repeated vertex is reached.
-        for start in [changed_vertex] + [i for i in range(len(node_list)) if i != changed_vertex]:
+        for start in relaxed_last:
             if len(cycles) >= max_cycles:
                 break
+
             x = start
-            for _ in range(len(node_list)):
-                if predecessor[x] is None:
+            valid = True
+            for _ in range(n):
+                x_prev = predecessor[x]
+                if x_prev < 0:
+                    valid = False
                     break
-                x = predecessor[x]
-            else:
-                cycle_edges: list[DexGraphEdge] = []
-                cur = x
-                for _ in range(len(node_list) + 1):
-                    edge = predecessor_edge[cur]
-                    prev = predecessor[cur]
-                    if edge is None or prev is None:
-                        cycle_edges = []
-                        break
-                    cycle_edges.append(edge)
-                    cur = prev
-                    if cur == x:
-                        break
-                if cycle_edges and cur == x:
-                    cycle_edges.reverse()
-                    key = tuple(
-                        (e.venue, e.sell_token.lower(), e.buy_token.lower())
-                        for e in cycle_edges
-                    )
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    product = Decimal("1")
-                    total = 0.0
-                    for edge in cycle_edges:
-                        product *= edge.rate
-                        total += edge.weight
-                    if product > Decimal("1"):
-                        cycles.append(
-                            DexNegativeCycle(tuple(cycle_edges), product, total)
-                        )
+                x = x_prev
+            if not valid:
+                continue
+
+            cycle_edges: list[DexGraphEdge] = []
+            cur = x
+            for _ in range(n + 1):
+                edge = predecessor_edge[cur]
+                prev = predecessor[cur]
+                if edge is None or prev < 0:
+                    cycle_edges = []
+                    break
+                cycle_edges.append(edge)
+                cur = prev
+                if cur == x:
+                    break
+
+            if not cycle_edges or cur != x:
+                continue
+
+            cycle_edges.reverse()
+            key = tuple(
+                (e.venue, e.sell_token.lower(), e.buy_token.lower())
+                for e in cycle_edges
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+
+            product = Decimal("1")
+            total = 0.0
+            for edge in cycle_edges:
+                product *= edge.rate
+                total += edge.weight
+
+            # Final guard against numerical noise.
+            if product > Decimal("1") and total < -1e-12:
+                cycles.append(DexNegativeCycle(tuple(cycle_edges), product, total))
+
         return cycles
 
     def best_cycles(self, max_cycles: int = 32) -> list[DexNegativeCycle]:
@@ -154,8 +166,8 @@ class DexGraph:
 def edges_from_quotes(quotes: Iterable[object]) -> list[DexGraphEdge]:
     """Convert normalized DexQuote-like objects into valid graph edges.
 
-    Quotes should all use the same trade size for a given graph snapshot.
-    Invalid, zero, non-finite, or negative-output quotes are discarded.
+    Quotes must represent the same trade-size snapshot. Invalid, zero,
+    non-finite or negative-output quotes are discarded.
     """
     edges: list[DexGraphEdge] = []
     for quote in quotes:
