@@ -133,6 +133,16 @@ class DirectDexAdapter:
         msg = str(exc).lower()
         return any(x in msg for x in ("429", "too many requests", "rate limit", "rate limit exceeded", "usage limit", "reached the usage limit", "-32001", "gateway timeout", "timed out", "read timeout", "timeout", "temporarily unavailable", "503 service unavailable", "service unavailable", "connection reset", "connection aborted"))
 
+    @staticmethod
+    def _only_rpc_failures(errors: list[str]) -> bool:
+        return bool(errors) and all(
+            "RpcRateLimitError" in error
+            or "429" in error
+            or "rate limit" in error.lower()
+            or "deadline exhausted" in error.lower()
+            for error in errors
+        )
+
     def _rpc_call(self, fn, deadline: float | None = None):
         # Fail fast across the endpoint pool. Never spend several seconds
         # retrying rate-limited public RPCs inside a single quote, because that
@@ -259,7 +269,11 @@ class DirectDexAdapter:
                             fees,encoded,result=future.result(); out=int(result[0]); gas_est=int(result[-1])
                             if out>0 and (best is None or out>best[0]): best=(out,tuple(path),tuple(fees),gas_est,encoded)
                         except Exception as exc: errors.append(f"rpc fee_probe: {type(exc).__name__}: {exc}")
-        if best is None: raise RuntimeError("no Uniswap V3 pool/liquidity for pair; "+" | ".join(errors[-4:]))
+        if best is None:
+            message="no Uniswap V3 pool/liquidity for pair; "+" | ".join(errors[-4:])
+            if self._only_rpc_failures(errors):
+                raise RpcRateLimitError(message)
+            raise RuntimeError(message)
         self._quote_cache[cache_key]=(now,best)
         logging.info("Uniswap V3 quote pair=%s->%s amount=%s out=%s fees=%s multicall=%s",token_in,token_out,amount,best[0],best[2],self.multicall_enabled)
         return best
@@ -297,7 +311,11 @@ class DirectDexAdapter:
                             route,out=future.result()
                             if out>0 and (best is None or out>best[0]): best=(out,tuple(route),self.aero_gas_limit+60000*(len(path)-1),self._addr(factory))
                         except Exception as exc: errors.append(f"rpc stable_probe: {type(exc).__name__}: {exc}")
-        if best is None: raise RuntimeError("no Aerodrome pool/liquidity for pair; "+" | ".join(errors[-4:]))
+        if best is None:
+            message="no Aerodrome pool/liquidity for pair; "+" | ".join(errors[-4:])
+            if self._only_rpc_failures(errors):
+                raise RpcRateLimitError(message)
+            raise RuntimeError(message)
         self._quote_cache[cache_key]=(now,best)
         logging.info("Aerodrome quote pair=%s->%s amount=%s out=%s multicall=%s",token_in,token_out,amount,best[0],self.multicall_enabled)
         return best

@@ -400,10 +400,10 @@ class DexCrossExchangeEngine:
         # so adding venues improves coverage without creating unbounded threads.
         max_quote_workers = max(1, min(len(self.sources), int(os.getenv("DEX_QUOTE_CONCURRENCY", "1"))))
         pool = ThreadPoolExecutor(max_workers=max_quote_workers)
-        futures = [pool.submit(_buy, source) for source in self.sources]
+        futures = {pool.submit(_buy, source): source for source in self.sources}
         done, pending = wait(futures, timeout=float(self.max_quote_latency_ms) / 1000)
         for future in done:
-                source = "unknown"
+                source = futures[future]
                 try:
                     source, (quote, execution) = future.result()
                 except Exception as exc:
