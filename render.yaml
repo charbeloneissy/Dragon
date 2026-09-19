@@ -52,6 +52,8 @@ services:
         value: "900"
       - key: DEX_0X_AGGREGATED
         value: "false"
+      - key: DEX_0X_OPT_IN
+        value: "false"
       - key: DEX_SOURCES
         value: "Uniswap_V3,Aerodrome"
       - key: DEX_COMPOUND_PROFITS

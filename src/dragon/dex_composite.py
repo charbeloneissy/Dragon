@@ -25,11 +25,12 @@ class CompositeDexAdapter:
             return self._sources
 
         sources = list(self.direct.sources(chain_id))
-        # Expose 0x only when an API key is configured.  It is an aggregated
-        # executable venue, so it adds route diversity without multiplying every
-        # underlying 0x source into separate quote sweeps.
+        # Require a separate opt-in because a stale API key or legacy environment
+        # value must not silently re-enable an unreliable external venue.
         enable_0x = (
             self.zerox is not None
+            and os.getenv("DEX_0X_OPT_IN", "false").strip().lower()
+            in {"1", "true", "yes", "on"}
             and os.getenv("DEX_0X_AGGREGATED", "true").strip().lower()
             in {"1", "true", "yes", "on"}
         )
