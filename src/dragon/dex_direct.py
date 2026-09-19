@@ -55,11 +55,13 @@ class DirectDexAdapter:
         self._rpc_urls = urls
         if len(urls) < 2:
             logging.warning("Only one DEX_RPC endpoint configured; 429 resilience has no failover target")
-        self._rpc_timeout = float(timeout)
+        self._rpc_timeout = float(os.getenv("DEX_RPC_TIMEOUT_SECONDS", str(timeout)))
+        self._rpc_timeout = max(0.75, min(4.0, self._rpc_timeout))
         self._rpc_index = 0
         self._rpc_failures = [0 for _ in urls]
         self._rpc_cooldown_until = [0.0 for _ in urls]
         self.rpc_url = ""
+        self._bound_rpc_cache = {}
         startup_errors = []
         connected = False
         for idx, url in enumerate(urls):
@@ -105,6 +107,10 @@ class DirectDexAdapter:
         return Web3.to_checksum_address(v)
 
     def _bind_rpc(self, url: str) -> None:
+        cached = self._bound_rpc_cache.get(url)
+        if cached is not None:
+            self.rpc_url, self.w3, self.aero, self.uni_quoter, self.uni_router, self.aave_pool, self.aero_factory, self.multicall3 = cached
+            return
         self.rpc_url = url
         self.w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": self._rpc_timeout}))
         if not self.w3.is_connected():
@@ -117,11 +123,12 @@ class DirectDexAdapter:
         self.aave_pool = self.w3.eth.contract(address=Web3.to_checksum_address(os.getenv("DEX_AAVE_POOL_ADDRESS", AAVE_BASE_POOL)), abi=AAVE_POOL_ABI)
         self.aero_factory = self._addr(self.aero.functions.defaultFactory().call())
         self.multicall3 = self.w3.eth.contract(address=self._addr(MULTICALL3), abi=MULTICALL3_ABI)
+        self._bound_rpc_cache[url] = (self.rpc_url, self.w3, self.aero, self.uni_quoter, self.uni_router, self.aave_pool, self.aero_factory, self.multicall3)
 
     @staticmethod
     def _is_transient_rpc_error(exc: Exception) -> bool:
         msg = str(exc).lower()
-        return any(x in msg for x in ("429", "too many requests", "rate limit", "rate limit exceeded", "usage limit", "reached the usage limit", "-32001", "gateway timeout", "temporarily unavailable", "503 service unavailable", "service unavailable"))
+        return any(x in msg for x in ("429", "too many requests", "rate limit", "rate limit exceeded", "usage limit", "reached the usage limit", "-32001", "gateway timeout", "timed out", "read timeout", "timeout", "temporarily unavailable", "503 service unavailable", "service unavailable", "connection reset", "connection aborted"))
 
     def _rpc_call(self, fn):
         # Fail fast across the endpoint pool. Never spend several seconds
@@ -129,7 +136,7 @@ class DirectDexAdapter:
         # turns a transient 429 into a false 6-10s quote-latency failure.
         last_exc = None
         attempted = set()
-        max_attempts = max(1, min(len(self._rpc_urls), int(os.getenv("DEX_RPC_MAX_ATTEMPTS", str(len(self._rpc_urls))))))
+        max_attempts = max(1, min(len(self._rpc_urls), int(os.getenv("DEX_RPC_MAX_ATTEMPTS", "3"))))
         for _ in range(max_attempts):
             now = time.monotonic()
             ready = [i for i in range(len(self._rpc_urls)) if i not in attempted and self._rpc_cooldown_until[i] <= now]
