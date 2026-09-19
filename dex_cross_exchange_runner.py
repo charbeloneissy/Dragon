@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock, Thread
 
-from src.dragon.dex_direct import DirectDexAdapter
+from src.dragon.dex_direct import DirectDexAdapter, RpcRateLimitError
 from src.dragon.dex_composite import CompositeDexAdapter
 from src.dragon.dex_cross_exchange import DexCrossExchangeEngine
 from src.dragon.flash_executor import AaveFlashExecutor
@@ -80,8 +80,18 @@ async def main():
     adapter=None
     try:
         logging.info("Dragon scanner boot: initializing direct DEX adapter")
-        direct_adapter=DirectDexAdapter()
-        adapter=CompositeDexAdapter(direct_adapter)
+        # Public RPCs can temporarily rate-limit during a deploy/restart. Do not
+        # crash the Render service when that happens. Keep the health endpoint up
+        # and retry with backoff until an endpoint becomes available.
+        rpc_retry_delay = 1.0
+        while adapter is None:
+            try:
+                direct_adapter = DirectDexAdapter()
+                adapter = CompositeDexAdapter(direct_adapter)
+            except RpcRateLimitError as exc:
+                logging.warning("DEX RPC unavailable during startup; retrying in %.1fs: %s", rpc_retry_delay, exc)
+                await asyncio.sleep(rpc_retry_delay)
+                rpc_retry_delay = min(15.0, rpc_retry_delay * 2.0)
         logging.info("Multi-DEX adapter connected: sources=%s", adapter.sources(int(os.getenv("DEX_CHAIN_ID","8453"))))
         chain_id=int(os.getenv("DEX_CHAIN_ID","8453")); taker_config=validate_evm_address("DEX_TAKER_ADDRESS",env_required("DEX_TAKER_ADDRESS")); quote_token=validate_evm_address("DEX_QUOTE_TOKEN",env_required("DEX_QUOTE_TOKEN")); base_token_raw=os.getenv("DEX_BASE_TOKEN","").strip(); base_token=validate_evm_address("DEX_BASE_TOKEN",base_token_raw) if base_token_raw else ""
         raw_base_tokens=os.getenv("DEX_BASE_TOKENS","").strip()
