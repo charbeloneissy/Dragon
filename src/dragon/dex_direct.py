@@ -162,7 +162,7 @@ class DirectDexAdapter:
         return self._rpc_call(lambda w3: self.multicall3.functions.aggregate3(payload).call())
 
     def _uni_calldata(self, token_in, token_out, amount, fee):
-        return self.uni_quoter.encodeABI(fn_name="quoteExactInputSingle", args=[(self._addr(token_in),self._addr(token_out),int(amount),int(fee),0)])
+        return self.uni_quoter.encode_abi("quoteExactInputSingle", args=[(self._addr(token_in),self._addr(token_out),int(amount),int(fee),0)])
 
     def sources(self, chain_id: int) -> tuple[str, ...]:
         if int(chain_id) != 8453:
@@ -243,7 +243,7 @@ class DirectDexAdapter:
                     routes=[]; calls=[]
                     for flags in stable_sets:
                         route=[{"from":self._addr(path[i]),"to":self._addr(path[i+1]),"stable":bool(flags[i]),"factory":self._addr(factory)} for i in range(len(path)-1)]
-                        routes.append(route); calls.append((AERO_ROUTER,True,self.aero.encodeABI(fn_name="getAmountsOut",args=[int(amount),route])))
+                        routes.append(route); calls.append((AERO_ROUTER,True,self.aero.encode_abi("getAmountsOut",args=[int(amount),route])))
                     results=self._multicall(calls)
                     for route,(success,data) in zip(routes,results):
                         if not success: continue
