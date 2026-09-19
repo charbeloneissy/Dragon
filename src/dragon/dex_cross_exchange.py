@@ -233,8 +233,17 @@ class DexCrossExchangeEngine:
                 except Exception as exc:
                     logging.warning("DEX buy quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s", source, quote_token, base_token, quote_amount, type(exc).__name__, exc)
                     self._reject("buy_quote_error"); continue
-                if self._quote_latency(quote) > self.max_quote_latency_ms:
-                    self._reject("buy_quote_stale"); continue
+                quote_latency = self._quote_latency(quote)
+                if quote_latency > self.max_quote_latency_ms:
+                    # latency_ms measures request duration, not quote age. Keep the
+                    # hard safety gate, but report the real reason so telemetry does
+                    # not falsely label a slow fresh quote as "stale".
+                    self._reject("buy_quote_slow")
+                    logging.info(
+                        "DEX buy quote rejected latency_ms=%.1f limit_ms=%s source=%s amount=%s",
+                        quote_latency, self.max_quote_latency_ms, source, quote_amount,
+                    )
+                    continue
                 if not self._quote_quality_ok(quote, sell_token=quote_token, buy_token=base_token, sell_amount=quote_amount, stage="buy"):
                     continue
                 if execution.buy_amount <= 0:
@@ -259,8 +268,13 @@ class DexCrossExchangeEngine:
 
         def _process_sell(job, result):
             buy_source, buy_quote, buy_execution, source, (sell_quote, sell_execution) = result
-            if self._quote_latency(sell_quote) > self.max_quote_latency_ms:
-                self._reject("sell_quote_stale")
+            sell_latency = self._quote_latency(sell_quote)
+            if sell_latency > self.max_quote_latency_ms:
+                self._reject("sell_quote_slow")
+                logging.info(
+                    "DEX sell quote rejected latency_ms=%.1f limit_ms=%s source=%s amount=%s",
+                    sell_latency, self.max_quote_latency_ms, source, buy_execution.buy_amount,
+                )
                 return
             if not self._quote_quality_ok(sell_quote, sell_token=base_token, buy_token=quote_token, sell_amount=buy_execution.buy_amount, stage="sell"):
                 return
