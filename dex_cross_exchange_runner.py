@@ -174,12 +174,60 @@ async def main():
                 else: max_quote=own_capital if own_capital>0 else flash_cap
                 all_opportunities=[]
                 aggregate_rejections={}
-                scan_concurrency=max(1,min(len(base_tokens),int(os.getenv("DEX_SCAN_CONCURRENCY","2"))))
+                # Fast scanner architecture: use a small live quote to rank the
+                # dynamic universe, then spend expensive multi-size quotes only on
+                # the strongest candidates. The full scan remains the profitability
+                # and execution gate, so the fast probe can never authorize a trade.
+                fast_probe_quote=env_decimal("DEX_FAST_PROBE_QUOTE","0.25")
+                if fast_probe_quote <= 0:
+                    raise ValueError("DEX_FAST_PROBE_QUOTE must be positive")
+                probe_scale=Decimal(10) ** quote_decimals
+                probe_amount=max(1,int(fast_probe_quote*probe_scale))
+                fast_candidates=max(1,min(len(base_tokens),int(os.getenv("DEX_FAST_CANDIDATES","3"))))
+                probe_concurrency=max(1,min(len(base_tokens),int(os.getenv("DEX_FAST_PROBE_CONCURRENCY","4"))))
+                probe_semaphore=asyncio.Semaphore(probe_concurrency)
+
+                async def probe_base_token(scan_base):
+                    async with probe_semaphore:
+                        scan_engine=token_engines[scan_base]
+                        scan_engine.flash_loan_fee_bps=fee_bps
+                        score=await asyncio.to_thread(
+                            scan_engine.fast_probe,
+                            chain_id=chain_id,
+                            quote_token=quote_token,
+                            base_token=scan_base,
+                            quote_amount=probe_amount,
+                            taker=taker,
+                            slippage_bps=slippage,
+                        )
+                        return scan_base, score, dict(scan_engine.last_rejections)
+
+                probe_results=await asyncio.gather(
+                    *(probe_base_token(scan_base) for scan_base in base_tokens),
+                    return_exceptions=True,
+                )
+                ranked=[]
+                for result in probe_results:
+                    if isinstance(result, Exception):
+                        logging.exception("DEX fast probe failed", exc_info=result)
+                        aggregate_rejections["fast_probe_error"]=aggregate_rejections.get("fast_probe_error",0)+1
+                        continue
+                    scan_base, score, rejections=result
+                    ranked.append((score,scan_base))
+                    for key,value in rejections.items():
+                        aggregate_rejections[key]=aggregate_rejections.get(key,0)+int(value)
+                ranked.sort(key=lambda item:item[0], reverse=True)
+                selected=[token for score,token in ranked if score.is_finite()][:fast_candidates]
+                logging.info(
+                    "FAST SCANNER ranked base_tokens=%s selected=%s probe_quote=%s top_gross_bps=%s",
+                    len(base_tokens), selected, fast_probe_quote,
+                    str(ranked[0][0]) if ranked and ranked[0][0].is_finite() else "none",
+                )
+
+                scan_concurrency=max(1,min(len(selected),int(os.getenv("DEX_SCAN_CONCURRENCY","2"))))
                 scan_semaphore=asyncio.Semaphore(scan_concurrency)
                 async def scan_base_token(scan_base):
                     async with scan_semaphore:
-                        # Each token has its own persistent engine state, so scans can
-                        # run concurrently without rebuilding RPC/Web3 adapters.
                         scan_engine=token_engines[scan_base]
                         scan_engine.flash_loan_fee_bps=fee_bps
                         found=await asyncio.to_thread(
@@ -192,7 +240,10 @@ async def main():
                             slippage_bps=slippage,
                         )
                         return scan_base, found, dict(scan_engine.last_rejections)
-                scan_results=await asyncio.gather(*(scan_base_token(scan_base) for scan_base in base_tokens), return_exceptions=True)
+                scan_results=await asyncio.gather(
+                    *(scan_base_token(scan_base) for scan_base in selected),
+                    return_exceptions=True,
+                )
                 for result in scan_results:
                     if isinstance(result, Exception):
                         logging.exception("DEX base-token scan failed", exc_info=result)
