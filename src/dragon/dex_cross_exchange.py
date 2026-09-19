@@ -265,6 +265,7 @@ class DexCrossExchangeEngine:
             except Exception as exc:
                 self._reject("fast_probe_error")
                 self._reject(f"fast_probe_error_{source}")
+                self._reject(f"fast_probe_error_{source}_{type(exc).__name__}")
                 logging.debug("fast probe buy failed source=%s base=%s: %s", source, base_token, exc)
         if len(quotes) < 2:
             return Decimal("-Infinity")
@@ -301,6 +302,7 @@ class DexCrossExchangeEngine:
                 except Exception as exc:
                     self._reject("fast_probe_error")
                     self._reject(f"fast_probe_error_{sell_source}")
+                    self._reject(f"fast_probe_error_{sell_source}_{type(exc).__name__}")
                     logging.debug(
                         "fast probe sell failed buy_source=%s sell_source=%s base=%s: %s",
                         buy_source, sell_source, base_token, exc,
