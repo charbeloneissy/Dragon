@@ -118,7 +118,6 @@ class V3PoolState:
             if not zero_for_one and target <= sqrt_p:
                 ticks.pop(next_tick, None) if next_tick is not None else None
                 current_tick = next_tick if next_tick is not None else MAX_TICK
-                self.tick = current_tick
                 continue
 
             usable = remaining * (1_000_000 - self.fee_pips) // 1_000_000
