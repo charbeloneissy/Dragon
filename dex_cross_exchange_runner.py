@@ -16,7 +16,7 @@ from src.dragon.flash_executor import AaveFlashExecutor, FlashTransactionReverte
 from src.dragon.base_pool_discovery import BASE_WETH, discover_recent_base_tokens
 from src.dragon.observability import ExecutionTelemetry
 
-STATE={"status":"starting","mode":"paper","chain_id":None,"sources":[],"scans":0,"opportunities":0,"last_scan":None,"last_error":None,"started_at":time.time(),"quote_amount":None,"quote_decimals":None,"min_net_profit":None,"safety_buffer":None,"own_capital":"0","flash_liquidity":None,"flash_pool_liquidity":None,"flash_cap":None,"flash_loan_enabled":False,"compounding_enabled":False,"compound_reserve_quote":"0","compound_amount_quote":"0","flash_loan_amount_quote":None,"last_tx_hash":None,"rejections":{},"base_tokens":[],"opportunity_records":[],"data_source":"direct executable quotes; pool event counter is zero unless a local pool stream is enabled"}
+STATE={"status":"starting","mode":"paper","chain_id":None,"sources":[],"scans":0,"opportunities":0,"last_scan":None,"last_error":None,"started_at":time.time(),"quote_amount":None,"quote_decimals":None,"min_net_profit":None,"safety_buffer":None,"own_capital":"0","flash_liquidity":None,"flash_pool_liquidity":None,"flash_cap":None,"flash_loan_enabled":False,"compounding_enabled":False,"compound_reserve_quote":"0","compound_amount_quote":"0","flash_loan_amount_quote":None,"last_tx_hash":None,"rejections":{},"base_tokens":[],"universe_mode":None,"opportunity_records":[],"data_source":"direct executable quotes; pool event counter is zero unless a local pool stream is enabled"}
 LOCK=Lock()
 METRICS=ExecutionTelemetry()
 
@@ -137,6 +137,7 @@ async def main():
             discovered=discover_recent_base_tokens(adapter,quote_token=quote_token,anchors=(quote_token, BASE_WETH),lookback_blocks=discovery_lookback,chunk_blocks=discovery_chunk,max_tokens=discovery_max)
             for token in discovered:
                 if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
+        universe_mode="explicit" if base_tokens else ("discovery" if auto_discovery else "fallback_weth")
         if not base_tokens:
             # Start with the deepest canonical Base asset when discovery is not
             # explicitly enabled. This avoids probing random recent tokens.
@@ -186,7 +187,7 @@ async def main():
             token: DexCrossExchangeEngine(adapter,sources,**engine_kwargs)
             for token in base_tokens
         }
-        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"universe_refreshed_at":time.time(),"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":str(own_capital),"flash_liquidity":str(own_capital if own_capital>0 else flash_cap),"flash_cap":str(flash_cap),"flash_loan_enabled":flash_enabled,"compounding_enabled":bool(live and compound_enabled),"compound_ratio":str(compound_ratio),"compound_max_quote":str(compound_max)})
+        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"universe_mode":universe_mode,"universe_refreshed_at":time.time(),"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":str(own_capital),"flash_liquidity":str(own_capital if own_capital>0 else flash_cap),"flash_cap":str(flash_cap),"flash_loan_enabled":flash_enabled,"compounding_enabled":bool(live and compound_enabled),"compound_ratio":str(compound_ratio),"compound_max_quote":str(compound_max)})
         while True:
             try:
                 if auto_discovery and time.time()-float(STATE.get("universe_refreshed_at") or 0) >= discovery_refresh:

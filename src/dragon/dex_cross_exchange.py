@@ -249,6 +249,7 @@ class DexCrossExchangeEngine:
                 latency = self._quote_latency(quote)
                 if latency > self.max_quote_latency_ms:
                     self._reject("fast_probe_slow")
+                    self._reject(f"fast_probe_slow_{source}")
                     continue
                 if not self._quote_quality_ok(
                     quote, sell_token=quote_token, buy_token=base_token,
@@ -263,6 +264,7 @@ class DexCrossExchangeEngine:
                 )
             except Exception as exc:
                 self._reject("fast_probe_error")
+                self._reject(f"fast_probe_error_{source}")
                 logging.debug("fast probe buy failed source=%s base=%s: %s", source, base_token, exc)
         if len(quotes) < 2:
             return Decimal("-Infinity")
@@ -282,6 +284,7 @@ class DexCrossExchangeEngine:
                     latency = self._quote_latency(sell_quote)
                     if latency > self.max_quote_latency_ms:
                         self._reject("fast_probe_slow")
+                        self._reject(f"fast_probe_slow_{sell_source}")
                         continue
                     if not self._quote_quality_ok(
                         sell_quote, sell_token=base_token, buy_token=quote_token,
@@ -297,6 +300,7 @@ class DexCrossExchangeEngine:
                     best = max(best, gross)
                 except Exception as exc:
                     self._reject("fast_probe_error")
+                    self._reject(f"fast_probe_error_{sell_source}")
                     logging.debug(
                         "fast probe sell failed buy_source=%s sell_source=%s base=%s: %s",
                         buy_source, sell_source, base_token, exc,
