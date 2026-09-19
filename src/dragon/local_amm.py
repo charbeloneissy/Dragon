@@ -77,9 +77,8 @@ class V3PoolState:
     tick: int = 0
     initialized_ticks: dict[int, int] | None = None
 
-    def _next_tick(self, zero_for_one: bool) -> int | None:
-        ticks = self.initialized_ticks or {}
-        candidates = [t for t in ticks if t <= self.tick] if zero_for_one else [t for t in ticks if t > self.tick]
+    def _next_tick(self, zero_for_one: bool, current_tick: int, ticks: dict[int, int]) -> int | None:
+        candidates = [t for t in ticks if t <= current_tick] if zero_for_one else [t for t in ticks if t > current_tick]
         return max(candidates) if candidates else None
 
     @staticmethod
@@ -106,7 +105,7 @@ class V3PoolState:
             if remaining <= 0 or liquidity <= 0:
                 break
             old_p = sqrt_p
-            next_tick = self._next_tick(zero_for_one)
+            next_tick = self._next_tick(zero_for_one, current_tick, ticks)
             if next_tick is None:
                 target = get_sqrt_ratio_at_tick(MIN_TICK if zero_for_one else MAX_TICK)
             else:
@@ -115,7 +114,6 @@ class V3PoolState:
             if zero_for_one and target >= sqrt_p:
                 ticks.pop(next_tick, None) if next_tick is not None else None
                 current_tick = next_tick - 1 if next_tick is not None else MIN_TICK
-                self.tick = current_tick
                 continue
             if not zero_for_one and target <= sqrt_p:
                 ticks.pop(next_tick, None) if next_tick is not None else None
