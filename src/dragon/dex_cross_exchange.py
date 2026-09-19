@@ -228,6 +228,7 @@ class DexCrossExchangeEngine:
                 quote, execution = self._quote_adapters.get(source, self.adapter).quote_single_source(
                     chain_id=chain_id, sell_token=quote_token, buy_token=base_token,
                     sell_amount=quote_amount, taker=taker, source=source, slippage_bps=slippage_bps,
+                    deadline=time.perf_counter() + float(self.max_quote_latency_ms) / 1000.0,
                 )
                 latency = self._quote_latency(quote)
                 if latency > self.max_quote_latency_ms:
@@ -260,6 +261,7 @@ class DexCrossExchangeEngine:
                         chain_id=chain_id, sell_token=base_token, buy_token=quote_token,
                         sell_amount=buy_execution.buy_amount, taker=taker, source=sell_source,
                         slippage_bps=slippage_bps,
+                        deadline=time.perf_counter() + float(self.max_quote_latency_ms) / 1000.0,
                     )
                     latency = self._quote_latency(sell_quote)
                     if latency > self.max_quote_latency_ms:
@@ -295,7 +297,7 @@ class DexCrossExchangeEngine:
         # Candidate sizes are independent. Evaluate them concurrently so the scan
         # latency is bounded by the slowest candidate rather than the sum of all
         # candidate RPC round trips. Keep the worker count bounded for RPC safety.
-        max_workers = max(1, min(len(candidates), int(os.getenv("DEX_CANDIDATE_CONCURRENCY", "2"))))
+        max_workers = max(1, min(len(candidates), int(os.getenv("DEX_CANDIDATE_CONCURRENCY", "1"))))
         def _scan(candidate: int):
             return self.scan_once(
                 chain_id=chain_id, quote_token=quote_token, base_token=base_token,
@@ -357,7 +359,7 @@ class DexCrossExchangeEngine:
 
         # All venue quotes are independent. Run them concurrently with a bounded worker pool
         # so adding venues improves coverage without creating unbounded threads.
-        max_quote_workers = max(2, min(len(self.sources), int(os.getenv("DEX_QUOTE_CONCURRENCY", "2"))))
+        max_quote_workers = max(2, min(len(self.sources), int(os.getenv("DEX_QUOTE_CONCURRENCY", "1"))))
         pool = ThreadPoolExecutor(max_workers=max_quote_workers)
         futures = [pool.submit(_buy, source) for source in self.sources]
         done, pending = wait(futures, timeout=float(self.max_quote_latency_ms) / 1000)
@@ -542,20 +544,25 @@ class DexCrossExchangeEngine:
         # is shared. The adapter serializes individual RPC calls with its bounded
         # semaphore, while concurrency removes the unnecessary venue-by-venue wait.
         if sell_jobs:
-            max_sell_workers = max(2, min(len(sell_jobs), int(os.getenv("DEX_SELL_CONCURRENCY", "2"))))
-            with ThreadPoolExecutor(max_workers=max_sell_workers) as pool:
-                futures = {pool.submit(_sell, job): job for job in sell_jobs}
-                for future in as_completed(futures):
-                    job = futures[future]
-                    try:
-                        _process_sell(job, future.result())
-                    except Exception as exc:
-                        source = job[3]
-                        logging.warning(
-                            "DEX sell quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s",
-                            source, base_token, quote_token, job[4], type(exc).__name__, exc,
-                        )
-                        self._reject("sell_quote_error")
+            max_sell_workers = max(1, min(len(sell_jobs), int(os.getenv("DEX_SELL_CONCURRENCY", "1"))))
+            pool = ThreadPoolExecutor(max_workers=max_sell_workers)
+            futures = {pool.submit(_sell, job): job for job in sell_jobs}
+            done, pending = wait(futures, timeout=float(self.max_quote_latency_ms) / 1000.0)
+            for future in done:
+                job = futures[future]
+                try:
+                    _process_sell(job, future.result())
+                except Exception as exc:
+                    source = job[3]
+                    logging.warning(
+                        "DEX sell quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s",
+                        source, base_token, quote_token, job[4], type(exc).__name__, exc,
+                    )
+                    self._reject("sell_quote_error")
+            if pending:
+                self._reject("sell_quote_timeout")
+                logging.info("DEX sell quote deadline expired pending=%s limit_ms=%s", len(pending), self.max_quote_latency_ms)
+            pool.shutdown(wait=False, cancel_futures=True)
 
         if not buy_quotes: self._reject("no_buy_sources")
         if not sell_sources and buy_quotes: self._reject("no_sell_sources")
