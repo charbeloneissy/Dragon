@@ -159,7 +159,7 @@ class DexCrossExchangeEngine:
     def _candidate_amounts(self, ceiling: int) -> list[int]:
         """Adaptive deterministic size grid with denser coverage near both ends."""
         if ceiling <= 0: return []
-        configured = int(os.getenv("DEX_MAX_QUOTE_CANDIDATES", "12"))
+        configured = int(os.getenv("DEX_MAX_QUOTE_CANDIDATES", "4"))
         max_candidates = max(4, min(32, configured))
         if max_candidates == 1: return [ceiling]
         # Always include both a small probe and the full flash-liquidity ceiling;
@@ -197,7 +197,7 @@ class DexCrossExchangeEngine:
         # Candidate sizes are independent. Evaluate them concurrently so the scan
         # latency is bounded by the slowest candidate rather than the sum of all
         # candidate RPC round trips. Keep the worker count bounded for RPC safety.
-        max_workers = max(1, min(len(candidates), int(os.getenv("DEX_CANDIDATE_CONCURRENCY", "4"))))
+        max_workers = max(1, min(len(candidates), int(os.getenv("DEX_CANDIDATE_CONCURRENCY", "2"))))
         def _scan(candidate: int):
             return self.scan_once(
                 chain_id=chain_id, quote_token=quote_token, base_token=base_token,
@@ -229,7 +229,7 @@ class DexCrossExchangeEngine:
 
         # All venue quotes are independent. Run them concurrently with a bounded worker pool
         # so adding venues improves coverage without creating unbounded threads.
-        max_quote_workers = max(2, min(len(self.sources), int(os.getenv("DEX_QUOTE_CONCURRENCY", "8"))))
+        max_quote_workers = max(2, min(len(self.sources), int(os.getenv("DEX_QUOTE_CONCURRENCY", "2"))))
         with ThreadPoolExecutor(max_workers=max_quote_workers) as pool:
             futures = [pool.submit(_buy, source) for source in self.sources]
             for future in as_completed(futures):
@@ -402,7 +402,7 @@ class DexCrossExchangeEngine:
         # is shared. The adapter serializes individual RPC calls with its bounded
         # semaphore, while concurrency removes the unnecessary venue-by-venue wait.
         if sell_jobs:
-            max_sell_workers = max(2, min(len(sell_jobs), int(os.getenv("DEX_SELL_CONCURRENCY", "4"))))
+            max_sell_workers = max(2, min(len(sell_jobs), int(os.getenv("DEX_SELL_CONCURRENCY", "2"))))
             with ThreadPoolExecutor(max_workers=max_sell_workers) as pool:
                 futures = {pool.submit(_sell, job): job for job in sell_jobs}
                 for future in as_completed(futures):
