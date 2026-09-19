@@ -85,7 +85,18 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
-        return cls.from_yaml()
+        configured_exchanges = tuple(
+            value.strip()
+            for value in os.getenv("CROSS_EXCHANGE_EXCHANGES", "").split(",")
+            if value.strip()
+        )
+        return cls(
+            starting_balance=_decimal(os.getenv("CROSS_EXCHANGE_STARTING_BALANCE_USDT", "5")),
+            min_profit_usdt=_decimal(os.getenv("CROSS_EXCHANGE_MIN_PROFIT_USDT", "0.005")),
+            leverage=max(1, int(os.getenv("CROSS_EXCHANGE_LEVERAGE", "1"))),
+            live=os.getenv("CROSS_EXCHANGE_LIVE", "false").strip().lower() in {"1", "true", "yes", "on"},
+            exchanges=configured_exchanges or DEFAULT_EXCHANGES,
+        )
 
 
 @dataclass

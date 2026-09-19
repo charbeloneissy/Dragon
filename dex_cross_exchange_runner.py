@@ -12,11 +12,13 @@ from threading import Lock, Thread
 from src.dragon.dex_direct import DirectDexAdapter, RpcRateLimitError
 from src.dragon.dex_composite import CompositeDexAdapter
 from src.dragon.dex_cross_exchange import DexCrossExchangeEngine
-from src.dragon.flash_executor import AaveFlashExecutor
+from src.dragon.flash_executor import AaveFlashExecutor, FlashTransactionReverted
 from src.dragon.base_pool_discovery import BASE_WETH, discover_recent_base_tokens
+from src.dragon.observability import ExecutionTelemetry
 
-STATE={"status":"starting","mode":"paper","chain_id":None,"sources":[],"scans":0,"opportunities":0,"last_scan":None,"last_error":None,"started_at":time.time(),"quote_amount":None,"quote_decimals":None,"min_net_profit":None,"safety_buffer":None,"own_capital":"0","flash_liquidity":None,"flash_loan_enabled":False,"last_tx_hash":None,"rejections":{},"base_tokens":[]}
+STATE={"status":"starting","mode":"paper","chain_id":None,"sources":[],"scans":0,"opportunities":0,"last_scan":None,"last_error":None,"started_at":time.time(),"quote_amount":None,"quote_decimals":None,"min_net_profit":None,"safety_buffer":None,"own_capital":"0","flash_liquidity":None,"flash_pool_liquidity":None,"flash_cap":None,"flash_loan_enabled":False,"compounding_enabled":False,"compound_reserve_quote":"0","compound_amount_quote":"0","flash_loan_amount_quote":None,"last_tx_hash":None,"rejections":{},"base_tokens":[],"opportunity_records":[],"data_source":"direct executable quotes; pool event counter is zero unless a local pool stream is enabled"}
 LOCK=Lock()
+METRICS=ExecutionTelemetry()
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -24,6 +26,7 @@ class Handler(BaseHTTPRequestHandler):
         with LOCK:
             payload=dict(STATE)
             payload["rejections"]=dict(STATE["rejections"])
+            payload["observability"]=METRICS.snapshot()
         if path=="/dashboard":
             try:
                 with open("dashboard.html","rb") as f: body=f.read()
@@ -74,6 +77,27 @@ def merge_rejections(stats):
     with LOCK:
         for key,value in stats.items(): STATE["rejections"][key]=int(value)
 
+
+def opportunity_view(opportunity, identifier):
+    return {
+        "id": identifier,
+        "source": "base-dex",
+        "buy_source": opportunity.buy_source,
+        "sell_source": opportunity.sell_source,
+        "base_token": opportunity.base_token,
+        "quote_token": opportunity.quote_token,
+        "quote_amount": str(opportunity.quote_amount),
+        "compound_amount": str(opportunity.compound_amount),
+        "flash_loan_amount": str(opportunity.flash_loan_amount),
+        "gross_profit_quote": str(opportunity.gross_profit_quote),
+        "net_profit_quote": str(opportunity.net_profit_quote),
+        "gas_cost_quote": str(opportunity.gas_cost_quote),
+        "flash_loan_fee_quote": str(opportunity.flash_loan_fee_quote),
+        "safety_buffer_quote": str(opportunity.safety_buffer_quote),
+        "mev_buffer_quote": str(opportunity.safety_buffer_quote),
+        "status": "ready_for_fresh_simulation",
+    }
+
 async def main():
     logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"),format="%(asctime)s %(levelname)s %(message)s")
     start_health_server()
@@ -113,6 +137,11 @@ async def main():
         quote_decimals=int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS","6")); own_capital=env_decimal("DEX_OWN_CAPITAL_QUOTE","0")
         if own_capital<0: raise ValueError("DEX_OWN_CAPITAL_QUOTE cannot be negative")
         flash_cap=env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE","100"); live=env_bool("LIVE_TRADING",False)
+        compound_enabled=env_bool("DEX_COMPOUND_PROFITS",True)
+        compound_ratio=env_decimal("DEX_COMPOUND_RATIO","1")
+        compound_max=env_decimal("DEX_MAX_COMPOUND_QUOTE","100")
+        if not 0 <= compound_ratio <= 1: raise ValueError("DEX_COMPOUND_RATIO must be between 0 and 1")
+        if compound_max < 0: raise ValueError("DEX_MAX_COMPOUND_QUOTE cannot be negative")
         if own_capital>0 and live: raise ValueError("owned-capital live execution is not enabled by the current executor; keep DEX_OWN_CAPITAL_QUOTE=0 until an owned-capital executor is installed")
         if flash_cap<0: raise ValueError("DEX_FLASH_LOAN_LIQUIDITY_QUOTE cannot be negative")
         min_profit=env_decimal("DEX_MIN_NET_PROFIT","0.005"); safety=env_decimal("DEX_SAFETY_BUFFER","0.001")
@@ -141,6 +170,7 @@ async def main():
             safety_buffer_quote=safety,
             flash_loan_enabled=flash_enabled,
             flash_loan_fee_bps=fee_bps,
+            telemetry=METRICS,
         )
         # Build one isolated engine per token once. Recreating engines inside every
         # scan cycle repeatedly cloned Web3/RPC adapters and defeated the latency optimization.
@@ -148,7 +178,7 @@ async def main():
             token: DexCrossExchangeEngine(adapter,sources,**engine_kwargs)
             for token in base_tokens
         }
-        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"universe_refreshed_at":time.time(),"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":str(own_capital),"flash_liquidity":str(own_capital if own_capital>0 else flash_cap),"flash_loan_enabled":flash_enabled})
+        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"universe_refreshed_at":time.time(),"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":str(own_capital),"flash_liquidity":str(own_capital if own_capital>0 else flash_cap),"flash_cap":str(flash_cap),"flash_loan_enabled":flash_enabled,"compounding_enabled":bool(live and compound_enabled),"compound_ratio":str(compound_ratio),"compound_max_quote":str(compound_max)})
         while True:
             try:
                 if auto_discovery and time.time()-float(STATE.get("universe_refreshed_at") or 0) >= discovery_refresh:
@@ -166,12 +196,21 @@ async def main():
                         STATE["universe_refreshed_at"]=time.time()
                     logging.info("DEX universe refreshed base_tokens=%s",len(base_tokens))
                 if live:
-                    actual=Decimal(executor.available_liquidity_units(quote_token))/(Decimal(10)**quote_decimals); max_quote=actual; fee_bps=executor.flash_loan_fee_bps()
+                    scale=Decimal(10)**quote_decimals
+                    pool_liquidity=Decimal(executor.available_liquidity_units(quote_token))/scale
+                    actual=min(pool_liquidity,flash_cap)
+                    reserve=Decimal(executor.compound_balance_units(quote_token))/scale if compound_enabled else Decimal("0")
+                    compound_amount_quote=min(reserve*compound_ratio,compound_max)
+                    compound_amount_raw=int(compound_amount_quote*scale)
+                    max_quote=actual+compound_amount_quote; fee_bps=executor.flash_loan_fee_bps()
                     for token_engine in token_engines.values():
                         token_engine.flash_loan_fee_bps=fee_bps
                     if max_quote<=0: raise RuntimeError("no flash-loan liquidity available for the quote token")
-                    with LOCK: STATE["flash_liquidity"]=str(max_quote)
-                else: max_quote=own_capital if own_capital>0 else flash_cap
+                    with LOCK: STATE.update({"flash_liquidity":str(actual),"flash_pool_liquidity":str(pool_liquidity),"compound_reserve_quote":str(reserve),"compound_amount_quote":str(compound_amount_quote),"flash_loan_amount_quote":str(actual)})
+                else:
+                    max_quote=own_capital if own_capital>0 else flash_cap
+                    compound_amount_raw=0
+                    with LOCK: STATE.update({"flash_liquidity":str(max_quote),"flash_pool_liquidity":None,"compound_reserve_quote":"0","compound_amount_quote":"0","flash_loan_amount_quote":str(max_quote)})
                 all_opportunities=[]
                 aggregate_rejections={}
                 # Fast scanner architecture: use a small live quote to rank the
@@ -210,6 +249,7 @@ async def main():
                 for result in probe_results:
                     if isinstance(result, Exception):
                         logging.exception("DEX fast probe failed", exc_info=result)
+                        METRICS.increment("quote_failures")
                         aggregate_rejections["fast_probe_error"]=aggregate_rejections.get("fast_probe_error",0)+1
                         continue
                     scan_base, score, rejections=result
@@ -238,6 +278,7 @@ async def main():
                             max_quote_amount=max_quote,
                             taker=taker,
                             slippage_bps=slippage,
+                            compound_amount=compound_amount_raw,
                         )
                         return scan_base, found, dict(scan_engine.last_rejections)
                 scan_results=await asyncio.gather(
@@ -247,6 +288,7 @@ async def main():
                 for result in scan_results:
                     if isinstance(result, Exception):
                         logging.exception("DEX base-token scan failed", exc_info=result)
+                        METRICS.increment("quote_failures")
                         aggregate_rejections["base_token_scan_error"]=aggregate_rejections.get("base_token_scan_error",0)+1
                         continue
                     scan_base, found, rejections=result
@@ -255,14 +297,52 @@ async def main():
                         aggregate_rejections[key]=aggregate_rejections.get(key,0)+int(value)
                 all_opportunities.sort(key=lambda x: x.net_profit_quote, reverse=True)
                 opportunities=all_opportunities[:max(1,int(os.getenv("DEX_MAX_OPPORTUNITIES","8")))]
+                opportunity_ids = {}
+                opportunity_rows = []
+                for opportunity in opportunities:
+                    identifier = METRICS.record_opportunity(opportunity)
+                    METRICS.mark(identifier, "ready_for_fresh_simulation")
+                    opportunity_ids[id(opportunity)] = identifier
+                    opportunity_rows.append(opportunity_view(opportunity, identifier))
                 merge_rejections(aggregate_rejections)
                 logging.info("DEX scan complete: sources=%s base_tokens=%s candidates_per_token=%s opportunities=%s rejections=%s", sources, len(base_tokens), len(next(iter(token_engines.values()))._candidate_amounts(int(max_quote * (Decimal(10) ** quote_decimals)))), len(opportunities), aggregate_rejections)
-                with LOCK: STATE["scans"]+=1; STATE["opportunities"]+=len(opportunities); STATE["last_scan"]=time.time(); STATE["last_error"]=None; STATE["quote_amount"]=str(opportunities[0].quote_amount/(Decimal(10)**quote_decimals)) if opportunities else None
+                with LOCK:
+                    STATE["scans"]+=1
+                    STATE["opportunities"]+=len(opportunities)
+                    STATE["last_scan"]=time.time()
+                    STATE["last_error"]=None
+                    STATE["quote_amount"]=str(opportunities[0].quote_amount/(Decimal(10)**quote_decimals)) if opportunities else None
+                    STATE["compound_amount_quote"]=str(Decimal(opportunities[0].compound_amount)/(Decimal(10)**quote_decimals)) if opportunities else STATE.get("compound_amount_quote","0")
+                    STATE["flash_loan_amount_quote"]=str(Decimal(opportunities[0].flash_loan_amount)/(Decimal(10)**quote_decimals)) if opportunities else STATE.get("flash_loan_amount_quote")
+                    STATE["opportunity_records"]=opportunity_rows
                 if opportunities and live:
-                    best=opportunities[0]; max_block=executor.w3.eth.block_number+max(1,int(os.getenv("DEX_MAX_BLOCKS_AHEAD","2")))
-                    tx_hash=await asyncio.to_thread(executor.build_and_send,best,max_block_number=max_block); receipt=await asyncio.to_thread(executor.wait_for_success,tx_hash,int(os.getenv("DEX_TX_RECEIPT_TIMEOUT","30")))
-                    with LOCK: STATE["last_tx_hash"]=tx_hash
-                    logging.info("ATOMIC FLASH TX CONFIRMED hash=%s gas_used=%s",tx_hash,receipt.get("gasUsed")); await asyncio.sleep(float(os.getenv("DEX_LIVE_COOLDOWN_SECONDS","1.0")))
+                    best=opportunities[0]
+                    identifier=opportunity_ids[id(best)]
+                    max_block=executor.w3.eth.block_number+max(1,int(os.getenv("DEX_MAX_BLOCKS_AHEAD","2")))
+                    tx_hash=None
+                    try:
+                        tx_hash=await asyncio.to_thread(executor.build_and_send,best,max_block_number=max_block)
+                        METRICS.increment("fresh_simulation_passed")
+                        METRICS.mark(identifier, "simulation_passed", simulation_at=time.time())
+                        METRICS.mark_submission(identifier, tx_hash)
+                        receipt=await asyncio.to_thread(executor.wait_for_success,tx_hash,int(os.getenv("DEX_TX_RECEIPT_TIMEOUT","30")))
+                        actual_profit = receipt.get("arb_profit_raw")
+                        actual_profit_quote = None
+                        realized_pnl_quote = None
+                        if actual_profit is not None:
+                            actual_profit_quote = Decimal(str(actual_profit)) / (Decimal(10) ** quote_decimals)
+                            realized_pnl_quote = actual_profit_quote - best.gas_cost_quote
+                            receipt["arb_profit_quote"] = str(actual_profit_quote)
+                        METRICS.mark_included(identifier, receipt, realized_pnl_quote=realized_pnl_quote)
+                        with LOCK: STATE["last_tx_hash"]=tx_hash
+                        logging.info("ATOMIC FLASH TX CONFIRMED hash=%s gas_used=%s realized_pnl_quote=%s",tx_hash,receipt.get("gasUsed"),realized_pnl_quote)
+                        await asyncio.sleep(float(os.getenv("DEX_LIVE_COOLDOWN_SECONDS","1.0")))
+                    except FlashTransactionReverted as exc:
+                        METRICS.mark_reverted(identifier, error=str(exc), tx_hash=exc.tx_hash, receipt=exc.receipt)
+                        raise
+                    except Exception as exc:
+                        METRICS.mark(identifier, "simulation_failed" if tx_hash is None else "inclusion_failed", error=str(exc), tx_hash=tx_hash)
+                        raise
                 else: await asyncio.sleep(float(os.getenv("DEX_POLL_SECONDS","0.5")))
             except Exception as exc:
                 logging.exception("DEX scan/execution failed")

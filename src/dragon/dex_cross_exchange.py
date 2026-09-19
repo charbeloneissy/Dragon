@@ -29,12 +29,17 @@ class DexOpportunity:
     safety_buffer_quote: Decimal
     first_leg: DexExecution
     second_leg: DexExecution
+    compound_amount: int = 0
+
+    @property
+    def flash_loan_amount(self) -> int:
+        return self.quote_amount - self.compound_amount
 
 
 class DexCrossExchangeEngine:
     """Two-leg cross-DEX scanner with conservative net-profit accounting."""
 
-    def __init__(self, adapter, sources: Iterable[str], min_profit: Decimal = Decimal("0.005"), quote_token_decimals: int = 6, max_quote_latency_ms: Decimal = Decimal("500"), safety_buffer_quote: Decimal = Decimal("0.001"), flash_loan_enabled: bool = False, flash_loan_fee_bps: Decimal = Decimal("0"), native_to_quote_rate: Decimal = Decimal("0"), min_net_bps: Decimal = Decimal("15")):
+    def __init__(self, adapter, sources: Iterable[str], min_profit: Decimal = Decimal("0.005"), quote_token_decimals: int = 6, max_quote_latency_ms: Decimal = Decimal("500"), safety_buffer_quote: Decimal = Decimal("0.001"), flash_loan_enabled: bool = False, flash_loan_fee_bps: Decimal = Decimal("0"), native_to_quote_rate: Decimal = Decimal("0"), min_net_bps: Decimal = Decimal("15"), telemetry=None):
         if quote_token_decimals < 0 or quote_token_decimals > 36: raise ValueError("quote_token_decimals must be between 0 and 36")
         if Decimal(min_profit) < Decimal("0.005"): raise ValueError("min_profit cannot be below 0.005")
         if Decimal(max_quote_latency_ms) <= 0: raise ValueError("max_quote_latency_ms must be positive")
@@ -53,6 +58,7 @@ class DexCrossExchangeEngine:
         self.flash_loan_fee_bps = Decimal(flash_loan_fee_bps)
         self.native_to_quote_rate = Decimal(native_to_quote_rate)
         self.min_net_bps = Decimal(os.getenv("DEX_MIN_NET_BPS", str(min_net_bps)))
+        self.telemetry = telemetry
         # Keep isolated RPC/Web3 adapters alive across scans. Rebuilding them per
         # candidate caused repeated chain/factory discovery and added avoidable latency.
         # Reuse the already-connected adapter by default. Fresh Web3 adapters perform
@@ -71,8 +77,18 @@ class DexCrossExchangeEngine:
         self._isolated_quote_adapters = isolate and all(self._quote_adapters.get(source) is not adapter for source in self.sources)
         self.last_rejections: dict[str, int] = {}
 
+    def _metric(self, name: str, amount: int = 1) -> None:
+        if self.telemetry is not None:
+            self.telemetry.increment(name, amount)
+
+    def _gauge(self, name: str, value: int) -> None:
+        if self.telemetry is not None:
+            self.telemetry.set_gauge(name, value)
+
     def _reject(self, reason: str) -> None:
         self.last_rejections[reason] = self.last_rejections.get(reason, 0) + 1
+        if "quote" in reason:
+            self._metric("quote_failures")
 
     def _quote_latency(self, quote: DexQuote) -> Decimal:
         try:
@@ -148,7 +164,7 @@ class DexCrossExchangeEngine:
             if direct_quote > 0:
                 return direct_quote
         gas_native = getattr(quote, "gas_native", None)
-        if gas_native is None:
+        if gas_native is None or Decimal(str(gas_native)) <= 0:
             gas_native = Decimal(str(getattr(execution, "gas", 0))) * Decimal(str(getattr(execution, "gas_price", 0)))
         gas_native = Decimal(str(gas_native))
         if gas_native <= 0:
@@ -287,12 +303,18 @@ class DexCrossExchangeEngine:
                     )
         return best
 
-    def scan_max_profitable(self, *, chain_id: int, quote_token: str, base_token: str, max_quote_amount: Decimal, taker: str, slippage_bps: int = 50) -> list[DexOpportunity]:
+    def scan_max_profitable(self, *, chain_id: int, quote_token: str, base_token: str, max_quote_amount: Decimal, taker: str, slippage_bps: int = 50, compound_amount: int = 0) -> list[DexOpportunity]:
         if max_quote_amount <= 0: raise ValueError("max_quote_amount must be positive")
         scale = Decimal(10) ** self.quote_token_decimals; ceiling = int(max_quote_amount * scale)
         if ceiling <= 0: return []
+        compound_amount = int(compound_amount)
+        if compound_amount < 0 or compound_amount >= ceiling:
+            raise ValueError("compound_amount must be non-negative and below the total quote ceiling")
         self.last_rejections = {}; profitable: list[DexOpportunity] = []
-        candidates = self._candidate_amounts(ceiling)
+        # Size the flash-loan portion independently, then add retained profits to
+        # every candidate. Aave liquidity remains the hard ceiling for the loan.
+        loan_candidates = self._candidate_amounts(ceiling - compound_amount)
+        candidates = [candidate + compound_amount for candidate in loan_candidates]
 
         # Candidate sizes are independent. Evaluate them concurrently so the scan
         # latency is bounded by the slowest candidate rather than the sum of all
@@ -302,6 +324,7 @@ class DexCrossExchangeEngine:
             return self.scan_once(
                 chain_id=chain_id, quote_token=quote_token, base_token=base_token,
                 quote_amount=candidate, taker=taker, slippage_bps=slippage_bps,
+                compound_amount=compound_amount,
             )
         if max_workers == 1:
             results = [_scan(candidate) for candidate in candidates]
@@ -315,7 +338,10 @@ class DexCrossExchangeEngine:
         # Every refined size goes through the same hard profitability gates.
         if profitable:
             best = max(profitable, key=lambda x: (x.net_profit_quote, x.quote_amount))
-            refined = self._refinement_amounts(best.quote_amount, ceiling, candidates)
+            refined = [
+                amount for amount in self._refinement_amounts(best.quote_amount, ceiling, candidates)
+                if amount > compound_amount
+            ]
             if refined:
                 logging.info(
                     "DEX dynamic optimizer coarse_best=%s refined_candidates=%s ceiling=%s",
@@ -336,16 +362,20 @@ class DexCrossExchangeEngine:
             )
             return []
         best = max(profitable, key=lambda x: (x.net_profit_quote, x.net_profit_quote / Decimal(x.quote_amount)))
+        self._metric("optimal_size_found")
         logging.info(
             "DEX dynamic optimizer selected buy=%s sell=%s base=%s amount_raw=%s net=%s",
             best.buy_source, best.sell_source, base_token, best.quote_amount, best.net_profit_quote,
         )
         return [best]
 
-    def scan_once(self, *, chain_id: int, quote_token: str, base_token: str, quote_amount: int, taker: str, slippage_bps: int = 50) -> list[DexOpportunity]:
+    def scan_once(self, *, chain_id: int, quote_token: str, base_token: str, quote_amount: int, taker: str, slippage_bps: int = 50, compound_amount: int = 0) -> list[DexOpportunity]:
         if len(self.sources) < 2: raise ValueError("DEX cross-exchange mode requires at least two DEX sources")
         if quote_amount <= 0: raise ValueError("quote_amount must be positive")
+        if compound_amount < 0 or compound_amount >= quote_amount:
+            raise ValueError("compound_amount must be non-negative and below quote_amount")
         if not 0 <= slippage_bps <= 5000: raise ValueError("slippage_bps must be between 0 and 5000")
+        flash_amount = quote_amount - compound_amount
         quote_adapters = self._quote_adapters
         buy_quotes: dict[str, tuple[DexQuote, DexExecution]] = {}
         sell_sources: set[str] = set()
@@ -387,11 +417,16 @@ class DexCrossExchangeEngine:
                 if execution.buy_amount <= 0:
                     self._reject("buy_zero_output"); continue
                 buy_quotes[source] = (quote, execution)
+                self._metric("quote_observations")
 
         if pending:
             self._reject("buy_quote_timeout")
             logging.info("DEX buy quote deadline expired pending=%s limit_ms=%s", len(pending), self.max_quote_latency_ms)
         pool.shutdown(wait=False, cancel_futures=True)
+        # This engine receives fresh executable quotes rather than raw pool logs.
+        # Keep the requested pool-state gauge explicit instead of pretending that
+        # quote polling is equivalent to a pool-event subscription.
+        self._gauge("pools_with_fresh_state", len(buy_quotes))
 
         sell_jobs = []
         for buy_source, (buy_quote, buy_execution) in buy_quotes.items():
@@ -425,11 +460,12 @@ class DexCrossExchangeEngine:
             if sell_execution.buy_amount <= 0:
                 self._reject("sell_zero_output")
                 return
+            self._metric("quote_observations")
             sell_sources.add(source)
 
             scale = Decimal(10) ** self.quote_token_decimals
             flash_loan_fee_quote = (
-                Decimal(quote_amount) / scale * self.flash_loan_fee_bps / Decimal("10000")
+                Decimal(flash_amount) / scale * self.flash_loan_fee_bps / Decimal("10000")
                 if self.flash_loan_enabled else Decimal("0")
             )
             native_to_quote_rate = self.native_to_quote_rate
@@ -477,6 +513,7 @@ class DexCrossExchangeEngine:
             if final_amount <= 0:
                 self._reject("slippage_zero_output")
                 return
+            self._metric("opportunities_after_slippage")
 
             gas_cost_quote = (
                 self._gas_cost_quote(buy_quote, buy_execution, native_to_quote_rate)
@@ -497,6 +534,12 @@ class DexCrossExchangeEngine:
             cost_bps = (cost_quote / notional_quote) * Decimal("10000") if notional_quote > 0 else Decimal("0")
             net_bps = gross_bps - cost_bps
             net = gross - cost_quote
+            if gross > 0:
+                self._metric("opportunities_detected")
+            if gross - flash_loan_fee_quote > 0:
+                self._metric("opportunities_after_fees")
+            if gross - gas_cost_quote - flash_loan_fee_quote > 0:
+                self._metric("opportunities_after_gas")
             logging.info(
                 "DEX ROUND_TRIP buy=%s sell=%s token=%s start_quote_raw=%s leg1_base_raw=%s leg2_quote_raw=%s return=%.8f gross=%s gross_bps=%.3f cost=%s cost_bps=%.3f gas=%s flash_fee=%s safety=%s net=%s net_bps=%.3f",
                 buy_source, source, base_token, quote_amount, buy_execution.buy_amount,
@@ -513,6 +556,8 @@ class DexCrossExchangeEngine:
                 self._reject("cross_gross_negative")
             elif net <= 0:
                 self._reject("cross_net_negative_after_costs")
+            if net > 0:
+                self._metric("opportunities_after_mev_buffer")
             if net < self.min_profit:
                 self._reject("net_profit_below_min")
                 return
@@ -540,6 +585,7 @@ class DexCrossExchangeEngine:
                 safety_buffer_quote=self.safety_buffer_quote,
                 first_leg=buy_execution,
                 second_leg=sell_execution,
+                compound_amount=compound_amount,
             ))
 
         # Sell legs are independent. Run them concurrently even when the adapter
