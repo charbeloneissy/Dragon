@@ -187,6 +187,80 @@ class DexCrossExchangeEngine:
                 amounts.append(max(1, (ceiling * i) // max_candidates))
         return sorted(set(amounts))
 
+    def fast_probe(self, *, chain_id: int, quote_token: str, base_token: str, quote_amount: int, taker: str, slippage_bps: int = 50) -> Decimal:
+        """Fast gross-spread probe used to rank candidates before expensive sizing scans.
+
+        It deliberately ignores gas and final execution economics. The full scan remains
+        the only profitability gate. A failed or slow leg returns negative infinity.
+        """
+        if quote_amount <= 0:
+            return Decimal("-Infinity")
+        if len(self.sources) < 2:
+            return Decimal("-Infinity")
+        quotes: dict[str, tuple[DexQuote, DexExecution]] = {}
+        for source in self.sources:
+            try:
+                started = time.perf_counter()
+                quote, execution = self._quote_adapters.get(source, self.adapter).quote_single_source(
+                    chain_id=chain_id, sell_token=quote_token, buy_token=base_token,
+                    sell_amount=quote_amount, taker=taker, source=source, slippage_bps=slippage_bps,
+                )
+                latency = self._quote_latency(quote)
+                if latency > self.max_quote_latency_ms:
+                    self._reject("fast_probe_slow")
+                    continue
+                if not self._quote_quality_ok(
+                    quote, sell_token=quote_token, buy_token=base_token,
+                    sell_amount=quote_amount, stage="fast_probe_buy"
+                ):
+                    continue
+                quotes[source] = (quote, execution)
+                logging.debug(
+                    "fast probe buy source=%s base=%s amount=%s latency_ms=%.1f elapsed_ms=%.1f",
+                    source, base_token, quote_amount, latency,
+                    (time.perf_counter() - started) * 1000,
+                )
+            except Exception as exc:
+                self._reject("fast_probe_error")
+                logging.debug("fast probe buy failed source=%s base=%s: %s", source, base_token, exc)
+        if len(quotes) < 2:
+            return Decimal("-Infinity")
+
+        best = Decimal("-Infinity")
+        for buy_source, (_, buy_execution) in quotes.items():
+            for sell_source in self.sources:
+                if sell_source == buy_source:
+                    continue
+                try:
+                    sell_quote, sell_execution = self._quote_adapters.get(sell_source, self.adapter).quote_single_source(
+                        chain_id=chain_id, sell_token=base_token, buy_token=quote_token,
+                        sell_amount=buy_execution.buy_amount, taker=taker, source=sell_source,
+                        slippage_bps=slippage_bps,
+                    )
+                    latency = self._quote_latency(sell_quote)
+                    if latency > self.max_quote_latency_ms:
+                        self._reject("fast_probe_slow")
+                        continue
+                    if not self._quote_quality_ok(
+                        sell_quote, sell_token=base_token, buy_token=quote_token,
+                        sell_amount=buy_execution.buy_amount, stage="fast_probe_sell"
+                    ):
+                        continue
+                    if sell_execution.buy_amount <= 0:
+                        continue
+                    gross = (
+                        Decimal(sell_execution.buy_amount) / Decimal(quote_amount)
+                        - Decimal("1")
+                    ) * Decimal("10000")
+                    best = max(best, gross)
+                except Exception as exc:
+                    self._reject("fast_probe_error")
+                    logging.debug(
+                        "fast probe sell failed buy_source=%s sell_source=%s base=%s: %s",
+                        buy_source, sell_source, base_token, exc,
+                    )
+        return best
+
     def scan_max_profitable(self, *, chain_id: int, quote_token: str, base_token: str, max_quote_amount: Decimal, taker: str, slippage_bps: int = 50) -> list[DexOpportunity]:
         if max_quote_amount <= 0: raise ValueError("max_quote_amount must be positive")
         scale = Decimal(10) ** self.quote_token_decimals; ceiling = int(max_quote_amount * scale)
