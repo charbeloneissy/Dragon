@@ -124,21 +124,31 @@ class DirectDexAdapter:
         return any(x in msg for x in ("429", "too many requests", "rate limit", "rate limit exceeded", "usage limit", "reached the usage limit", "-32001", "gateway timeout", "temporarily unavailable", "503 service unavailable", "service unavailable"))
 
     def _rpc_call(self, fn):
+        # Fail fast across the endpoint pool. Never spend several seconds
+        # retrying rate-limited public RPCs inside a single quote, because that
+        # turns a transient 429 into a false 6-10s quote-latency failure.
         last_exc = None
-        for _ in range(len(self._rpc_urls)):
+        attempted = set()
+        max_attempts = max(1, min(len(self._rpc_urls), int(os.getenv("DEX_RPC_MAX_ATTEMPTS", str(len(self._rpc_urls))))))
+        for _ in range(max_attempts):
             now = time.monotonic()
-            ready = [i for i in range(len(self._rpc_urls)) if self._rpc_cooldown_until[i] <= now]
+            ready = [i for i in range(len(self._rpc_urls)) if i not in attempted and self._rpc_cooldown_until[i] <= now]
             if not ready:
-                time.sleep(min(0.25, max(0.0, min(self._rpc_cooldown_until) - now)))
-                ready = [min(range(len(self._rpc_urls)), key=lambda i: self._rpc_cooldown_until[i])]
-            idx = self._rpc_index if self._rpc_index in ready else ready[0]
+                remaining = [i for i in range(len(self._rpc_urls)) if i not in attempted]
+                if not remaining:
+                    break
+                # Do not sleep for the full provider cooldown inside a quote.
+                idx = min(remaining, key=lambda i: self._rpc_cooldown_until[i])
+            else:
+                idx = self._rpc_index if self._rpc_index in ready else ready[0]
+            attempted.add(idx)
             self._rpc_index = idx
             if self.rpc_url != self._rpc_urls[idx]:
                 try:
                     self._bind_rpc(self._rpc_urls[idx])
                 except Exception as exc:
                     last_exc = exc
-                    self._rpc_cooldown_until[idx] = time.monotonic() + 0.5
+                    self._rpc_cooldown_until[idx] = time.monotonic() + 10.0
                     continue
             try:
                 with RPC_CONCURRENCY_SEMAPHORE:
@@ -150,11 +160,15 @@ class DirectDexAdapter:
                 if not self._is_transient_rpc_error(exc):
                     raise
                 self._rpc_failures[idx] += 1
-                backoff = min(2.0, 0.25 * (2 ** min(self._rpc_failures[idx] - 1, 3)))
+                # Public endpoints need a meaningful cool-down. Hammering a
+                # 429 endpoint every 250ms only extends the outage.
+                backoff = min(30.0, 5.0 * (2 ** min(self._rpc_failures[idx] - 1, 2)))
                 self._rpc_cooldown_until[idx] = time.monotonic() + backoff
-                logging.warning("RPC transient error endpoint=%s backoff=%.2fs error=%s", idx, backoff, exc)
+                logging.warning("RPC transient error endpoint=%s cooldown=%.2fs error=%s", idx, backoff, exc)
                 self._rpc_index = (idx + 1) % len(self._rpc_urls)
-        raise RpcRateLimitError(f"all configured Base RPC endpoints failed after {len(self._rpc_urls)} attempts: {last_exc}")
+        raise RpcRateLimitError(
+            f"all configured Base RPC endpoints unavailable after {len(attempted)} fast attempts: {last_exc}"
+        )
 
     def _multicall(self, calls):
         if not self.multicall_enabled: raise RuntimeError("Multicall3 disabled")
