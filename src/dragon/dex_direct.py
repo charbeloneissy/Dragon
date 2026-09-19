@@ -121,7 +121,7 @@ class DirectDexAdapter:
     @staticmethod
     def _is_transient_rpc_error(exc: Exception) -> bool:
         msg = str(exc).lower()
-        return any(x in msg for x in ("429", "too many requests", "rate limit", "gateway timeout", "temporarily unavailable", "503 service unavailable"))
+        return any(x in msg for x in ("429", "too many requests", "rate limit", "rate limit exceeded", "usage limit", "reached the usage limit", "-32001", "gateway timeout", "temporarily unavailable", "503 service unavailable", "service unavailable"))
 
     def _rpc_call(self, fn):
         last_exc = None
