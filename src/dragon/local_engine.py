@@ -37,8 +37,7 @@ class LocalArbitrageEngine:
         if pool.kind=="v2":
             return pool.state.quote(token_in,amount)
         if pool.kind=="v3":
-            # Current-range quote is safe only while no initialized tick is crossed.
-            return pool.state.quote_without_crossing(token_in,amount)
+            return pool.state.quote(token_in, amount)
         return 0
 
     async def find_best(self,quote_token:str,base_token:str,max_input:int)->LocalOpportunity|None:
