@@ -13,7 +13,7 @@ from src.dragon.dex_direct import DirectDexAdapter, RpcRateLimitError
 from src.dragon.dex_composite import CompositeDexAdapter
 from src.dragon.dex_cross_exchange import DexCrossExchangeEngine
 from src.dragon.flash_executor import AaveFlashExecutor, FlashTransactionReverted
-from src.dragon.base_pool_discovery import BASE_WETH, discover_recent_base_tokens
+from src.dragon.base_pool_discovery import BASE_WETH, CURATED_PAPER_BASE_TOKENS, discover_recent_base_tokens
 from src.dragon.observability import ExecutionTelemetry
 
 STATE={"status":"starting","mode":"paper","chain_id":None,"sources":[],"scans":0,"opportunities":0,"last_scan":None,"last_error":None,"started_at":time.time(),"quote_amount":None,"quote_decimals":None,"min_net_profit":None,"safety_buffer":None,"own_capital":"0","flash_liquidity":None,"flash_pool_liquidity":None,"flash_cap":None,"flash_loan_enabled":False,"compounding_enabled":False,"compound_reserve_quote":"0","compound_amount_quote":"0","flash_loan_amount_quote":None,"last_tx_hash":None,"rejections":{},"base_tokens":[],"universe_mode":None,"opportunity_records":[],"data_source":"direct executable quotes; pool event counter is zero unless a local pool stream is enabled"}
@@ -125,7 +125,7 @@ async def main():
                 await asyncio.sleep(rpc_retry_delay)
                 rpc_retry_delay = min(15.0, rpc_retry_delay * 2.0)
         logging.info("Multi-DEX adapter connected: sources=%s", adapter.sources(int(os.getenv("DEX_CHAIN_ID","8453"))))
-        chain_id=int(os.getenv("DEX_CHAIN_ID","8453")); taker_config=validate_evm_address("DEX_TAKER_ADDRESS",env_required("DEX_TAKER_ADDRESS")); quote_token=validate_evm_address("DEX_QUOTE_TOKEN",env_required("DEX_QUOTE_TOKEN")); universe_opt_in=env_bool("DEX_UNIVERSE_OPT_IN",False); base_token_raw=os.getenv("DEX_BASE_TOKEN","").strip() if universe_opt_in else ""; base_token=validate_evm_address("DEX_BASE_TOKEN",base_token_raw) if base_token_raw else ""
+        chain_id=int(os.getenv("DEX_CHAIN_ID","8453")); live=env_bool("LIVE_TRADING",False); taker_config=validate_evm_address("DEX_TAKER_ADDRESS",env_required("DEX_TAKER_ADDRESS")); quote_token=validate_evm_address("DEX_QUOTE_TOKEN",env_required("DEX_QUOTE_TOKEN")); universe_opt_in=env_bool("DEX_UNIVERSE_OPT_IN",False); base_token_raw=os.getenv("DEX_BASE_TOKEN","").strip() if universe_opt_in else ""; base_token=validate_evm_address("DEX_BASE_TOKEN",base_token_raw) if base_token_raw else ""
         raw_base_tokens=os.getenv("DEX_BASE_TOKENS","").strip() if universe_opt_in else ""
         configured_base_tokens=[validate_evm_address("DEX_BASE_TOKENS",x.strip()) for x in raw_base_tokens.split(",") if x.strip()] if raw_base_tokens else []
         base_tokens=[]
@@ -133,6 +133,13 @@ async def main():
             base_tokens.append(base_token)
         for token in configured_base_tokens:
             if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
+        if not base_tokens and not live and not universe_opt_in:
+            raw_paper_tokens=os.getenv("DEX_PAPER_BASE_TOKENS","").strip()
+            paper_tokens=tuple(x.strip() for x in raw_paper_tokens.split(",") if x.strip()) if raw_paper_tokens else CURATED_PAPER_BASE_TOKENS
+            for token in paper_tokens:
+                checked=validate_evm_address("DEX_PAPER_BASE_TOKENS",token)
+                if checked.lower()!=quote_token.lower() and checked.lower() not in {x.lower() for x in base_tokens}:
+                    base_tokens.append(checked)
         auto_discovery=(
             universe_opt_in
             and env_bool("DEX_DISCOVERY_OPT_IN",False)
@@ -146,7 +153,7 @@ async def main():
             discovered=discover_recent_base_tokens(adapter,quote_token=quote_token,anchors=(quote_token, BASE_WETH),lookback_blocks=discovery_lookback,chunk_blocks=discovery_chunk,max_tokens=discovery_max)
             for token in discovered:
                 if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
-        universe_mode="explicit" if base_tokens else ("discovery" if auto_discovery else "fallback_weth")
+        universe_mode="explicit" if universe_opt_in and base_tokens else ("discovery" if auto_discovery else ("paper_curated" if base_tokens else "fallback_weth"))
         if not base_tokens:
             # Start with the deepest canonical Base asset when discovery is not
             # explicitly enabled. This avoids probing random recent tokens.
@@ -154,7 +161,7 @@ async def main():
         base_tokens=base_tokens[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","8")))]
         quote_decimals=int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS","6")); own_capital=env_decimal("DEX_OWN_CAPITAL_QUOTE","0")
         if own_capital<0: raise ValueError("DEX_OWN_CAPITAL_QUOTE cannot be negative")
-        flash_cap=env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE","1000"); live=env_bool("LIVE_TRADING",False)
+        flash_cap=env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE","1000")
         compound_enabled=env_bool("DEX_COMPOUND_PROFITS",True)
         compound_ratio=env_decimal("DEX_COMPOUND_RATIO","1")
         compound_max=env_decimal("DEX_MAX_COMPOUND_QUOTE","100")

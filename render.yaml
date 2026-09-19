@@ -31,11 +31,19 @@ services:
       - key: DEX_SLIPPAGE_BPS
         value: "50"
       - key: DEX_MAX_QUOTE_LATENCY_MS
-        value: "1000"
+        value: "1500"
       - key: DEX_POLL_SECONDS
         value: "1.0"
       - key: DEX_MAX_QUOTE_CANDIDATES
         value: "8"
+      - key: DEX_MAX_BASE_TOKENS
+        value: "5"
+      - key: DEX_FAST_CANDIDATES
+        value: "3"
+      - key: DEX_FAST_PROBE_CONCURRENCY
+        value: "2"
+      - key: DEX_PAPER_BASE_TOKENS
+        value: "0x4200000000000000000000000000000000000006,0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf,0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22,0x940181a94A35A4569E4529A3CDfB74e38FD98631,0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"
       - key: DEX_OPTIMIZER_RADIUS
         value: "0.25"
       - key: DEX_OPTIMIZER_STEPS
