@@ -29,25 +29,14 @@ class CompositeDexAdapter:
             sources.append("0x:AGGREGATED")
             import logging
             logging.info("0x aggregated venue enabled on chain=%s", chain_id)
-        if self.zerox is not None:
-            try:
-                external = []
-                direct_names = {x.lower() for x in sources}
-                for name in self.zerox.sources(chain_id):
-                    # 0x sources are exposed as independent logical venues only
-                    # when they are not already represented by Dragon's direct adapters.
-                    if name.lower() in direct_names:
-                        continue
-                    external.append(f"0x:{name}")
-                configured = [x.strip() for x in os.getenv("ZEROX_SOURCE_ALLOWLIST", "").split(",") if x.strip()]
-                if configured:
-                    allowed = set(configured)
-                    external = [x for x in external if x.split(":", 1)[1] in allowed]
-                external = external[: self.max_zerox_sources]
-                sources.extend(external)
-            except Exception as exc:
-                import logging
-                logging.warning("0x source discovery unavailable; continuing with direct DEXs: %s", exc)
+        # Do not expose every 0x source as a separate venue. That caused
+        # source-isolation x amount sweeps and excessive 0x traffic. Use one
+        # aggregated 0x venue so 0x performs routing internally.
+        if self.zerox is not None and os.getenv("DEX_0X_AGGREGATED", "true").strip().lower() in {"1", "true", "yes", "on"}:
+            sources.append("0x:AGGREGATED")
+            import logging
+            logging.info("0x aggregated venue enabled on chain=%s", chain_id)
+
         self._sources = tuple(dict.fromkeys(sources))
         return self._sources
 
