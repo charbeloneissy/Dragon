@@ -117,8 +117,8 @@ async def main():
                 await asyncio.sleep(rpc_retry_delay)
                 rpc_retry_delay = min(15.0, rpc_retry_delay * 2.0)
         logging.info("Multi-DEX adapter connected: sources=%s", adapter.sources(int(os.getenv("DEX_CHAIN_ID","8453"))))
-        chain_id=int(os.getenv("DEX_CHAIN_ID","8453")); taker_config=validate_evm_address("DEX_TAKER_ADDRESS",env_required("DEX_TAKER_ADDRESS")); quote_token=validate_evm_address("DEX_QUOTE_TOKEN",env_required("DEX_QUOTE_TOKEN")); base_token_raw=os.getenv("DEX_BASE_TOKEN","").strip(); base_token=validate_evm_address("DEX_BASE_TOKEN",base_token_raw) if base_token_raw else ""
-        raw_base_tokens=os.getenv("DEX_BASE_TOKENS","").strip()
+        chain_id=int(os.getenv("DEX_CHAIN_ID","8453")); taker_config=validate_evm_address("DEX_TAKER_ADDRESS",env_required("DEX_TAKER_ADDRESS")); quote_token=validate_evm_address("DEX_QUOTE_TOKEN",env_required("DEX_QUOTE_TOKEN")); universe_opt_in=env_bool("DEX_UNIVERSE_OPT_IN",False); base_token_raw=os.getenv("DEX_BASE_TOKEN","").strip() if universe_opt_in else ""; base_token=validate_evm_address("DEX_BASE_TOKEN",base_token_raw) if base_token_raw else ""
+        raw_base_tokens=os.getenv("DEX_BASE_TOKENS","").strip() if universe_opt_in else ""
         configured_base_tokens=[validate_evm_address("DEX_BASE_TOKENS",x.strip()) for x in raw_base_tokens.split(",") if x.strip()] if raw_base_tokens else []
         base_tokens=[]
         if base_token and base_token.lower()!=quote_token.lower():
@@ -126,7 +126,8 @@ async def main():
         for token in configured_base_tokens:
             if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
         auto_discovery=(
-            env_bool("DEX_DISCOVERY_OPT_IN",False)
+            universe_opt_in
+            and env_bool("DEX_DISCOVERY_OPT_IN",False)
             and env_bool("DEX_AUTO_DISCOVERY",True)
         )
         discovery_lookback=int(os.getenv("DEX_DISCOVERY_BLOCKS","250000"))

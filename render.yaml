@@ -56,6 +56,8 @@ services:
         value: "false"
       - key: DEX_DISCOVERY_OPT_IN
         value: "false"
+      - key: DEX_UNIVERSE_OPT_IN
+        value: "false"
       - key: DEX_AUTO_DISCOVERY
         value: "false"
       - key: DEX_SOURCES
