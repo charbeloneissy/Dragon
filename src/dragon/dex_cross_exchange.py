@@ -33,7 +33,7 @@ class DexOpportunity:
 class DexCrossExchangeEngine:
     """Two-leg cross-DEX scanner with conservative net-profit accounting."""
 
-    def __init__(self, adapter, sources: Iterable[str], min_profit: Decimal = Decimal("0.005"), quote_token_decimals: int = 6, max_quote_latency_ms: Decimal = Decimal("1000"), safety_buffer_quote: Decimal = Decimal("0.001"), flash_loan_enabled: bool = False, flash_loan_fee_bps: Decimal = Decimal("0"), native_to_quote_rate: Decimal = Decimal("0")):
+    def __init__(self, adapter, sources: Iterable[str], min_profit: Decimal = Decimal("0.005"), quote_token_decimals: int = 6, max_quote_latency_ms: Decimal = Decimal("1000"), safety_buffer_quote: Decimal = Decimal("0.001"), flash_loan_enabled: bool = False, flash_loan_fee_bps: Decimal = Decimal("0"), native_to_quote_rate: Decimal = Decimal("0"), min_net_bps: Decimal = Decimal("15")):
         if quote_token_decimals < 0 or quote_token_decimals > 36: raise ValueError("quote_token_decimals must be between 0 and 36")
         if Decimal(min_profit) < Decimal("0.005"): raise ValueError("min_profit cannot be below 0.005")
         if Decimal(max_quote_latency_ms) <= 0: raise ValueError("max_quote_latency_ms must be positive")
@@ -41,6 +41,7 @@ class DexCrossExchangeEngine:
         if Decimal(flash_loan_fee_bps) < 0 or Decimal(flash_loan_fee_bps) > 1000: raise ValueError("flash_loan_fee_bps must be between 0 and 1000")
         if not flash_loan_enabled and Decimal(flash_loan_fee_bps) != 0: raise ValueError("flash_loan_fee_bps requires flash_loan_enabled=true")
         if Decimal(native_to_quote_rate) < 0: raise ValueError("native_to_quote_rate cannot be negative")
+        if Decimal(min_net_bps) < 0 or Decimal(min_net_bps) > Decimal("10000"): raise ValueError("min_net_bps must be between 0 and 10000")
         self.adapter = adapter
         self.sources = tuple(dict.fromkeys(s.strip() for s in sources if s.strip()))
         self.min_profit = Decimal(min_profit)
@@ -50,6 +51,7 @@ class DexCrossExchangeEngine:
         self.flash_loan_enabled = bool(flash_loan_enabled)
         self.flash_loan_fee_bps = Decimal(flash_loan_fee_bps)
         self.native_to_quote_rate = Decimal(native_to_quote_rate)
+        self.min_net_bps = Decimal(os.getenv("DEX_MIN_NET_BPS", str(min_net_bps)))
         # Keep isolated RPC/Web3 adapters alive across scans. Rebuilding them per
         # candidate caused repeated chain/factory discovery and added avoidable latency.
         self._quote_adapters: dict[str, object] = {}
@@ -365,6 +367,13 @@ class DexCrossExchangeEngine:
                 return
             if net < self.min_profit:
                 self._reject("net_profit_below_min")
+                return
+            if net_bps < self.min_net_bps:
+                self._reject("net_bps_below_min")
+                logging.info(
+                    "DEX opportunity rejected net_bps=%.3f min_net_bps=%.3f buy=%s sell=%s amount=%s",
+                    net_bps, self.min_net_bps, buy_source, source, quote_amount,
+                )
                 return
 
             opportunities.append(DexOpportunity(
