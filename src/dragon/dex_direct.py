@@ -26,19 +26,7 @@ ROUTER_ABI = [
  {"inputs":[{"internalType":"uint256","name":"amountIn","type":"uint256"},{"components":[{"internalType":"address","name":"from","type":"address"},{"internalType":"address","name":"to","type":"address"},{"internalType":"bool","name":"stable","type":"bool"},{"internalType":"address","name":"factory","type":"address"}],"internalType":"struct IRouter.Route[]","name":"routes","type":"tuple[]"}],"name":"getAmountsOut","outputs":[{"internalType":"uint256[]","name":"amounts","type":"uint256[]"}],"stateMutability":"view","type":"function"},
 ]
 
-MULTICALL3_ABI = [{
- "inputs":[{"components":[
-   {"internalType":"address","name":"target","type":"address"},
-   {"internalType":"bool","name":"allowFailure","type":"bool"},
-   {"internalType":"bytes","name":"callData","type":"bytes"}
- ],"internalType":"struct Multicall3.Call3[]","name":"calls","type":"tuple[]"}],
- "name":"aggregate3",
- "outputs":[{"components":[
-   {"internalType":"bool","name":"success","type":"bool"},
-   {"internalType":"bytes","name":"returnData","type":"bytes"}
- ],"internalType":"struct Multicall3.Result[]","name":"returnData","type":"tuple[]"}],
- "stateMutability":"payable","type":"function"
-}]
+MULTICALL3_ABI = [{"inputs":[{"components":[{"internalType":"address","name":"target","type":"address"},{"internalType":"bool","name":"allowFailure","type":"bool"},{"internalType":"bytes","name":"callData","type":"bytes"}],"internalType":"struct Multicall3.Call3[]","name":"calls","type":"tuple[]"}],"name":"aggregate3","outputs":[{"components":[{"internalType":"bool","name":"success","type":"bool"},{"internalType":"bytes","name":"returnData","type":"bytes"}],"internalType":"struct Multicall3.Result[]","name":"returnData","type":"tuple[]"}],"stateMutability":"payable","type":"function"}]
 
 UNI_QUOTER_ABI = [
  {"inputs":[{"components":[{"internalType":"address","name":"tokenIn","type":"address"},{"internalType":"address","name":"tokenOut","type":"address"},{"internalType":"uint256","name":"amountIn","type":"uint256"},{"internalType":"uint24","name":"fee","type":"uint24"},{"internalType":"uint160","name":"sqrtPriceLimitX96","type":"uint160"}],"internalType":"struct IQuoterV2.QuoteExactInputSingleParams","name":"params","type":"tuple"}],"name":"quoteExactInputSingle","outputs":[{"internalType":"uint256","name":"amountOut","type":"uint256"},{"internalType":"uint160","name":"sqrtPriceX96After","type":"uint160"},{"internalType":"uint32","name":"initializedTicksCrossed","type":"uint32"},{"internalType":"uint256","name":"gasEstimate","type":"uint256"}],"stateMutability":"nonpayable","type":"function"},
@@ -98,7 +86,7 @@ class DirectDexAdapter:
         self.aero_gas_limit = max(100_000, int(os.getenv("AERODROME_GAS_LIMIT", "250000")))
         self.uni_gas_limit = max(100_000, int(os.getenv("UNISWAP_GAS_LIMIT", "250000")))
         self.uni_fees = tuple(int(x) for x in os.getenv("UNISWAP_V3_FEES", "500,3000,10000").split(",") if x.strip())
-        self.multicall_enabled = os.getenv("DEX_MULTICALL_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+        self.multicall_enabled = os.getenv("DEX_MULTICALL_ENABLED", "true").strip().lower() in {"1","true","yes","on"}
         raw_intermediates = os.getenv("DEX_ROUTE_INTERMEDIATES", BASE_WETH).strip()
         self.route_intermediates = tuple(x.strip() for x in raw_intermediates.split(",") if x.strip())
         self.deep_route_always = os.getenv("DEX_DEEP_ROUTE_ALWAYS", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -169,13 +157,12 @@ class DirectDexAdapter:
         raise RpcRateLimitError(f"all configured Base RPC endpoints failed after {len(self._rpc_urls)} attempts: {last_exc}")
 
     def _multicall(self, calls):
-        if not self.multicall_enabled or not calls:
-            raise RuntimeError("Multicall3 disabled")
-        payload=[(self._addr(target), bool(allow_failure), calldata) for target, allow_failure, calldata in calls]
+        if not self.multicall_enabled: raise RuntimeError("Multicall3 disabled")
+        payload=[(self._addr(t),bool(a),d) for t,a,d in calls]
         return self._rpc_call(lambda w3: self.multicall3.functions.aggregate3(payload).call())
 
-    def _uni_calldata(self, token_in: str, token_out: str, amount: int, fee: int) -> str:
-        return self.uni_quoter.encodeABI(fn_name="quoteExactInputSingle", args=[(self._addr(token_in), self._addr(token_out), int(amount), int(fee), 0)])
+    def _uni_calldata(self, token_in, token_out, amount, fee):
+        return self.uni_quoter.encodeABI(fn_name="quoteExactInputSingle", args=[(self._addr(token_in),self._addr(token_out),int(amount),int(fee),0)])
 
     def sources(self, chain_id: int) -> tuple[str, ...]:
         if int(chain_id) != 8453:
@@ -207,115 +194,78 @@ class DirectDexAdapter:
         return "0x" + data.hex()
 
     def _uni_quote(self, token_in: str, token_out: str, amount: int):
-        cache_key=("uni", token_in.lower(), token_out.lower(), int(amount))
-        now=time.monotonic()
+        cache_key=("uni",token_in.lower(),token_out.lower(),int(amount)); now=time.monotonic()
         cached=self._quote_cache.get(cache_key)
-        if cached and now-cached[0] < self._quote_cache_ttl:
-            return cached[1]
-        no_liq=self._no_liquidity_cache.get(cache_key)
-        if no_liq and now-no_liq < 5.0:
-            raise RuntimeError("no Uniswap V3 pool/liquidity for pair (cached)")
-        best=None; errors=[]
-        paths=[(token_in, token_out)]
+        if cached and now-cached[0] < self._quote_cache_ttl: return cached[1]
+        best=None; errors=[]; paths=[(token_in,token_out)]
         for mid in self.route_intermediates:
-            if mid.lower() not in {token_in.lower(), token_out.lower()}: paths.append((token_in, mid, token_out))
+            if mid.lower() not in {token_in.lower(),token_out.lower()}: paths.append((token_in,mid,token_out))
         for path_index,path in enumerate(paths):
-            if path_index>0 and best is not None and not self.deep_route_always:
-                break
+            if path_index>0 and best is not None and not self.deep_route_always: break
             fee_sets=[(f,) for f in self.uni_fees] if len(path)==2 else [(a,b) for a in self.uni_fees for b in self.uni_fees]
-            try:
-                if len(path)==2 and self.multicall_enabled:
-                    calls=[(UNI_QUOTER_V2, True, self._uni_calldata(token_in, token_out, amount, fees[0])) for fees in fee_sets]
-                    results=self._multicall(calls)
+            if len(path)==2 and self.multicall_enabled:
+                try:
+                    results=self._multicall([(UNI_QUOTER_V2,True,self._uni_calldata(token_in,token_out,amount,f[0])) for f in fee_sets])
                     for fees,(success,data) in zip(fee_sets,results):
                         if not success: continue
-                        try:
-                            decoded=self.w3.codec.decode(["uint256","uint160","uint32","uint256"], bytes(data))
-                            out=int(decoded[0]); gas_est=int(decoded[3])
-                            if out>0 and (best is None or out>best[0]):
-                                best=(out,tuple(path),tuple(fees),gas_est,self._encode_uni_path(path,fees))
-                        except Exception as exc:
-                            errors.append(f"multicall decode: {type(exc).__name__}: {exc}")
-                else:
-                    raise RuntimeError("multicall not applicable")
-            except Exception as exc:
-                errors.append(f"multicall: {type(exc).__name__}: {exc}")
+                        d=self.w3.codec.decode(["uint256","uint160","uint32","uint256"],bytes(data)); out=int(d[0]); gas_est=int(d[3])
+                        if out>0 and (best is None or out>best[0]): best=(out,tuple(path),tuple(fees),gas_est,self._encode_uni_path(path,fees))
+                except Exception as exc: errors.append(f"multicall: {type(exc).__name__}: {exc}")
+            if best is None:
                 def quote_fee(fees):
                     encoded=self._encode_uni_path(path,fees)
-                    if len(path)==2:
-                        result=self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2),abi=UNI_QUOTER_ABI).functions.quoteExactInputSingle((self._addr(token_in),self._addr(token_out),int(amount),int(fees[0]),0)).call())
-                    else:
-                        result=self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2),abi=UNI_QUOTER_ABI).functions.quoteExactInput(encoded,int(amount)).call())
+                    if len(path)==2: result=self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2),abi=UNI_QUOTER_ABI).functions.quoteExactInputSingle((self._addr(token_in),self._addr(token_out),int(amount),int(fees[0]),0)).call())
+                    else: result=self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(UNI_QUOTER_V2),abi=UNI_QUOTER_ABI).functions.quoteExactInput(encoded,int(amount)).call())
                     return fees,encoded,result
                 with ThreadPoolExecutor(max_workers=min(4,len(fee_sets))) as pool:
                     futures=[pool.submit(quote_fee,fees) for fees in fee_sets]
                     for future in as_completed(futures):
                         try:
-                def _aero_quote(self, token_in: str, token_out: str, amount: int):
-        cache_key=("aero", token_in.lower(), token_out.lower(), int(amount))
-        now=time.monotonic()
+                            fees,encoded,result=future.result(); out=int(result[0]); gas_est=int(result[-1])
+                            if out>0 and (best is None or out>best[0]): best=(out,tuple(path),tuple(fees),gas_est,encoded)
+                        except Exception as exc: errors.append(f"rpc fee_probe: {type(exc).__name__}: {exc}")
+        if best is None: raise RuntimeError("no Uniswap V3 pool/liquidity for pair; "+" | ".join(errors[-4:]))
+        self._quote_cache[cache_key]=(now,best)
+        logging.info("Uniswap V3 quote pair=%s->%s amount=%s out=%s fees=%s multicall=%s",token_in,token_out,amount,best[0],best[2],self.multicall_enabled)
+        return best
+    def _aero_quote(self, token_in: str, token_out: str, amount: int):
+        cache_key=("aero",token_in.lower(),token_out.lower(),int(amount)); now=time.monotonic()
         cached=self._quote_cache.get(cache_key)
         if cached and now-cached[0] < self._quote_cache_ttl: return cached[1]
-        no_liq=self._no_liquidity_cache.get(cache_key)
-        if no_liq and now-no_liq < 5.0: raise RuntimeError("no Aerodrome pool/liquidity for pair (cached)")
-        factory=self.aero_factory; best=None; errors=[]
-        paths=[(token_in,token_out)]
+        factory=self.aero_factory; best=None; errors=[]; paths=[(token_in,token_out)]
         for mid in self.route_intermediates:
             if mid.lower() not in {token_in.lower(),token_out.lower()}: paths.append((token_in,mid,token_out))
         for path_index,path in enumerate(paths):
             if path_index>0 and best is not None and not self.deep_route_always: break
-            stable_sets=([(False,),(True,)] if len(path)==2 else [(False,False),(False,True),(True,False),(True,True)])
-            try:
-                if self.multicall_enabled:
-                    calls=[]
-                    for stable_flags in stable_sets:
-                        route=[{"from":self._addr(path[i]),"to":self._addr(path[i+1]),"stable":bool(stable_flags[i]),"factory":self._addr(factory)} for i in range(len(path)-1)]
-                        calldata=self.aero.encodeABI(fn_name="getAmountsOut",args=[int(amount),route])
-                        calls.append((AERO_ROUTER,True,calldata))
+            stable_sets=[(False,),(True,)] if len(path)==2 else [(False,False),(False,True),(True,False),(True,True)]
+            if self.multicall_enabled:
+                try:
+                    routes=[]; calls=[]
+                    for flags in stable_sets:
+                        route=[{"from":self._addr(path[i]),"to":self._addr(path[i+1]),"stable":bool(flags[i]),"factory":self._addr(factory)} for i in range(len(path)-1)]
+                        routes.append(route); calls.append((AERO_ROUTER,True,self.aero.encodeABI(fn_name="getAmountsOut",args=[int(amount),route])))
                     results=self._multicall(calls)
-                    for stable_flags,(success,data) in zip(stable_sets,results):
+                    for route,(success,data) in zip(routes,results):
                         if not success: continue
-                        try:
-                            amounts=self.w3.codec.decode(["uint256[]"],bytes(data))[0]; out=int(amounts[-1])
-                            route=[{"from":self._addr(path[i]),"to":self._addr(path[i+1]),"stable":bool(stable_flags[i]),"factory":self._addr(factory)} for i in range(len(path)-1)]
-                            if out>0 and (best is None or out>best[0]): best=(out,tuple(route),self.aero_gas_limit+60000*(len(path)-1),self._addr(factory))
-                        except Exception as exc: errors.append(f"multicall decode: {type(exc).__name__}: {exc}")
-                else: raise RuntimeError("multicall disabled")
-            except Exception as exc:
-                errors.append(f"multicall: {type(exc).__name__}: {exc}")
-                def probe_aero(stable_flags):
-                    route=[{"from":self._addr(path[i]),"to":self._addr(path[i+1]),"stable":bool(stable_flags[i]),"factory":self._addr(factory)} for i in range(len(path)-1)]
+                        out=int(self.w3.codec.decode(["uint256[]"],bytes(data))[0][-1])
+                        if out>0 and (best is None or out>best[0]): best=(out,tuple(route),self.aero_gas_limit+60000*(len(path)-1),self._addr(factory))
+                except Exception as exc: errors.append(f"multicall: {type(exc).__name__}: {exc}")
+            if best is None:
+                def probe(flags):
+                    route=[{"from":self._addr(path[i]),"to":self._addr(path[i+1]),"stable":bool(flags[i]),"factory":self._addr(factory)} for i in range(len(path)-1)]
                     amounts=self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(AERO_ROUTER),abi=ROUTER_ABI).functions.getAmountsOut(int(amount),route).call())
-                    return stable_flags,route,int(amounts[-1])
+                    return route,int(amounts[-1])
                 with ThreadPoolExecutor(max_workers=min(4,len(stable_sets))) as pool:
-                    futures=[pool.submit(probe_aero,s) for s in stable_sets]
+                    futures=[pool.submit(probe,s) for s in stable_sets]
                     for future in as_completed(futures):
                         try:
-                            stable_flags,route,out=future.result()
+                            route,out=future.result()
                             if out>0 and (best is None or out>best[0]): best=(out,tuple(route),self.aero_gas_limit+60000*(len(path)-1),self._addr(factory))
                         except Exception as exc: errors.append(f"rpc stable_probe: {type(exc).__name__}: {exc}")
-        if best is None:
-            detail=" | ".join(errors[-4:]); self._no_liquidity_cache[cache_key]=now
-            logging.warning("Aerodrome quote failed pair=%s->%s amount=%s errors=%s",token_in,token_out,amount,detail)
-            raise RuntimeError(f"no Aerodrome pool/liquidity for pair; {detail}")
+        if best is None: raise RuntimeError("no Aerodrome pool/liquidity for pair; "+" | ".join(errors[-4:]))
         self._quote_cache[cache_key]=(now,best)
-        logging.info("Aerodrome quote pair=%s->%s amount=%s out=%s hops=%s factory=%s multicall=%s",token_in,token_out,amount,best[0],len(best[1]),best[3],self.multicall_enabled)
+        logging.info("Aerodrome quote pair=%s->%s amount=%s out=%s multicall=%s",token_in,token_out,amount,best[0],self.multicall_enabled)
         return best
-
-t = future.result()
-                        if out > 0 and (best is None or out > best[0]):
-                            best = (out, tuple(route), self.aero_gas_limit + 60000 * (len(path)-1), self._addr(factory))
-                    except Exception as exc:
-                        errors.append(f"path={len(path)} stable_probe: {type(exc).__name__}: {exc}")
-        if best is None:
-            detail = " | ".join(errors[-2:])
-            logging.warning("Aerodrome quote failed pair=%s->%s amount=%s errors=%s", token_in, token_out, amount, detail)
-            self._no_liquidity_cache[cache_key]=now
-            raise RuntimeError(f"no Aerodrome pool/liquidity for pair; {detail}")
-        self._quote_cache[cache_key]=(now,best)
-        logging.info("Aerodrome quote pair=%s->%s amount=%s out=%s hops=%s factory=%s", token_in, token_out, amount, best[0], len(best[1]), best[3])
-        return best
-
     def _gas_price(self) -> int:
         now = time.monotonic()
         if self._gas_price_cache <= 0 or now - self._gas_price_cache_at >= 1.0:
