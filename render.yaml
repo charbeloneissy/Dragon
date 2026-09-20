@@ -56,6 +56,11 @@ services:
         value: "50"
       - key: DEX_POLL_SECONDS
         value: "4.0"
+      # Free Render keep-awake target: an external monitor should GET /health
+      # at least every 5 minutes. This setting documents the expected cadence;
+      # it does not generate outbound pings from Dragon itself.
+      - key: FREE_RENDER_HEALTH_PING_MINUTES
+        value: "5"
       - key: DEX_MAX_OPPORTUNITIES
         value: "8"
       - key: FLASH_LOAN_ENABLED
