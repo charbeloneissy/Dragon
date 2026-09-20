@@ -41,6 +41,9 @@ UNI_ROUTER_ABI = [
 class RpcRateLimitError(RuntimeError):
     """Raised when all configured RPC attempts are rate-limited/transient."""
 
+class QuoteDeadlineError(RuntimeError):
+    """Raised when a quote exceeds its opportunity-latency budget."""
+
 class DirectDexAdapter:
     """Direct Base DEX adapter. No aggregator/API key is required."""
 
@@ -375,6 +378,8 @@ class DirectDexAdapter:
         for mid in self.route_intermediates:
             if mid.lower() not in {token_in.lower(),token_out.lower()}: paths.append((token_in,mid,token_out))
         for path_index,path in enumerate(paths):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise QuoteDeadlineError("Aerodrome quote deadline exhausted before route probe")
             if path_index>0 and best is not None and not self.deep_route_always: break
             fee_sets=[(f,) for f in self.uni_fees] if len(path)==2 else [(a,b) for a in self.uni_fees for b in self.uni_fees]
             if len(path)==2 and self.multicall_enabled:
@@ -399,6 +404,8 @@ class DirectDexAdapter:
                             if out>0 and (best is None or out>best[0]): best=(out,tuple(path),tuple(fees),gas_est,encoded)
                         except Exception as exc: errors.append(f"rpc fee_probe: {type(exc).__name__}: {exc}")
         if best is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise QuoteDeadlineError("Uniswap V3 quote deadline exhausted; pair liquidity was not confirmed")
             message="no Uniswap V3 pool/liquidity for pair; "+" | ".join(errors[-4:])
             if self._only_rpc_failures(errors):
                 raise RpcRateLimitError(message)
@@ -420,6 +427,8 @@ class DirectDexAdapter:
                 try:
                     routes=[]; calls=[]
                     for flags in stable_sets:
+                        if deadline is not None and time.monotonic() >= deadline:
+                            raise QuoteDeadlineError("Aerodrome quote deadline exhausted during route construction")
                         route=[{"from":self._addr(path[i]),"to":self._addr(path[i+1]),"stable":bool(flags[i]),"factory":self._addr(factory)} for i in range(len(path)-1)]
                         routes.append(route); calls.append((AERO_ROUTER,True,self.aero.encode_abi("getAmountsOut",args=[int(amount),route])))
                     results=self._multicall(calls, deadline=deadline)
@@ -430,6 +439,8 @@ class DirectDexAdapter:
                 except Exception as exc: errors.append(f"multicall: {type(exc).__name__}: {exc}")
             if best is None:
                 def probe(flags):
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise QuoteDeadlineError("Aerodrome quote deadline exhausted before RPC probe")
                     route=[{"from":self._addr(path[i]),"to":self._addr(path[i+1]),"stable":bool(flags[i]),"factory":self._addr(factory)} for i in range(len(path)-1)]
                     amounts=self._rpc_call(lambda w3: w3.eth.contract(address=Web3.to_checksum_address(AERO_ROUTER),abi=ROUTER_ABI).functions.getAmountsOut(int(amount),route).call(), deadline=deadline)
                     return route,int(amounts[-1])
@@ -441,6 +452,8 @@ class DirectDexAdapter:
                             if out>0 and (best is None or out>best[0]): best=(out,tuple(route),self.aero_gas_limit+60000*(len(path)-1),self._addr(factory))
                         except Exception as exc: errors.append(f"rpc stable_probe: {type(exc).__name__}: {exc}")
         if best is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise QuoteDeadlineError("Aerodrome quote deadline exhausted; pair liquidity was not confirmed")
             message="no Aerodrome pool/liquidity for pair; "+" | ".join(errors[-4:])
             if self._only_rpc_failures(errors):
                 raise RpcRateLimitError(message)
@@ -458,7 +471,7 @@ class DirectDexAdapter:
     def quote_single_source(self, *, chain_id: int, sell_token: str, buy_token: str, sell_amount: int, taker: str, source: str, slippage_bps: int = 50, deadline: float | None = None, probe: bool = False):
         started = time.perf_counter()
         if deadline is None:
-            deadline = started + float(os.getenv("DEX_MAX_QUOTE_LATENCY_MS", "1000")) / 1000.0
+            deadline = started + float(os.getenv("DEX_MAX_QUOTE_LATENCY_MS", "500")) / 1000.0
         if int(chain_id) != 8453:
             raise ValueError("direct adapter supports Base only")
         if int(sell_amount) <= 0:
