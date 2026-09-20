@@ -167,11 +167,14 @@ class AaveFlashExecutor:
             raise ValueError("second leg quote output is below the total principal")
 
         scale = Decimal(10) ** self.config.quote_token_decimals
-        gas_reserve = Decimal(str(getattr(opportunity, "gas_cost_quote", 0)))
-        safety_reserve = Decimal(str(getattr(opportunity, "safety_buffer_quote", 0)))
-        required_profit = self.config.min_profit_quote + gas_reserve + safety_reserve
+        # Gas is paid by the transaction sender in the native asset and is already
+        # deducted once by the scanner when it computes opportunity.net_profit_quote.
+        # Do not add estimated gas a second time to the token-denominated contract
+        # profit gate. The contract only needs to enforce gross quote profit after
+        # the Aave premium; the off-chain gate enforces true net profit after gas.
+        required_profit = self.config.min_profit_quote
         if required_profit <= 0 or not required_profit.is_finite():
-            raise ValueError("invalid required net-profit reserve")
+            raise ValueError("invalid required net-profit threshold")
 
         params = (
             self.config.owner_address, int(required_profit * scale), int(max_block_number),
