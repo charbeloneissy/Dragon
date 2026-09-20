@@ -316,8 +316,8 @@ class DexCrossExchangeEngine:
         scale = Decimal(10) ** self.quote_token_decimals; ceiling = int(max_quote_amount * scale)
         if ceiling <= 0: return []
         compound_amount = int(compound_amount)
-        if compound_amount < 0 or compound_amount >= ceiling:
-            raise ValueError("compound_amount must be non-negative and below the total quote ceiling")
+        if compound_amount != 0:
+            raise ValueError("Dragon is configured for no compounding; compound_amount must be zero")
         self.last_rejections = {}; profitable: list[DexOpportunity] = []
         # Size the flash-loan portion independently, then add retained profits to
         # every candidate. Aave liquidity remains the hard ceiling for the loan.
@@ -380,8 +380,8 @@ class DexCrossExchangeEngine:
     def scan_once(self, *, chain_id: int, quote_token: str, base_token: str, quote_amount: int, taker: str, slippage_bps: int = 50, compound_amount: int = 0) -> list[DexOpportunity]:
         if len(self.sources) < 2: raise ValueError("DEX cross-exchange mode requires at least two DEX sources")
         if quote_amount <= 0: raise ValueError("quote_amount must be positive")
-        if compound_amount < 0 or compound_amount >= quote_amount:
-            raise ValueError("compound_amount must be non-negative and below quote_amount")
+        if compound_amount != 0:
+            raise ValueError("Dragon is configured for no compounding; compound_amount must be zero")
         if not 0 <= slippage_bps <= 5000: raise ValueError("slippage_bps must be between 0 and 5000")
         flash_amount = quote_amount - compound_amount
         quote_adapters = self._quote_adapters
