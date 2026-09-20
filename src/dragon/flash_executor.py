@@ -71,6 +71,7 @@ class FlashExecutorConfig:
     max_priority_fee_gwei: Decimal = Decimal("0.001")
     mev_required: bool = True
     compound_profits: bool = True
+    wrapped_native_token: str = ""
 
     @classmethod
     def from_env(cls) -> "FlashExecutorConfig":
@@ -95,6 +96,7 @@ class FlashExecutorConfig:
             max_fee_multiplier=multiplier, max_priority_fee_gwei=Decimal(os.getenv("DEX_MAX_PRIORITY_FEE_GWEI", "0.001")),
             mev_required=os.getenv("MEV_PROTECTION_REQUIRED", "true").lower() in {"1","true","yes","on"},
             compound_profits=False,
+            wrapped_native_token=Web3.to_checksum_address(os.getenv("DEX_WRAPPED_NATIVE_TOKEN", "0x0000000000000000000000000000000000000000")) if os.getenv("DEX_WRAPPED_NATIVE_TOKEN", "").strip() else "",
         )
 
 
@@ -213,6 +215,7 @@ class AaveFlashExecutor:
         timeout: int = 30,
         *,
         native_to_quote_rate: Decimal | None = None,
+        opportunity: Any | None = None,
     ) -> dict[str, Any]:
         """Wait for inclusion and calculate realized P&L without double counting.
 
@@ -241,6 +244,21 @@ class AaveFlashExecutor:
 
         result = dict(receipt)
         result["gas_cost_native"] = str(gas_cost_native)
+
+        # Derive a gas conversion only when the first leg explicitly outputs
+        # the configured wrapped native asset. Never assume an arbitrary base
+        # token is the asset used to pay transaction gas.
+        if native_to_quote_rate is None and opportunity is not None and self.config.wrapped_native_token:
+            first = getattr(opportunity, "first_leg", None)
+            if first is not None:
+                buy_token = str(getattr(first, "buy_token", "")).lower()
+                native_token = self.config.wrapped_native_token.lower()
+                if buy_token == native_token:
+                    native_units = int(getattr(first, "buy_amount", 0) or 0)
+                    quote_units = int(getattr(opportunity, "quote_amount", 0) or 0)
+                    if native_units > 0 and quote_units > 0:
+                        native_to_quote_rate = Decimal(quote_units) / Decimal(native_units)
+
         try:
             events = self.contract.events.FlashArbitrageExecuted().process_receipt(receipt)
             if events:
