@@ -262,7 +262,7 @@ async def to_thread(fn, *args, **kwargs):
     return await asyncio.to_thread(fn, *args, **kwargs)
 
 
-async def scan_evm_chain(adapter, chain_id, *, max_quote, taker, slippage, min_profit):
+async def scan_evm_chain(adapter, chain_id, *, max_quote, taker, slippage, min_profit, safety_buffer):
     """Scan every venue pair on one EVM chain for one base token."""
     spec = get_spec(chain_id)
     quote_token, quote_decimals = _quote_token_for(chain_id)
@@ -270,10 +270,25 @@ async def scan_evm_chain(adapter, chain_id, *, max_quote, taker, slippage, min_p
     venue_names = [v.name for v in venues_for(chain_id)]
     if len(venue_names) < 2:
         return [], {}
+    flash_enabled = env_bool("FLASH_LOAN_ENABLED", False)
+    configured_fee_bps = env_decimal("FLASH_LOAN_FEE_BPS", "0")
+    fee_bps = configured_fee_bps
+    if flash_enabled and hasattr(adapter, "evm") and adapter.evm is not None:
+        try:
+            live_fee_bps = Decimal(str(adapter.evm.flash_loan_fee_bps(chain_id)))
+        except Exception as exc:
+            raise RuntimeError(
+                f"cannot verify live Aave flash-loan premium on chain {chain_id}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        if live_fee_bps < 0 or live_fee_bps > Decimal("1000"):
+            raise ValueError(f"invalid live flash-loan fee on chain {chain_id}: {live_fee_bps} bps")
+        fee_bps = live_fee_bps
     engine = DexCrossExchangeEngine(
         adapter, venue_names, min_profit=min_profit, quote_token_decimals=quote_decimals,
-        flash_loan_enabled=env_bool("FLASH_LOAN_ENABLED", False),
-        flash_loan_fee_bps=env_decimal("FLASH_LOAN_FEE_BPS", "0"),
+        safety_buffer_quote=safety_buffer,
+        flash_loan_enabled=flash_enabled,
+        flash_loan_fee_bps=fee_bps,
         telemetry=METRICS,
     )
     found: list = []
@@ -395,7 +410,7 @@ async def main():
                     chain_flash_cap = quote_units(flash_cap_quote, quote_decimals)
                     found, rej = await scan_evm_chain(
                         adapter, cid, max_quote=chain_flash_cap, taker=taker,
-                        slippage=slippage, min_profit=min_profit,
+                        slippage=slippage, min_profit=min_profit, safety_buffer=safety_buffer,
                     )
                     for opp in found:
                         all_found.append((opp, get_spec(cid).name))
