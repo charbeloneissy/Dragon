@@ -61,6 +61,13 @@ services:
       # it does not generate outbound pings from Dragon itself.
       - key: FREE_RENDER_HEALTH_PING_MINUTES
         value: "5"
+      # Amplitude runtime telemetry. The API key must be added securely in Render.
+      - key: AMPLITUDE_ENABLED
+        value: "true"
+      - key: AMPLITUDE_API_KEY
+        sync: false
+      - key: AMPLITUDE_ENDPOINT
+        value: "https://api2.amplitude.com/2/httpapi"
       - key: DEX_MAX_OPPORTUNITIES
         value: "8"
       - key: FLASH_LOAN_ENABLED
