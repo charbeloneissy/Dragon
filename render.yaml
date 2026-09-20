@@ -6,7 +6,9 @@ services:
     plan: free
     branch: main
     buildCommand: pip install --no-cache-dir -r requirements.txt
-    startCommand: python dragon_supervisor.py
+    # The local engine is disabled, so run the scanner directly. This keeps
+    # Render's process and health port tied to the actual scanner.
+    startCommand: python dex_cross_exchange_runner.py
     autoDeploy: true
     healthCheckPath: /health
     envVars:
@@ -18,6 +20,10 @@ services:
         value: INFO
       - key: DEX_CHAIN_ID
         value: "8453"
+      - key: DEX_QUOTE_TOKEN
+        value: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      - key: DEX_TAKER_ADDRESS
+        value: "0x000000000000000000000000000000000000dEaD"
       - key: DEX_OWN_CAPITAL_QUOTE
         value: "0"
       - key: DEX_FLASH_LOAN_LIQUIDITY_QUOTE
