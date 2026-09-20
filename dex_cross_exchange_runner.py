@@ -41,6 +41,12 @@ class Handler(BaseHTTPRequestHandler):
             payload = dict(STATE)
             payload["rejections"] = dict(STATE["rejections"])
             payload["observability"] = METRICS.snapshot()
+        if path == "/":
+            self.send_response(302)
+            self.send_header("Location", "/dashboard")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
         if path == "/dashboard":
             try:
                 with open("dashboard.html", "rb") as f:
