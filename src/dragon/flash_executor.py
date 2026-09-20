@@ -207,27 +207,67 @@ class AaveFlashExecutor:
         signed = self.account.sign_transaction(tx)
         return self.w3.eth.send_raw_transaction(signed.raw_transaction).hex()
 
-    def wait_for_success(self, tx_hash: str, timeout: int = 30) -> dict[str, Any]:
+    def wait_for_success(
+        self,
+        tx_hash: str,
+        timeout: int = 30,
+        *,
+        native_to_quote_rate: Decimal | None = None,
+    ) -> dict[str, Any]:
+        """Wait for inclusion and calculate realized P&L without double counting.
+
+        The executor contract's profit event field is already the quote-token
+        profit after the Aave premium and before transaction gas. Therefore:
+        realized_net = event profit - actual receipt gas converted to quote.
+
+        native_to_quote_rate is the execution-time native-token/quote-token
+        conversion supplied by the caller. If unavailable, raw gas cost and
+        token profit are still returned, but realized net P&L is not reported.
+        """
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
-        if int(receipt.get("status", 0)) != 1:
-            reverted = dict(receipt)
-            gas_used = int(receipt.get("gasUsed", 0) or 0)
-            gas_price = int(receipt.get("effectiveGasPrice", receipt.get("gasPrice", 0)) or 0)
-            reverted["gas_cost_native"] = str(gas_used * gas_price)
-            raise FlashTransactionReverted(tx_hash, reverted)
-        result = dict(receipt)
         gas_used = int(receipt.get("gasUsed", 0) or 0)
         gas_price = int(receipt.get("effectiveGasPrice", receipt.get("gasPrice", 0)) or 0)
-        result["gas_cost_native"] = str(gas_used * gas_price)
+        gas_cost_native = gas_used * gas_price
+        if int(receipt.get("status", 0)) != 1:
+            reverted = dict(receipt)
+            reverted["gas_cost_native"] = str(gas_cost_native)
+            if native_to_quote_rate is not None:
+                rate = Decimal(native_to_quote_rate)
+                if rate.is_finite() and rate > 0:
+                    reverted["gas_cost_quote"] = str(
+                        (Decimal(gas_cost_native) / (Decimal(10) ** 18)) * rate
+                    )
+            raise FlashTransactionReverted(tx_hash, reverted)
+
+        result = dict(receipt)
+        result["gas_cost_native"] = str(gas_cost_native)
         try:
             events = self.contract.events.FlashArbitrageExecuted().process_receipt(receipt)
             if events:
-                result["arb_profit_raw"] = str(events[-1]["args"].get("profit", 0))
-                result["arb_premium_raw"] = str(events[-1]["args"].get("premium", 0))
-                result["compound_amount_raw"] = str(events[-1]["args"].get("compoundAmount", 0))
-                result["retained_profit_raw"] = str(events[-1]["args"].get("retainedProfit", 0))
+                args = events[-1]["args"]
+                profit_raw = int(args.get("profit", 0))
+                premium_raw = int(args.get("premium", 0))
+                result["arb_profit_raw"] = str(profit_raw)
+                result["arb_premium_raw"] = str(premium_raw)
+                result["compound_amount_raw"] = str(args.get("compoundAmount", 0))
+                result["retained_profit_raw"] = str(args.get("retainedProfit", 0))
+
+                scale = Decimal(10) ** self.config.quote_token_decimals
+                result["arb_profit_quote"] = str(Decimal(profit_raw) / scale)
+                result["arb_premium_quote"] = str(Decimal(premium_raw) / scale)
+
+                # Event profit already subtracts the Aave premium. Never
+                # subtract arb_premium_quote again when computing realized P&L.
+                if native_to_quote_rate is not None:
+                    rate = Decimal(native_to_quote_rate)
+                    if not rate.is_finite() or rate <= 0:
+                        raise ValueError("native_to_quote_rate must be finite and positive")
+                    gas_quote = (Decimal(gas_cost_native) / (Decimal(10) ** 18)) * rate
+                    realized = (Decimal(profit_raw) / scale) - gas_quote
+                    result["gas_cost_quote"] = str(gas_quote)
+                    result["realized_pnl_quote"] = str(realized)
         except Exception:
-            # A successful receipt without the executor event is still included,
-            # but the dashboard must show that realized token proceeds are unknown.
+            # A successful receipt without a decodable executor event is still
+            # included, but realized token proceeds remain unknown.
             pass
         return result
