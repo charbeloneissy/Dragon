@@ -45,7 +45,7 @@ EXECUTOR_ABI = [
         {"indexed": True, "internalType": "address", "name": "secondTarget", "type": "address"},
     ], "name": "FlashArbitrageExecuted", "type": "event"},
 ]
-ERC20_ABI = [{"constant":True,"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
+ERC20_ABI = [{"constant":True,"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"constant":True,"inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],"name":"allowance","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
 AAVE_POOL_ABI = [{"inputs":[],"name":"FLASHLOAN_PREMIUM_TOTAL","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"}]
 
 
@@ -190,7 +190,7 @@ class AaveFlashExecutor:
         max_fee = int(Decimal(max(base_fee + priority, priority)) * self.config.max_fee_multiplier)
         tx: dict[str, Any] = {"from":self.account.address,"nonce":nonce,"chainId":self.config.chain_id,"maxFeePerGas":max_fee,"maxPriorityFeePerGas":priority,"value":0}
         tx.update(fn.build_transaction(tx))
-        tx["gas"] = self.config.gas_limit or int(self.w3.eth.estimate_gas(tx) * Decimal("1.10"))
+        tx["gas"] = self.config.gas_limit or int(self.w3.eth.estimate_gas(tx) * Decimal(os.getenv("DEX_GAS_ESTIMATE_MULTIPLIER", "1.05")))
         # estimate_gas is not enough for lifecycle observability. Run the exact
         # calldata through eth_call immediately before signing so a later record
         # can distinguish simulation failure from submission failure.
