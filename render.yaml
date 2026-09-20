@@ -19,7 +19,7 @@ services:
         value: INFO
       # Chains scanned every loop. Add more ids to fan out across venues.
       - key: DEX_CHAINS
-        value: "8453,42161,10,56,137,43114,1,5000,480,130,324,42220,59144,534352"
+        value: "1,42161,8453,10,56,137,43114"
       - key: NONEVM_CHAINS
         value: "tron,cosmos,solana"
       - key: JUPITER_QUOTE_URL
@@ -45,7 +45,7 @@ services:
       - key: DEX_TAKER_ADDRESS
         value: "0x000000000000000000000000000000000000dEaD"
       - key: DEX_FLASH_LOAN_LIQUIDITY_QUOTE
-        value: "1000"
+        value: "100"
       - key: DEX_MIN_NET_PROFIT
         value: "0.005"
       - key: DEX_SAFETY_BUFFER
@@ -57,11 +57,17 @@ services:
       - key: DEX_MAX_OPPORTUNITIES
         value: "8"
       - key: FLASH_LOAN_ENABLED
-        value: "false"
+        value: "true"
       - key: FLASH_LOAN_FEE_BPS
-        value: "0"
+        value: "5"
       - key: MEV_PROTECTION_REQUIRED
         value: "true"
+      - key: DEX_COMPOUND_PROFITS
+        value: "true"
+      - key: DEX_COMPOUND_RATIO
+        value: "1"
+      - key: DEX_MAX_COMPOUND_QUOTE
+        value: "100"
       - key: ATOMIC_REPAYMENT_REQUIRED
         value: "true"
       - key: LIVE_TRADING
