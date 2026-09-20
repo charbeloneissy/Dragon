@@ -117,6 +117,22 @@ def rpc_host(url):
         return "unknown"
 
 
+def quote_units(human_amount: Decimal, decimals: int) -> int:
+    """Convert a human quote amount into ERC-20 base units."""
+    if not human_amount.is_finite() or human_amount <= 0:
+        raise ValueError("quote amount must be positive and finite")
+    if not 0 <= decimals <= 36:
+        raise ValueError("quote decimals must be between 0 and 36")
+    units = int(human_amount * (Decimal(10) ** decimals))
+    if units <= 0:
+        raise ValueError("quote amount is below one token base unit")
+    return units
+
+
+def human_quote_amount(raw_amount: int, decimals: int) -> Decimal:
+    return Decimal(raw_amount) / (Decimal(10) ** decimals)
+
+
 def validate_evm_address(name, value):
     value = value.strip()
     if len(value) != 42 or not value.startswith("0x"):
@@ -223,7 +239,7 @@ def merge_rejections(stats):
             STATE["rejections"][key] = int(value)
 
 
-def opportunity_view(opportunity, identifier, chain_label):
+def opportunity_view(opportunity, identifier, chain_label, quote_decimals):
     return {
         "id": identifier,
         "chain": chain_label,
@@ -232,6 +248,7 @@ def opportunity_view(opportunity, identifier, chain_label):
         "base_token": opportunity.base_token,
         "quote_token": opportunity.quote_token,
         "quote_amount": str(opportunity.quote_amount),
+        "quote_amount_human": str(human_quote_amount(opportunity.quote_amount, quote_decimals)),
         "gross_profit_quote": str(opportunity.gross_profit_quote),
         "net_profit_quote": str(opportunity.net_profit_quote),
         "gas_cost_quote": str(opportunity.gas_cost_quote),
@@ -315,7 +332,9 @@ async def main():
             raise ValueError("DEX_MIN_NET_PROFIT cannot be below 0.005")
         safety = env_decimal("DEX_SAFETY_BUFFER", "0.001")
         slippage = int(os.getenv("DEX_SLIPPAGE_BPS", "50"))
-        flash_cap = env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE", "1000")
+        flash_cap_quote = env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE", "100")
+        if flash_cap_quote <= 0:
+            raise ValueError("DEX_FLASH_LOAN_LIQUIDITY_QUOTE must be positive")
         taker = os.getenv("DEX_TAKER_ADDRESS", "").strip() or "0x000000000000000000000000000000000000dEaD"
         poll = float(os.getenv("DEX_POLL_SECONDS", "2.0"))
 
@@ -330,6 +349,8 @@ async def main():
                 "quote_token": quote_token,
                 "quote_decimals": quote_decimals,
                 "base_tokens": _base_tokens_for(cid),
+                "flash_scan_cap_quote": str(flash_cap_quote),
+                "flash_scan_cap_raw": str(quote_units(flash_cap_quote, quote_decimals)),
             }
         for family in nonevm_chains:
             chain_details[family] = {
@@ -347,8 +368,10 @@ async def main():
                 "sources": sorted({v for d in chain_details.values() for v in d["venues"]}),
                 "min_net_profit": str(min_profit),
                 "safety_buffer": str(safety),
-                "flash_cap": str(flash_cap),
+                "flash_cap": str(flash_cap_quote),
+                "flash_cap_unit": "human quote units",
                 "flash_loan_enabled": env_bool("FLASH_LOAN_ENABLED", False),
+                "compounding_enabled": env_bool("DEX_COMPOUND_PROFITS", False),
                 "rpc_providers": provider_status(load_providers()),
                 "rpc_hosts": {
                     get_spec(cid).name: [rpc_host(u) for u in rpc_urls_for(cid)]
@@ -368,8 +391,10 @@ async def main():
                 all_found = []
                 rejections = {}
                 for cid in evm_chains:
+                    quote_token, quote_decimals = _quote_token_for(cid)
+                    chain_flash_cap = quote_units(flash_cap_quote, quote_decimals)
                     found, rej = await scan_evm_chain(
-                        adapter, cid, max_quote=flash_cap, taker=taker,
+                        adapter, cid, max_quote=chain_flash_cap, taker=taker,
                         slippage=slippage, min_profit=min_profit,
                     )
                     for opp in found:
@@ -390,7 +415,8 @@ async def main():
                         METRICS.record_opportunity(opp)
                     except Exception:
                         logging.debug("telemetry record_opportunity failed", exc_info=True)
-                    rows.append(opportunity_view(opp, identifier, chain_label))
+                    quote_decimals = int(next((d["quote_decimals"] for d in chain_details.values() if d.get("chain_id") == opp.chain_id), 6))
+                    rows.append(opportunity_view(opp, identifier, chain_label, quote_decimals))
                 opportunities = top
                 with LOCK:
                     STATE["scans"] += 1
