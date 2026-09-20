@@ -102,8 +102,10 @@ def universe_payload(chain_details: dict[str, dict]) -> list[dict]:
         details = chain_details.get(item.runtime, {})
         venues = list(details.get("venues", ()))
         row = asdict(item)
-        row["scan_ready"] = bool(venues)
+        # EVM arbitrage requires two venues; non-EVM adapters may be single-source
+        # quote probes, so their readiness remains venue-presence based.
+        row["scan_ready"] = bool(venues) and (item.family != "evm" or len(venues) >= 2)
         row["venues"] = venues
-        row["status"] = "active" if venues else "watchlist"
+        row["status"] = "active" if row["scan_ready"] else "watchlist"
         rows.append(row)
     return rows

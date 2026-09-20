@@ -29,6 +29,7 @@ registry edit, not new code. Verified live venues:
 | Celo | 42220 | Uniswap_V3 |
 | Avalanche | 43114 | Uniswap_V3, SushiSwap_V2, TraderJoe_V2_1 |
 | Linea | 59144 | Uniswap_V3 |
+| Scroll | 534352 | SyncSwap_V2, Uniswap_V3, SushiSwap_V2 |
 
 Non-EVM venues (`src/dragon/dex_nonevm.py`):
 
@@ -79,7 +80,7 @@ The screenshot-derived universe contains 48 selected chains and native assets.
 It is exposed in `/health` as `universe` and in the dashboard as active versus
 watchlist counts. `DEX_CHAINS` and `NONEVM_CHAINS` still control executable
 quote scans; chains without a verified adapter remain visible as watchlist
-entries until their RPC, token map, and DEX venue are verified.
+entries until their RPC, token map, and at least two EVM DEX venues are verified.
 
 ## Configuration
 

@@ -19,7 +19,7 @@ services:
         value: INFO
       # Chains scanned every loop. Add more ids to fan out across venues.
       - key: DEX_CHAINS
-        value: "8453,42161,10,56,137,43114,1,5000,480,130,324,42220,59144"
+        value: "8453,42161,10,56,137,43114,1,5000,480,130,324,42220,59144,534352"
       - key: NONEVM_CHAINS
         value: "tron,cosmos,solana"
       - key: JUPITER_QUOTE_URL

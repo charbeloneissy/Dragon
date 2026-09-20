@@ -17,7 +17,7 @@ def test_universe_can_be_filtered_by_key(monkeypatch):
 def test_universe_payload_marks_active_runtime_entries(monkeypatch):
     monkeypatch.delenv("UNIVERSE_CHAINS", raising=False)
     rows = universe_payload({
-        "ethereum": {"venues": ["Uniswap_V3"]},
+        "ethereum": {"venues": ["Uniswap_V3", "Uniswap_V2"]},
         "solana": {"venues": ["Jupiter"]},
         "cosmos": {"venues": ["Osmosis"]},
     })
@@ -27,3 +27,11 @@ def test_universe_payload_marks_active_runtime_entries(monkeypatch):
     assert by_key["osmosis"]["scan_ready"] is True
     assert by_key["monad"]["status"] == "watchlist"
     assert by_key["sahara"]["network_status"] == "testnet_only"
+
+
+def test_evm_universe_entry_needs_two_venues(monkeypatch):
+    monkeypatch.delenv("UNIVERSE_CHAINS", raising=False)
+    rows = universe_payload({"unichain": {"venues": ["Uniswap_V3"]}})
+    row = next(item for item in rows if item["key"] == "unichain")
+    assert row["scan_ready"] is False
+    assert row["status"] == "watchlist"

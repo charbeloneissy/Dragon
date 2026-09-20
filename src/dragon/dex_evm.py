@@ -335,16 +335,22 @@ class _EvmDexCore:
         now = time.monotonic()
         if cached and now - cached[0] < 15.0:
             return cached[1]
-        source = (self.sources(chain_id) or ("",))[0]
-        if not source:
+        sources = self.sources(chain_id)
+        if not sources:
             return Decimal("0")
-        quote, _ = self.quote_single_source(
-            chain_id=chain_id, sell_token=spec.wrapped_native, buy_token=quote_token,
-            sell_amount=sell_amount_native, taker=taker, source=source, slippage_bps=50, probe=True,
-        )
-        rate = quote.buy_amount / quote.sell_amount
-        self._native_rate_cache[key] = (now, rate)
-        return rate
+        errors: list[str] = []
+        for source in sources:
+            try:
+                quote, _ = self.quote_single_source(
+                    chain_id=chain_id, sell_token=spec.wrapped_native, buy_token=quote_token,
+                    sell_amount=sell_amount_native, taker=taker, source=source, slippage_bps=50, probe=True,
+                )
+                rate = quote.buy_amount / quote.sell_amount
+                self._native_rate_cache[key] = (now, rate)
+                return rate
+            except Exception as exc:
+                errors.append(f"{source}: {type(exc).__name__}: {exc}")
+        raise RuntimeError("no venue could price native gas token; " + " | ".join(errors[-3:]))
 
     # --- venue quotes ------------------------------------------------------
 
@@ -596,4 +602,3 @@ def _stable_flag_combinations(hops: int):
         return
     for mask in range(2 ** hops):
         yield tuple(bool(mask & (1 << i)) for i in range(hops))
-

@@ -94,6 +94,10 @@ EVM_VENUES: dict[int, tuple[Venue, ...]] = {
     ),
     534352: (
         Venue(name="SyncSwap_V2", kind="v2", router="0x80e38291e06339d10AAB483C65695D004dBD5C69"),
+        # Official Scroll deployment: https://gov.uniswap.org/t/official-uniswap-v3-deployments-list/24323
+        Venue(name="Uniswap_V3", kind="v3", router="0xfc30937f5cDe93Df8d48aCAF7e6f5D8D8A31F636", factory="0x70C62C8b8e801124A4Aa81ce07b637A3e83cb919", quoter="0x2566e082Cb1656d22BCbe5644F5b997D194b5299", fee_tiers=(100, 500, 3000, 10000)),
+        # ScrollScan identifies this deployment as SushiSwap's UniswapV2Router02.
+        Venue(name="SushiSwap_V2", kind="v2", router="0x9B3336186a38E1b6c21955d112dbb0343Ee061eE"),
     ),
 }
 
