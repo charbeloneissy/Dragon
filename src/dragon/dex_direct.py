@@ -305,6 +305,10 @@ class DirectDexAdapter:
                 self._rpc_failures[idx] = 0
                 self._rpc_success[idx] += 1
                 return result
+            except QuoteDeadlineError:
+                # A latency-budget expiry is not an RPC rate-limit/liquidity failure.
+                # Preserve the reason so callers can classify it as QUOTE_DEADLINE.
+                raise
             except Exception as exc:
                 last_exc = exc
                 if not self._is_transient_rpc_error(exc):
@@ -379,7 +383,7 @@ class DirectDexAdapter:
             if mid.lower() not in {token_in.lower(),token_out.lower()}: paths.append((token_in,mid,token_out))
         for path_index,path in enumerate(paths):
             if deadline is not None and time.monotonic() >= deadline:
-                raise QuoteDeadlineError("Aerodrome quote deadline exhausted before route probe")
+                raise QuoteDeadlineError("Uniswap V3 quote deadline exhausted before route probe")
             if path_index>0 and best is not None and not self.deep_route_always: break
             fee_sets=[(f,) for f in self.uni_fees] if len(path)==2 else [(a,b) for a in self.uni_fees for b in self.uni_fees]
             if len(path)==2 and self.multicall_enabled:
@@ -389,6 +393,8 @@ class DirectDexAdapter:
                         if not success: continue
                         d=self.w3.codec.decode(["uint256","uint160","uint32","uint256"],bytes(data)); out=int(d[0]); gas_est=int(d[3])
                         if out>0 and (best is None or out>best[0]): best=(out,tuple(path),tuple(fees),gas_est,self._encode_uni_path(path,fees))
+                except QuoteDeadlineError:
+                    raise
                 except Exception as exc: errors.append(f"multicall: {type(exc).__name__}: {exc}")
             if best is None:
                 def quote_fee(fees):
@@ -402,6 +408,8 @@ class DirectDexAdapter:
                         try:
                             fees,encoded,result=future.result(); out=int(result[0]); gas_est=int(result[-1])
                             if out>0 and (best is None or out>best[0]): best=(out,tuple(path),tuple(fees),gas_est,encoded)
+                        except QuoteDeadlineError:
+                            raise
                         except Exception as exc: errors.append(f"rpc fee_probe: {type(exc).__name__}: {exc}")
         if best is None:
             if deadline is not None and time.monotonic() >= deadline:
@@ -436,6 +444,8 @@ class DirectDexAdapter:
                         if not success: continue
                         out=int(self.w3.codec.decode(["uint256[]"],bytes(data))[0][-1])
                         if out>0 and (best is None or out>best[0]): best=(out,tuple(route),self.aero_gas_limit+60000*(len(path)-1),self._addr(factory))
+                except QuoteDeadlineError:
+                    raise
                 except Exception as exc: errors.append(f"multicall: {type(exc).__name__}: {exc}")
             if best is None:
                 def probe(flags):
@@ -450,10 +460,12 @@ class DirectDexAdapter:
                         try:
                             route,out=future.result()
                             if out>0 and (best is None or out>best[0]): best=(out,tuple(route),self.aero_gas_limit+60000*(len(path)-1),self._addr(factory))
+                        except QuoteDeadlineError:
+                            raise
                         except Exception as exc: errors.append(f"rpc stable_probe: {type(exc).__name__}: {exc}")
         if best is None:
             if deadline is not None and time.monotonic() >= deadline:
-                raise QuoteDeadlineError("Aerodrome quote deadline exhausted; pair liquidity was not confirmed")
+                raise QuoteDeadlineError("Uniswap V3 quote deadline exhausted; pair liquidity was not confirmed")
             message="no Aerodrome pool/liquidity for pair; "+" | ".join(errors[-4:])
             if self._only_rpc_failures(errors):
                 raise RpcRateLimitError(message)
