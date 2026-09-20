@@ -70,7 +70,7 @@ class FlashExecutorConfig:
     max_fee_multiplier: Decimal = Decimal("1.20")
     max_priority_fee_gwei: Decimal = Decimal("0.001")
     mev_required: bool = True
-    compound_profits: bool = True
+    compound_profits: bool = False
     wrapped_native_token: str = ""
 
     @classmethod
@@ -245,20 +245,10 @@ class AaveFlashExecutor:
         result = dict(receipt)
         result["gas_cost_native"] = str(gas_cost_native)
 
-        # Derive a gas conversion only when the first leg explicitly outputs
-        # the configured wrapped native asset. Never assume an arbitrary base
-        # token is the asset used to pay transaction gas.
-        if native_to_quote_rate is None and opportunity is not None and self.config.wrapped_native_token:
-            first = getattr(opportunity, "first_leg", None)
-            if first is not None:
-                buy_token = str(getattr(first, "buy_token", "")).lower()
-                native_token = self.config.wrapped_native_token.lower()
-                if buy_token == native_token:
-                    native_units = int(getattr(first, "buy_amount", 0) or 0)
-                    quote_units = int(getattr(opportunity, "quote_amount", 0) or 0)
-                    if native_units > 0 and quote_units > 0:
-                        native_to_quote_rate = Decimal(quote_units) / Decimal(native_units)
-
+        # Gas conversion must come from a fresh execution-time price supplied
+        # by the caller. Do not infer it from token-unit amounts: native and
+        # quote assets can have different decimals, and the first-leg output
+        # is not necessarily the gas asset.
         try:
             events = self.contract.events.FlashArbitrageExecuted().process_receipt(receipt)
             if events:
