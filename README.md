@@ -73,6 +73,14 @@ net_profit   = gross_profit - swap_fees - gas_cost - flash_loan_fee - safety_buf
 Only net-positive routes above `DEX_MIN_NET_PROFIT` are reported.
 `GET /health` returns full machine state; `GET /dashboard` renders `dashboard.html`.
 
+### Requested universe
+
+The screenshot-derived universe contains 48 selected chains and native assets.
+It is exposed in `/health` as `universe` and in the dashboard as active versus
+watchlist counts. `DEX_CHAINS` and `NONEVM_CHAINS` still control executable
+quote scans; chains without a verified adapter remain visible as watchlist
+entries until their RPC, token map, and DEX venue are verified.
+
 ## Configuration
 
 Copy `.env.example` to `.env`. Key settings:
@@ -80,6 +88,7 @@ Copy `.env.example` to `.env`. Key settings:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DEX_CHAINS` | `8453` | Comma-separated EVM chain ids to scan |
+| `UNIVERSE_CHAINS` | *(all)* | Filter the 48 requested chain/native-coin watchlist |
 | `NONEVM_CHAINS` | *(empty)* | Non-EVM families: `tron,cosmos,aptos,solana` |
 | `JUPITER_API_KEY` | *(empty)* | Bearer key for Solana Jupiter quotes |
 | `ALCHEMY_API_KEY` | *(empty)* | Alchemy key; covers eth/arb/opt/polygon/base/avax/bnb/linea/zksync/scroll/blast |

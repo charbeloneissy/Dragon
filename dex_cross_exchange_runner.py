@@ -15,6 +15,7 @@ from src.dragon.dex_evm import RpcRateLimitError
 from src.dragon.dex_multichain import MultiChainDexAdapter
 from src.dragon.observability import ExecutionTelemetry
 from src.dragon.rpc_providers import load_providers, provider_status
+from src.dragon.universe import universe_payload
 from src.dragon.venues import venues_for
 
 STATE = {
@@ -25,7 +26,7 @@ STATE = {
     "flash_liquidity": None, "flash_cap": None, "flash_loan_enabled": False,
     "compounding_enabled": False, "compound_amount_quote": "0",
     "compound_reserve_quote": "0", "last_tx_hash": None, "rejections": {},
-    "base_tokens": {}, "universe_mode": {}, "opportunity_records": [],
+    "base_tokens": {}, "universe_mode": {}, "universe": [], "opportunity_records": [],
     "rpc_providers": {}, "rpc_hosts": {},
     "data_source": "multi-chain cross-DEX executable quotes (EVM + non-EVM)",
 }
@@ -336,6 +337,7 @@ async def main():
                 "mode": "live" if env_bool("LIVE_TRADING", False) else "paper",
                 "chains": list(chain_details.keys()),
                 "chain_details": chain_details,
+                "universe": universe_payload(chain_details),
                 "sources": sorted({v for d in chain_details.values() for v in d["venues"]}),
                 "min_net_profit": str(min_profit),
                 "safety_buffer": str(safety),
