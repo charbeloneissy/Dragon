@@ -45,9 +45,9 @@ services:
       - key: DEX_TAKER_ADDRESS
         value: "0x000000000000000000000000000000000000dEaD"
       - key: DEX_FLASH_LOAN_LIQUIDITY_QUOTE
-        value: "100"
+        value: "10000"
       - key: DEX_MIN_NET_PROFIT
-        value: "0.005"
+        value: "0.0025"
       - key: DEX_SAFETY_BUFFER
         value: "0.001"
       - key: DEX_SLIPPAGE_BPS
@@ -67,7 +67,7 @@ services:
       - key: DEX_COMPOUND_RATIO
         value: "1"
       - key: DEX_MAX_COMPOUND_QUOTE
-        value: "100"
+        value: "10000"
       - key: ATOMIC_REPAYMENT_REQUIRED
         value: "true"
       - key: LIVE_TRADING
