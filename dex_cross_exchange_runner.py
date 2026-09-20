@@ -364,8 +364,7 @@ async def main():
                         slippage=slippage, min_profit=min_profit,
                     )
                     for opp in found:
-                        opp._chain_label = get_spec(cid).name
-                    all_found.extend(found)
+                        all_found.append((opp, get_spec(cid).name))
                     for k, v in rej.items():
                         rejections[k] = rejections.get(k, 0) + int(v)
                 for family in nonevm_chains:
@@ -373,16 +372,17 @@ async def main():
                     for k, v in rej.items():
                         rejections[k] = rejections.get(k, 0) + int(v)
                 merge_rejections(rejections)
-                all_found.sort(key=lambda x: x.net_profit_quote, reverse=True)
-                opportunities = all_found[:max(1, int(os.getenv("DEX_MAX_OPPORTUNITIES", "8")))]
+                all_found.sort(key=lambda pair: pair[0].net_profit_quote, reverse=True)
+                top = all_found[:max(1, int(os.getenv("DEX_MAX_OPPORTUNITIES", "8")))]
                 rows = []
-                for index, opp in enumerate(opportunities):
-                    identifier = opp.id if hasattr(opp, "id") else f"{STATE['scans']}-{index}"
+                for index, (opp, chain_label) in enumerate(top):
+                    identifier = f"{STATE['scans']}-{index}"
                     try:
                         METRICS.record_opportunity(opp)
                     except Exception:
                         logging.debug("telemetry record_opportunity failed", exc_info=True)
-                    rows.append(opportunity_view(opp, identifier, getattr(opp, "_chain_label", None) or str(opp.chain_id)))
+                    rows.append(opportunity_view(opp, identifier, chain_label))
+                opportunities = top
                 with LOCK:
                     STATE["scans"] += 1
                     STATE["opportunities"] += len(opportunities)
