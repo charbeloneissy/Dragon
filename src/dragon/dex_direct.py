@@ -74,6 +74,11 @@ class DirectDexAdapter:
         self._rpc_index = 0
         self._rpc_failures = [0 for _ in urls]
         self._rpc_cooldown_until = [0.0 for _ in urls]
+        # Per-endpoint success/failure counters make it possible to prove which
+        # provider actually served traffic instead of guessing from error text.
+        self._rpc_success = [0 for _ in urls]
+        self._rpc_errors = [0 for _ in urls]
+        self._rpc_selftest = ["untested" for _ in urls]
         # Endpoint selection is shared by concurrent quote workers. Protect the
         # cursor so concurrent requests do not all hammer the same public RPC.
         self._rpc_selection_lock = __import__("threading").Lock()
@@ -93,7 +98,11 @@ class DirectDexAdapter:
                 logging.warning("RPC startup endpoint failed index=%s url=%s error=%s", idx, url, exc)
         if not connected:
             raise RpcRateLimitError("all configured Base RPC endpoints failed at startup: " + " | ".join(startup_errors))
-        logging.info("Direct DEX RPC failover configured endpoints=%s active=%s", len(urls), self.rpc_url)
+        logging.info(
+            "Direct DEX RPC failover configured endpoints=%s active=%s",
+            len(urls), self._rpc_host(self.rpc_url),
+        )
+        self._rpc_selftest = self._run_rpc_selftest()
 
         self._native_rate_cache = {}
         # Short quote cache reduces duplicate RPC calls during one scan without
@@ -114,6 +123,62 @@ class DirectDexAdapter:
         # Keep route expansion bounded: direct + one-intermediate paths only.
         if len(self.route_intermediates) > 4:
             self.route_intermediates = self.route_intermediates[:4]
+
+    @staticmethod
+    def _rpc_host(url: str) -> str:
+        """Return a log-safe endpoint label. The API key is never included."""
+        if not url:
+            return "none"
+        try:
+            host = url.split("//", 1)[-1].split("/", 1)[0]
+        except Exception:
+            return "unparseable"
+        return host or "unparseable"
+
+    def _run_rpc_selftest(self) -> list[str]:
+        """Probe every endpoint with eth_chainId so key/URL problems are explicit.
+
+        A provider that rejects the key returns an HTTP error here, which is the
+        only reliable way to distinguish "key invalid" from "endpoint slow".
+        """
+        results = []
+        expected = "0x2105"
+        for idx, url in enumerate(self._rpc_urls):
+            label = self._rpc_host(url)
+            try:
+                w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": max(2.0, self._rpc_timeout)}))
+                chain = hex(int(w3.eth.chain_id))
+                if chain == expected:
+                    results.append("ok")
+                    logging.info("RPC selftest endpoint=%s host=%s chain=%s keyed=%s", idx, label, chain, self._keyed_endpoints[idx])
+                else:
+                    results.append(f"wrong_chain:{chain}")
+                    logging.warning("RPC selftest endpoint=%s host=%s returned chain=%s; Base expected %s", idx, label, chain, expected)
+            except Exception as exc:
+                message = str(exc)
+                if "401" in message or "403" in message or "unauthorized" in message.lower() or "invalid" in message.lower():
+                    results.append("auth_failed")
+                else:
+                    results.append(f"error:{type(exc).__name__}")
+                logging.warning("RPC selftest endpoint=%s host=%s failed keyed=%s error=%s: %s", idx, label, self._keyed_endpoints[idx], type(exc).__name__, message[:200])
+        return results
+
+    def rpc_status(self) -> dict:
+        """Public, secret-free view of the RPC pool for the health endpoint."""
+        return {
+            "active_host": self._rpc_host(self.rpc_url),
+            "endpoints": [
+                {
+                    "host": self._rpc_host(url),
+                    "keyed": bool(keyed),
+                    "selftest": self._rpc_selftest[idx] if idx < len(self._rpc_selftest) else "unknown",
+                    "success": self._rpc_success[idx],
+                    "errors": self._rpc_errors[idx],
+                    "cooling_down": self._rpc_cooldown_until[idx] > time.monotonic(),
+                }
+                for idx, (url, keyed) in enumerate(zip(self._rpc_urls, self._keyed_endpoints))
+            ],
+        }
 
     def clone_for_concurrent_quotes(self):
         """Create an isolated adapter so parallel quote calls do not share RPC failover state."""
@@ -212,12 +277,15 @@ class DirectDexAdapter:
                 with RPC_CONCURRENCY_SEMAPHORE:
                     result = fn(self.w3)
                 self._rpc_failures[idx] = 0
+                self._rpc_success[idx] += 1
                 return result
             except Exception as exc:
                 last_exc = exc
                 if not self._is_transient_rpc_error(exc):
+                    self._rpc_errors[idx] += 1
                     raise
                 self._rpc_failures[idx] += 1
+                self._rpc_errors[idx] += 1
                 # Public endpoints need a meaningful cool-down. Hammering a
                 # 429 endpoint every 250ms only extends the outage. A keyed
                 # provider recovers quickly, so it should not be parked for
@@ -228,9 +296,16 @@ class DirectDexAdapter:
                 self._rpc_cooldown_until[idx] = time.monotonic() + backoff
                 logging.warning("RPC transient error endpoint=%s keyed=%s cooldown=%.2fs error=%s", idx, self._keyed_endpoints[idx], backoff, exc)
                 self._rpc_index = (idx + 1) % len(self._rpc_urls)
-        raise RpcRateLimitError(
-            f"all configured Base RPC endpoints unavailable after {len(attempted)} fast attempts: {last_exc}"
-        )
+        all_cooling = all(self._rpc_cooldown_until[i] > time.monotonic() for i in range(len(self._rpc_urls)))
+        if all_cooling:
+            # Every endpoint is in cool-down, so no request was even attempted.
+            # Saying "unavailable after 0 fast attempts" hid the real cause.
+            reason = "all Base RPC endpoints are in cool-down; quote deadline too short to wait"
+        elif not attempted:
+            reason = "no RPC endpoint was eligible within the quote deadline"
+        else:
+            reason = f"all Base RPC attempts failed: {last_exc}"
+        raise RpcRateLimitError(reason)
 
     def _multicall(self, calls, deadline: float | None = None):
         if not self.multicall_enabled: raise RuntimeError("Multicall3 disabled")

@@ -208,7 +208,10 @@ async def main():
         rpc_pool_size=len(getattr(direct_adapter,"_rpc_urls",[]) or [])
         rpc_keyed=bool(getattr(direct_adapter,"_has_keyed_endpoint",False))
         logging.info("DEX RPC pool ready endpoints=%s keyed_provider=%s timeout_s=%.2f",rpc_pool_size,rpc_keyed,getattr(direct_adapter,"_rpc_timeout",0.0))
-        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"universe_mode":universe_mode,"universe_refreshed_at":time.time(),"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":str(own_capital),"flash_liquidity":str(own_capital if own_capital>0 else flash_cap),"flash_cap":str(flash_cap),"flash_loan_enabled":flash_enabled,"compounding_enabled":bool(live and compound_enabled),"compound_ratio":str(compound_ratio),"compound_max_quote":str(compound_max),"rpc_endpoints":rpc_pool_size,"rpc_keyed_provider":rpc_keyed})
+        rpc_status=direct_adapter.rpc_status() if hasattr(direct_adapter,"rpc_status") else {}
+        for endpoint in rpc_status.get("endpoints",[]):
+            logging.info("DEX RPC endpoint host=%s keyed=%s selftest=%s",endpoint.get("host"),endpoint.get("keyed"),endpoint.get("selftest"))
+        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"universe_mode":universe_mode,"universe_refreshed_at":time.time(),"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":str(own_capital),"flash_liquidity":str(own_capital if own_capital>0 else flash_cap),"flash_cap":str(flash_cap),"flash_loan_enabled":flash_enabled,"compounding_enabled":bool(live and compound_enabled),"compound_ratio":str(compound_ratio),"compound_max_quote":str(compound_max),"rpc_endpoints":rpc_pool_size,"rpc_keyed_provider":rpc_keyed,"rpc":rpc_status})
         while True:
             try:
                 if auto_discovery and time.time()-float(STATE.get("universe_refreshed_at") or 0) >= discovery_refresh:
@@ -241,6 +244,10 @@ async def main():
                     max_quote=own_capital if own_capital>0 else flash_cap
                     compound_amount_raw=0
                     with LOCK: STATE.update({"flash_liquidity":str(max_quote),"flash_pool_liquidity":None,"compound_reserve_quote":"0","compound_amount_quote":"0","flash_loan_amount_quote":str(max_quote)})
+                # Refresh endpoint counters every cycle so /health shows which
+                # provider is actually serving traffic.
+                if hasattr(direct_adapter,"rpc_status"):
+                    with LOCK: STATE["rpc"]=direct_adapter.rpc_status()
                 all_opportunities=[]
                 aggregate_rejections={}
                 # Fast scanner architecture: use a small live quote to rank the
