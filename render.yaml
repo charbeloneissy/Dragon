@@ -19,9 +19,9 @@ services:
         value: INFO
       # Chains scanned every loop. Add more ids to fan out across venues.
       - key: DEX_CHAINS
-        value: "42161,8453,10,56,137,43114"
+        value: "1,56,43114,8453,42161,10,137,130,324,7777777,480,42220,59144,534352,81457,5000"
       - key: NONEVM_CHAINS
-        value: "tron,cosmos,solana"
+        value: "solana"
       - key: JUPITER_QUOTE_URL
         value: "https://api.jup.ag/swap/v1/quote"
       # Leave RPCs blank to use the built-in public endpoints. A private RPC
