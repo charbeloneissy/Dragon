@@ -299,7 +299,7 @@ class DirectDexAdapter:
                     continue
             try:
                 if deadline is not None and time.monotonic() + self._rpc_timeout > deadline:
-                    raise RpcRateLimitError("RPC call skipped: quote deadline exhausted")
+                    raise QuoteDeadlineError("RPC call skipped: quote deadline exhausted")
                 with RPC_CONCURRENCY_SEMAPHORE:
                     result = fn(self.w3)
                 self._rpc_failures[idx] = 0
@@ -465,7 +465,7 @@ class DirectDexAdapter:
                         except Exception as exc: errors.append(f"rpc stable_probe: {type(exc).__name__}: {exc}")
         if best is None:
             if deadline is not None and time.monotonic() >= deadline:
-                raise QuoteDeadlineError("Uniswap V3 quote deadline exhausted; pair liquidity was not confirmed")
+                raise QuoteDeadlineError("Aerodrome quote deadline exhausted; pair liquidity was not confirmed")
             message="no Aerodrome pool/liquidity for pair; "+" | ".join(errors[-4:])
             if self._only_rpc_failures(errors):
                 raise RpcRateLimitError(message)
