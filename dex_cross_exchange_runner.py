@@ -117,6 +117,22 @@ def rpc_host(url):
         return "unknown"
 
 
+def quote_units(human_amount: Decimal, decimals: int) -> int:
+    """Convert a human quote amount into ERC-20 base units."""
+    if not human_amount.is_finite() or human_amount <= 0:
+        raise ValueError("quote amount must be positive and finite")
+    if not 0 <= decimals <= 36:
+        raise ValueError("quote decimals must be between 0 and 36")
+    units = int(human_amount * (Decimal(10) ** decimals))
+    if units <= 0:
+        raise ValueError("quote amount is below one token base unit")
+    return units
+
+
+def human_quote_amount(raw_amount: int, decimals: int) -> Decimal:
+    return Decimal(raw_amount) / (Decimal(10) ** decimals)
+
+
 def validate_evm_address(name, value):
     value = value.strip()
     if len(value) != 42 or not value.startswith("0x"):
@@ -223,7 +239,7 @@ def merge_rejections(stats):
             STATE["rejections"][key] = int(value)
 
 
-def opportunity_view(opportunity, identifier, chain_label):
+def opportunity_view(opportunity, identifier, chain_label, quote_decimals):
     return {
         "id": identifier,
         "chain": chain_label,
@@ -232,6 +248,7 @@ def opportunity_view(opportunity, identifier, chain_label):
         "base_token": opportunity.base_token,
         "quote_token": opportunity.quote_token,
         "quote_amount": str(opportunity.quote_amount),
+        "quote_amount_human": str(human_quote_amount(opportunity.quote_amount, quote_decimals)),
         "gross_profit_quote": str(opportunity.gross_profit_quote),
         "net_profit_quote": str(opportunity.net_profit_quote),
         "gas_cost_quote": str(opportunity.gas_cost_quote),
@@ -245,7 +262,7 @@ async def to_thread(fn, *args, **kwargs):
     return await asyncio.to_thread(fn, *args, **kwargs)
 
 
-async def scan_evm_chain(adapter, chain_id, *, max_quote, taker, slippage, min_profit):
+async def scan_evm_chain(adapter, chain_id, *, max_quote, taker, slippage, min_profit, safety_buffer):
     """Scan every venue pair on one EVM chain for one base token."""
     spec = get_spec(chain_id)
     quote_token, quote_decimals = _quote_token_for(chain_id)
@@ -253,10 +270,25 @@ async def scan_evm_chain(adapter, chain_id, *, max_quote, taker, slippage, min_p
     venue_names = [v.name for v in venues_for(chain_id)]
     if len(venue_names) < 2:
         return [], {}
+    flash_enabled = env_bool("FLASH_LOAN_ENABLED", False)
+    configured_fee_bps = env_decimal("FLASH_LOAN_FEE_BPS", "0")
+    fee_bps = configured_fee_bps
+    if flash_enabled and hasattr(adapter, "evm") and adapter.evm is not None:
+        try:
+            live_fee_bps = Decimal(str(adapter.evm.flash_loan_fee_bps(chain_id)))
+        except Exception as exc:
+            raise RuntimeError(
+                f"cannot verify live Aave flash-loan premium on chain {chain_id}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        if live_fee_bps < 0 or live_fee_bps > Decimal("1000"):
+            raise ValueError(f"invalid live flash-loan fee on chain {chain_id}: {live_fee_bps} bps")
+        fee_bps = live_fee_bps
     engine = DexCrossExchangeEngine(
         adapter, venue_names, min_profit=min_profit, quote_token_decimals=quote_decimals,
-        flash_loan_enabled=env_bool("FLASH_LOAN_ENABLED", False),
-        flash_loan_fee_bps=env_decimal("FLASH_LOAN_FEE_BPS", "0"),
+        safety_buffer_quote=safety_buffer,
+        flash_loan_enabled=flash_enabled,
+        flash_loan_fee_bps=fee_bps,
         telemetry=METRICS,
     )
     found: list = []
@@ -310,12 +342,14 @@ async def main():
 
         evm_chains = _enabled_evm_chains()
         nonevm_chains = _enabled_nonevm()
-        min_profit = env_decimal("DEX_MIN_NET_PROFIT", "0.005")
-        if min_profit < Decimal("0.005"):
-            raise ValueError("DEX_MIN_NET_PROFIT cannot be below 0.005")
-        safety = env_decimal("DEX_SAFETY_BUFFER", "0.001")
+        min_profit = env_decimal("DEX_MIN_NET_PROFIT", "0.0025")
+        if min_profit < Decimal("0.0025"):
+            raise ValueError("DEX_MIN_NET_PROFIT cannot be below 0.0025")
+        safety = Decimal("0")
         slippage = int(os.getenv("DEX_SLIPPAGE_BPS", "50"))
-        flash_cap = env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE", "1000")
+        flash_cap_quote = env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE", "10000")
+        if flash_cap_quote <= 0:
+            raise ValueError("DEX_FLASH_LOAN_LIQUIDITY_QUOTE must be positive")
         taker = os.getenv("DEX_TAKER_ADDRESS", "").strip() or "0x000000000000000000000000000000000000dEaD"
         poll = float(os.getenv("DEX_POLL_SECONDS", "2.0"))
 
@@ -330,6 +364,8 @@ async def main():
                 "quote_token": quote_token,
                 "quote_decimals": quote_decimals,
                 "base_tokens": _base_tokens_for(cid),
+                "flash_scan_cap_quote": str(flash_cap_quote),
+                "flash_scan_cap_raw": str(quote_units(flash_cap_quote, quote_decimals)),
             }
         for family in nonevm_chains:
             chain_details[family] = {
@@ -347,8 +383,10 @@ async def main():
                 "sources": sorted({v for d in chain_details.values() for v in d["venues"]}),
                 "min_net_profit": str(min_profit),
                 "safety_buffer": str(safety),
-                "flash_cap": str(flash_cap),
+                "flash_cap": str(flash_cap_quote),
+                "flash_cap_unit": "human quote units",
                 "flash_loan_enabled": env_bool("FLASH_LOAN_ENABLED", False),
+                "compounding_enabled": env_bool("DEX_COMPOUND_PROFITS", False),
                 "rpc_providers": provider_status(load_providers()),
                 "rpc_hosts": {
                     get_spec(cid).name: [rpc_host(u) for u in rpc_urls_for(cid)]
@@ -367,11 +405,92 @@ async def main():
             try:
                 all_found = []
                 rejections = {}
-                for cid in evm_chains:
-                    found, rej = await scan_evm_chain(
-                        adapter, cid, max_quote=flash_cap, taker=taker,
-                        slippage=slippage, min_profit=min_profit,
-                    )
+                # Phase 1: cheap gross-spread probes across every active chain.
+                # Phase 2: spend the expensive full sizing/second-leg scan only
+                # on chains whose probe economics clear the flash-fee hurdle.
+                chain_workers = max(1, min(len(evm_chains), int(os.getenv("DEX_CHAIN_CONCURRENCY", "3"))))
+                chain_sem = asyncio.Semaphore(chain_workers)
+                probe_fraction = max(Decimal("0.01"), min(Decimal("0.20"), env_decimal("DEX_CHAIN_PROBE_FRACTION", "0.05")))
+                probe_min_bps = env_decimal("DEX_CHAIN_PROBE_MIN_BPS", "5")
+
+                async def _probe_chain(cid):
+                    async with chain_sem:
+                        quote_token, quote_decimals = _quote_token_for(cid)
+                        base_tokens = _base_tokens_for(cid)
+                        cap = quote_units(flash_cap_quote * probe_fraction, quote_decimals)
+                        if cap <= 0 or not base_tokens:
+                            return cid, Decimal("-Infinity"), {"probe_invalid": 1}
+                        # Read the live Aave premium once per chain and use it in
+                        # the cheap ranking. A configured fee is only a fallback
+                        # when flash loans are disabled.
+                        fee_bps = env_decimal("FLASH_LOAN_FEE_BPS", "0")
+                        if env_bool("FLASH_LOAN_ENABLED", False) and hasattr(adapter, "evm") and adapter.evm is not None:
+                            fee_bps = Decimal(str(adapter.evm.flash_loan_fee_bps(cid)))
+                        venue_names = [v.name for v in venues_for(cid)]
+                        engine = DexCrossExchangeEngine(
+                            adapter, venue_names, min_profit=min_profit,
+                            quote_token_decimals=quote_decimals,
+                            flash_loan_enabled=env_bool("FLASH_LOAN_ENABLED", False),
+                            flash_loan_fee_bps=fee_bps, telemetry=METRICS,
+                        )
+                        best = Decimal("-Infinity")
+                        for base in base_tokens:
+                            probe = await to_thread(
+                                engine.fast_probe,
+                                chain_id=cid, quote_token=quote_token, base_token=base,
+                                quote_amount=cap, taker=taker, slippage_bps=slippage,
+                            )
+                            if probe > best:
+                                best = probe
+                        # Probe score is deliberately conservative: estimated
+                        # gross spread minus the live flash premium. Gas remains a
+                        # hard gate in the full scan and is never assumed away.
+                        score = best - fee_bps
+                        return cid, score, {"probe_gross_bps": best, "flash_fee_bps": fee_bps}
+
+                probe_results = await asyncio.gather(
+                    *(_probe_chain(cid) for cid in evm_chains),
+                    return_exceptions=True,
+                )
+                ranked = []
+                for result in probe_results:
+                    if isinstance(result, Exception):
+                        rejections["chain_probe_error"] = rejections.get("chain_probe_error", 0) + 1
+                        logging.warning("chain probe failed: %s: %s", type(result).__name__, result)
+                        continue
+                    cid, score, stats = result
+                    if score.is_finite():
+                        ranked.append((score, cid, stats))
+                    else:
+                        rejections["chain_probe_no_signal"] = rejections.get("chain_probe_no_signal", 0) + 1
+                ranked.sort(reverse=True)
+                # Keep at least two chains when possible. The threshold is only a
+                # prioritization filter; the full engine still enforces gas, slippage,
+                # flash fee, minimum profit and minimum net-bps before execution.
+                scan_count = max(2, min(len(evm_chains), int(os.getenv("DEX_CHAIN_SCAN_TOP_N", str(len(evm_chains))))))
+                selected = [cid for score, cid, stats in ranked if score >= probe_min_bps][:scan_count]
+                if len(selected) < min(2, len(evm_chains)):
+                    selected = [cid for _, cid, _ in ranked[:min(2, len(ranked))]]
+
+                async def _scan_selected_chain(cid):
+                    async with chain_sem:
+                        quote_token, quote_decimals = _quote_token_for(cid)
+                        chain_flash_cap = quote_units(flash_cap_quote, quote_decimals)
+                        return cid, await scan_evm_chain(
+                            adapter, cid, max_quote=chain_flash_cap, taker=taker,
+                            slippage=slippage, min_profit=min_profit, safety_buffer=safety,
+                        )
+
+                chain_results = await asyncio.gather(
+                    *(_scan_selected_chain(cid) for cid in selected),
+                    return_exceptions=True,
+                )
+                for result in chain_results:
+                    if isinstance(result, Exception):
+                        rejections["chain_scan_error"] = rejections.get("chain_scan_error", 0) + 1
+                        logging.warning("chain scan failed: %s", type(result).__name__, result)
+                        continue
+                    cid, (found, rej) = result
                     for opp in found:
                         all_found.append((opp, get_spec(cid).name))
                     for k, v in rej.items():
@@ -390,7 +509,8 @@ async def main():
                         METRICS.record_opportunity(opp)
                     except Exception:
                         logging.debug("telemetry record_opportunity failed", exc_info=True)
-                    rows.append(opportunity_view(opp, identifier, chain_label))
+                    quote_decimals = int(next((d["quote_decimals"] for d in chain_details.values() if d.get("chain_id") == opp.chain_id), 6))
+                    rows.append(opportunity_view(opp, identifier, chain_label, quote_decimals))
                 opportunities = top
                 with LOCK:
                     STATE["scans"] += 1

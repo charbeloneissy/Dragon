@@ -63,3 +63,13 @@ def test_every_enabled_default_chain_has_registry_spec():
         assert get_spec(chain_id) is not None
     for chain_id in runner.DEFAULT_QUOTE_TOKENS:
         assert get_spec(chain_id) is not None
+
+
+def test_quote_units_are_scaled_per_token_decimals():
+    assert runner.quote_units(runner.Decimal("100"), 6) == 100_000_000
+    assert runner.quote_units(runner.Decimal("100"), 18) == 100_000000000000000000
+
+
+def test_quote_units_reject_non_positive():
+    with pytest.raises(ValueError):
+        runner.quote_units(runner.Decimal("0"), 6)

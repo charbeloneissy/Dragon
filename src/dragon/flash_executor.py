@@ -45,7 +45,7 @@ EXECUTOR_ABI = [
         {"indexed": True, "internalType": "address", "name": "secondTarget", "type": "address"},
     ], "name": "FlashArbitrageExecuted", "type": "event"},
 ]
-ERC20_ABI = [{"constant":True,"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
+ERC20_ABI = [{"constant":True,"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"constant":True,"inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],"name":"allowance","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
 AAVE_POOL_ABI = [{"inputs":[],"name":"FLASHLOAN_PREMIUM_TOTAL","outputs":[{"internalType":"uint128","name":"","type":"uint128"}],"stateMutability":"view","type":"function"}]
 
 
@@ -65,12 +65,13 @@ class FlashExecutorConfig:
     pool_address: str
     chain_id: int
     quote_token_decimals: int = 6
-    min_profit_quote: Decimal = Decimal("0.005")
+    min_profit_quote: Decimal = Decimal("0.0025")
     gas_limit: int | None = None
     max_fee_multiplier: Decimal = Decimal("1.20")
     max_priority_fee_gwei: Decimal = Decimal("0.001")
     mev_required: bool = True
-    compound_profits: bool = True
+    compound_profits: bool = False
+    wrapped_native_token: str = ""
 
     @classmethod
     def from_env(cls) -> "FlashExecutorConfig":
@@ -83,9 +84,9 @@ class FlashExecutorConfig:
             raise RuntimeError("live flash execution requires DEX_PRIVATE_RPC_URL, DEX_EXECUTOR_OWNER_PRIVATE_KEY, DEX_EXECUTOR_OWNER_ADDRESS and DEX_EXECUTOR_ADDRESS")
         chain_id = int(os.getenv("DEX_EXECUTOR_CHAIN_ID", os.getenv("DEX_CHAIN_ID", "8453")))
         decimals = int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS", "6"))
-        min_profit = Decimal(os.getenv("DEX_MIN_NET_PROFIT", "0.005"))
+        min_profit = Decimal(os.getenv("DEX_MIN_NET_PROFIT", "0.0025"))
         multiplier = Decimal(os.getenv("DEX_MAX_FEE_MULTIPLIER", "1.20"))
-        if chain_id <= 0 or not 0 <= decimals <= 36 or min_profit < Decimal("0.005") or multiplier < Decimal("1"):
+        if chain_id <= 0 or not 0 <= decimals <= 36 or min_profit < Decimal("0.0025") or multiplier < Decimal("1"):
             raise ValueError("invalid flash executor chain/decimals/min-profit/fee configuration")
         return cls(
             rpc_url=rpc, private_key=key, executor_address=Web3.to_checksum_address(executor),
@@ -94,7 +95,8 @@ class FlashExecutorConfig:
             gas_limit=int(os.getenv("DEX_EXECUTOR_GAS_LIMIT", "0")) or None,
             max_fee_multiplier=multiplier, max_priority_fee_gwei=Decimal(os.getenv("DEX_MAX_PRIORITY_FEE_GWEI", "0.001")),
             mev_required=os.getenv("MEV_PROTECTION_REQUIRED", "true").lower() in {"1","true","yes","on"},
-            compound_profits=os.getenv("DEX_COMPOUND_PROFITS", "true").lower() in {"1","true","yes","on"},
+            compound_profits=False,
+            wrapped_native_token=Web3.to_checksum_address(os.getenv("DEX_WRAPPED_NATIVE_TOKEN", "0x0000000000000000000000000000000000000000")) if os.getenv("DEX_WRAPPED_NATIVE_TOKEN", "").strip() else "",
         )
 
 
@@ -151,10 +153,8 @@ class AaveFlashExecutor:
         flash_amount = total_amount - compound_amount
         if total_amount <= 0 or flash_amount <= 0:
             raise ValueError("flash amount must be positive")
-        if compound_amount < 0:
-            raise ValueError("compound amount cannot be negative")
-        if compound_amount and not self.config.compound_profits:
-            raise ValueError("compound amount requires DEX_COMPOUND_PROFITS=true")
+        if compound_amount != 0 or self.config.compound_profits:
+            raise ValueError("Dragon is configured for no compounding; compound amount must be zero")
         if opportunity.net_profit_quote < self.config.min_profit_quote:
             raise ValueError("opportunity is below minimum net profit")
         if max_block_number < self.w3.eth.block_number:
@@ -169,11 +169,14 @@ class AaveFlashExecutor:
             raise ValueError("second leg quote output is below the total principal")
 
         scale = Decimal(10) ** self.config.quote_token_decimals
-        gas_reserve = Decimal(str(getattr(opportunity, "gas_cost_quote", 0)))
-        safety_reserve = Decimal(str(getattr(opportunity, "safety_buffer_quote", 0)))
-        required_profit = self.config.min_profit_quote + gas_reserve + safety_reserve
+        # Gas is paid by the transaction sender in the native asset and is already
+        # deducted once by the scanner when it computes opportunity.net_profit_quote.
+        # Do not add estimated gas a second time to the token-denominated contract
+        # profit gate. The contract only needs to enforce gross quote profit after
+        # the Aave premium; the off-chain gate enforces true net profit after gas.
+        required_profit = self.config.min_profit_quote
         if required_profit <= 0 or not required_profit.is_finite():
-            raise ValueError("invalid required net-profit reserve")
+            raise ValueError("invalid required net-profit threshold")
 
         params = (
             self.config.owner_address, int(required_profit * scale), int(max_block_number),
@@ -190,7 +193,7 @@ class AaveFlashExecutor:
         max_fee = int(Decimal(max(base_fee + priority, priority)) * self.config.max_fee_multiplier)
         tx: dict[str, Any] = {"from":self.account.address,"nonce":nonce,"chainId":self.config.chain_id,"maxFeePerGas":max_fee,"maxPriorityFeePerGas":priority,"value":0}
         tx.update(fn.build_transaction(tx))
-        tx["gas"] = self.config.gas_limit or int(self.w3.eth.estimate_gas(tx) * Decimal("1.10"))
+        tx["gas"] = self.config.gas_limit or int(self.w3.eth.estimate_gas(tx) * Decimal(os.getenv("DEX_GAS_ESTIMATE_MULTIPLIER", "1.05")))
         # estimate_gas is not enough for lifecycle observability. Run the exact
         # calldata through eth_call immediately before signing so a later record
         # can distinguish simulation failure from submission failure.
@@ -206,27 +209,73 @@ class AaveFlashExecutor:
         signed = self.account.sign_transaction(tx)
         return self.w3.eth.send_raw_transaction(signed.raw_transaction).hex()
 
-    def wait_for_success(self, tx_hash: str, timeout: int = 30) -> dict[str, Any]:
+    def wait_for_success(
+        self,
+        tx_hash: str,
+        timeout: int = 30,
+        *,
+        native_to_quote_rate: Decimal | None = None,
+        opportunity: Any | None = None,
+    ) -> dict[str, Any]:
+        """Wait for inclusion and calculate realized P&L without double counting.
+
+        The executor contract's profit event field is already the quote-token
+        profit after the Aave premium and before transaction gas. Therefore:
+        realized_net = event profit - actual receipt gas converted to quote.
+
+        native_to_quote_rate is the execution-time native-token/quote-token
+        conversion supplied by the caller. If unavailable, raw gas cost and
+        token profit are still returned, but realized net P&L is not reported.
+        """
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
-        if int(receipt.get("status", 0)) != 1:
-            reverted = dict(receipt)
-            gas_used = int(receipt.get("gasUsed", 0) or 0)
-            gas_price = int(receipt.get("effectiveGasPrice", receipt.get("gasPrice", 0)) or 0)
-            reverted["gas_cost_native"] = str(gas_used * gas_price)
-            raise FlashTransactionReverted(tx_hash, reverted)
-        result = dict(receipt)
         gas_used = int(receipt.get("gasUsed", 0) or 0)
         gas_price = int(receipt.get("effectiveGasPrice", receipt.get("gasPrice", 0)) or 0)
-        result["gas_cost_native"] = str(gas_used * gas_price)
+        gas_cost_native = gas_used * gas_price
+        if int(receipt.get("status", 0)) != 1:
+            reverted = dict(receipt)
+            reverted["gas_cost_native"] = str(gas_cost_native)
+            if native_to_quote_rate is not None:
+                rate = Decimal(native_to_quote_rate)
+                if rate.is_finite() and rate > 0:
+                    reverted["gas_cost_quote"] = str(
+                        (Decimal(gas_cost_native) / (Decimal(10) ** 18)) * rate
+                    )
+            raise FlashTransactionReverted(tx_hash, reverted)
+
+        result = dict(receipt)
+        result["gas_cost_native"] = str(gas_cost_native)
+
+        # Gas conversion must come from a fresh execution-time price supplied
+        # by the caller. Do not infer it from token-unit amounts: native and
+        # quote assets can have different decimals, and the first-leg output
+        # is not necessarily the gas asset.
         try:
             events = self.contract.events.FlashArbitrageExecuted().process_receipt(receipt)
             if events:
-                result["arb_profit_raw"] = str(events[-1]["args"].get("profit", 0))
-                result["arb_premium_raw"] = str(events[-1]["args"].get("premium", 0))
-                result["compound_amount_raw"] = str(events[-1]["args"].get("compoundAmount", 0))
-                result["retained_profit_raw"] = str(events[-1]["args"].get("retainedProfit", 0))
+                args = events[-1]["args"]
+                profit_raw = int(args.get("profit", 0))
+                premium_raw = int(args.get("premium", 0))
+                result["arb_profit_raw"] = str(profit_raw)
+                result["arb_premium_raw"] = str(premium_raw)
+                result["compound_amount_raw"] = str(args.get("compoundAmount", 0))
+                result["retained_profit_raw"] = str(args.get("retainedProfit", 0))
+
+                scale = Decimal(10) ** self.config.quote_token_decimals
+                result["arb_profit_quote"] = str(Decimal(profit_raw) / scale)
+                result["arb_premium_quote"] = str(Decimal(premium_raw) / scale)
+
+                # Event profit already subtracts the Aave premium. Never
+                # subtract arb_premium_quote again when computing realized P&L.
+                if native_to_quote_rate is not None:
+                    rate = Decimal(native_to_quote_rate)
+                    if not rate.is_finite() or rate <= 0:
+                        raise ValueError("native_to_quote_rate must be finite and positive")
+                    gas_quote = (Decimal(gas_cost_native) / (Decimal(10) ** 18)) * rate
+                    realized = (Decimal(profit_raw) / scale) - gas_quote
+                    result["gas_cost_quote"] = str(gas_quote)
+                    result["realized_pnl_quote"] = str(realized)
         except Exception:
-            # A successful receipt without the executor event is still included,
-            # but the dashboard must show that realized token proceeds are unknown.
+            # A successful receipt without a decodable executor event is still
+            # included, but realized token proceeds remain unknown.
             pass
         return result

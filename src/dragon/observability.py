@@ -98,6 +98,8 @@ class ExecutionTelemetry:
     def mark_included(self, identifier: str, receipt: dict[str, Any], *, realized_pnl_quote: Decimal | None = None) -> None:
         self.increment("tx_included")
         self.increment("completed_arbs")
+        if realized_pnl_quote is None and receipt.get("realized_pnl_quote") is not None:
+            realized_pnl_quote = Decimal(str(receipt["realized_pnl_quote"]))
         pnl = None if realized_pnl_quote is None else float(realized_pnl_quote)
         if realized_pnl_quote is not None:
             self.increment("realized_profit" if realized_pnl_quote >= 0 else "realized_loss")
@@ -108,7 +110,9 @@ class ExecutionTelemetry:
             block_number=receipt.get("blockNumber"),
             gas_used=receipt.get("gasUsed"),
             actual_profit_quote=receipt.get("arb_profit_quote"),
+            actual_premium_quote=receipt.get("arb_premium_quote"),
             actual_gas_cost_native=receipt.get("gas_cost_native"),
+            actual_gas_cost_quote=receipt.get("gas_cost_quote"),
             realized_pnl_quote=pnl,
             legs={"leg_1": "FILLED", "leg_2": "FILLED", "repayment": "FILLED"},
         )
