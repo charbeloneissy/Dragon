@@ -75,6 +75,11 @@ def env_bool(name,default=False): return os.getenv(name,str(default)).strip().lo
 
 PAPER_MIN_QUOTE_LATENCY_MS=Decimal("1200")
 
+# Safe paper-mode fallbacks. These only ever apply while LIVE_TRADING is false;
+# live mode still hard-fails when the real values are missing.
+DEFAULT_PAPER_QUOTE_TOKEN="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+PAPER_TAKER_PLACEHOLDER="0x000000000000000000000000000000000000dEaD"
+
 def quote_latency_ms(live):
     latency=env_decimal("DEX_MAX_QUOTE_LATENCY_MS",str(PAPER_MIN_QUOTE_LATENCY_MS))
     if latency<=0: raise ValueError("DEX_MAX_QUOTE_LATENCY_MS must be positive")
@@ -127,7 +132,23 @@ async def main():
                 await asyncio.sleep(rpc_retry_delay)
                 rpc_retry_delay = min(15.0, rpc_retry_delay * 2.0)
         logging.info("Multi-DEX adapter connected: sources=%s", adapter.sources(int(os.getenv("DEX_CHAIN_ID","8453"))))
-        chain_id=int(os.getenv("DEX_CHAIN_ID","8453")); live=env_bool("LIVE_TRADING",False); taker_config=validate_evm_address("DEX_TAKER_ADDRESS",env_required("DEX_TAKER_ADDRESS")); quote_token=validate_evm_address("DEX_QUOTE_TOKEN",env_required("DEX_QUOTE_TOKEN")); universe_opt_in=env_bool("DEX_UNIVERSE_OPT_IN",False); base_token_raw=os.getenv("DEX_BASE_TOKEN","").strip() if universe_opt_in else ""; base_token=validate_evm_address("DEX_BASE_TOKEN",base_token_raw) if base_token_raw else ""
+        chain_id=int(os.getenv("DEX_CHAIN_ID","8453")); live=env_bool("LIVE_TRADING",False)
+        # A missing address must never take the service down. In paper mode no
+        # transaction is ever built, so a placeholder taker is harmless. Live
+        # mode still refuses to start without a real one.
+        quote_token_raw=os.getenv("DEX_QUOTE_TOKEN","").strip()
+        if not quote_token_raw:
+            if live:
+                raise RuntimeError("DEX_QUOTE_TOKEN is required when LIVE_TRADING is enabled")
+            quote_token_raw=DEFAULT_PAPER_QUOTE_TOKEN
+            logging.warning("DEX_QUOTE_TOKEN unset; using paper default %s",quote_token_raw)
+        taker_raw=os.getenv("DEX_TAKER_ADDRESS","").strip()
+        if not taker_raw:
+            if live:
+                raise RuntimeError("DEX_TAKER_ADDRESS is required when LIVE_TRADING is enabled")
+            taker_raw=PAPER_TAKER_PLACEHOLDER
+            logging.warning("DEX_TAKER_ADDRESS unset; using paper placeholder %s (no tx is ever submitted)",taker_raw)
+        taker_config=validate_evm_address("DEX_TAKER_ADDRESS",taker_raw); quote_token=validate_evm_address("DEX_QUOTE_TOKEN",quote_token_raw); universe_opt_in=env_bool("DEX_UNIVERSE_OPT_IN",False); base_token_raw=os.getenv("DEX_BASE_TOKEN","").strip() if universe_opt_in else ""; base_token=validate_evm_address("DEX_BASE_TOKEN",base_token_raw) if base_token_raw else ""
         raw_base_tokens=os.getenv("DEX_BASE_TOKENS","").strip() if universe_opt_in else ""
         configured_base_tokens=[validate_evm_address("DEX_BASE_TOKENS",x.strip()) for x in raw_base_tokens.split(",") if x.strip()] if raw_base_tokens else []
         base_tokens=[]
