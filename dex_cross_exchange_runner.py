@@ -9,11 +9,12 @@ from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock, Thread
 
-from src.dragon.chains import get_spec
+from src.dragon.chains import get_spec, rpc_urls_for
 from src.dragon.dex_cross_exchange import DexCrossExchangeEngine
 from src.dragon.dex_evm import RpcRateLimitError
 from src.dragon.dex_multichain import MultiChainDexAdapter
 from src.dragon.observability import ExecutionTelemetry
+from src.dragon.rpc_providers import load_providers, provider_status
 from src.dragon.venues import venues_for
 
 STATE = {
@@ -25,6 +26,7 @@ STATE = {
     "compounding_enabled": False, "compound_amount_quote": "0",
     "compound_reserve_quote": "0", "last_tx_hash": None, "rejections": {},
     "base_tokens": {}, "universe_mode": {}, "opportunity_records": [],
+    "rpc_providers": {}, "rpc_hosts": {},
     "data_source": "multi-chain cross-DEX executable quotes (EVM + non-EVM)",
 }
 LOCK = Lock()
@@ -97,6 +99,15 @@ def env_decimal(name, default):
 
 def env_bool(name, default=False):
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def rpc_host(url):
+    """Host of an RPC URL with any embedded key/path stripped, for safe logging."""
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url).netloc
+    except Exception:
+        return "unknown"
 
 
 def validate_evm_address(name, value):
@@ -329,7 +340,17 @@ async def main():
                 "safety_buffer": str(safety),
                 "flash_cap": str(flash_cap),
                 "flash_loan_enabled": env_bool("FLASH_LOAN_ENABLED", False),
+                "rpc_providers": provider_status(load_providers()),
+                "rpc_hosts": {
+                    get_spec(cid).name: [rpc_host(u) for u in rpc_urls_for(cid)]
+                    for cid in evm_chains
+                },
             })
+        if not any(provider_status(load_providers()).values()):
+            logging.warning(
+                "No private RPC keys detected (ALCHEMY_API_KEY / INFURA_API_KEY / QUICKNODE_*); "
+                "using public endpoints, which are rate-limited."
+            )
         total_venues = sum(len(d["venues"]) for d in chain_details.values())
         logging.info("Dragon multi-chain ready chains=%s venues=%s min_profit=%s", list(chain_details.keys()), total_venues, min_profit)
 

@@ -82,7 +82,10 @@ Copy `.env.example` to `.env`. Key settings:
 | --- | --- | --- |
 | `DEX_CHAINS` | `8453` | Comma-separated EVM chain ids to scan |
 | `NONEVM_CHAINS` | *(empty)* | Non-EVM families: `tron,cosmos,aptos` |
-| `<CHAIN>_RPC_URL(S)` | public fallback | Per-chain RPC endpoints |
+| `ALCHEMY_API_KEY` | *(empty)* | Alchemy key; covers eth/arb/opt/polygon/base/avax/bnb/linea/zksync/scroll/blast |
+| `INFURA_API_KEY` | *(empty)* | Infura project id |
+| `QUICKNODE_API_KEY` + `QUICKNODE_ENDPOINT` + `QUICKNODE_CHAIN_ID` | *(empty)* | QuickNode endpoint for one chain |
+| `<CHAIN>_RPC_URL(S)` | public fallback | Per-chain RPC endpoints (always win over providers) |
 | `DEX_SOURCES` | all venues | Restrict venues per chain |
 | `DEX_QUOTE_TOKENS` | per-chain stablecoin | `"8453:0x...:6"` overrides |
 | `DEX_MIN_NET_PROFIT` | `0.005` | Minimum net profit in quote units (floor) |

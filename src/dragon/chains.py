@@ -256,12 +256,23 @@ def rpc_urls_for(chain_id: int) -> list[str]:
 def rpc_urls(spec: ChainSpec) -> list[str]:
     primary = os.getenv(spec.rpc_env, "").strip()
     fallbacks = [x.strip() for x in os.getenv(spec.rpc_fallback_env, "").split(",") if x.strip()]
-    if not primary and not fallbacks and spec.default_rpc:
-        return [spec.default_rpc]
+
     urls: list[str] = []
+    # Explicit per-chain env always wins, so an operator can pin one endpoint.
     for url in [primary, *fallbacks]:
         if url and url not in urls:
             urls.append(url)
+    if urls:
+        return urls
+
+    # No explicit endpoint: prefer authenticated providers, then the public one.
+    from src.dragon.rpc_providers import load_providers, private_urls
+
+    for url in private_urls(spec.chain_id, load_providers()):
+        if url not in urls:
+            urls.append(url)
+    if not urls and spec.default_rpc:
+        urls.append(spec.default_rpc)
     return urls
 
 
