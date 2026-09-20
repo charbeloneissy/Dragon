@@ -65,11 +65,11 @@ services:
       - key: MEV_PROTECTION_REQUIRED
         value: "true"
       - key: DEX_COMPOUND_PROFITS
-        value: "true"
+        value: "false"
       - key: DEX_COMPOUND_RATIO
-        value: "1"
+        value: "0"
       - key: DEX_MAX_COMPOUND_QUOTE
-        value: "10000"
+        value: "0"
       - key: ATOMIC_REPAYMENT_REQUIRED
         value: "true"
       - key: LIVE_TRADING
