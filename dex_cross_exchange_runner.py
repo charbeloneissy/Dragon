@@ -410,7 +410,7 @@ async def main():
                     chain_flash_cap = quote_units(flash_cap_quote, quote_decimals)
                     found, rej = await scan_evm_chain(
                         adapter, cid, max_quote=chain_flash_cap, taker=taker,
-                        slippage=slippage, min_profit=min_profit, safety_buffer=safety_buffer,
+                        slippage=slippage, min_profit=min_profit, safety_buffer=safety,
                     )
                     for opp in found:
                         all_found.append((opp, get_spec(cid).name))
