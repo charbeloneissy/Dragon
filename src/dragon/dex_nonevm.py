@@ -6,6 +6,7 @@ Three families are supported, each with its own quote source:
 * ``cosmos`` — Osmosis (via the SQS router) and Astroport (via a Cosmos LCD
                ``simulate_swap_operations`` smart query).
 * ``aptos``  — Liquidswap (Move) ``router::get_amount_out`` view calls.
+* ``solana`` — Jupiter quote API (read-only route aggregation).
 
 Every adapter exposes the same ``quote`` / ``venues`` / ``close`` surface the
 EVM adapter uses, so the cross-exchange engine can treat all chains uniformly.
@@ -48,6 +49,8 @@ class NonEvmDexAdapter:
             self._venues["cosmos"] = self._cosmos_venues()
         if "aptos" in wanted:
             self._venues["aptos"] = self._aptos_venues()
+        if "solana" in wanted:
+            self._venues["solana"] = self._solana_venues()
         if not self._venues:
             raise RuntimeError("no non-EVM family enabled (set NONEVM_CHAINS)")
 
@@ -96,6 +99,16 @@ class NonEvmDexAdapter:
             ),
         }
 
+    @staticmethod
+    def _solana_venues() -> dict[str, NonEvmVenue]:
+        return {
+            "Jupiter": NonEvmVenue(
+                chain="solana", name="Jupiter", kind="jupiter",
+                endpoint=os.getenv("JUPITER_QUOTE_URL", "https://api.jup.ag/swap/v1/quote").strip(),
+                note="Bearer auth via JUPITER_API_KEY",
+            ),
+        }
+
     # --- interface ---------------------------------------------------------
 
     def chains(self) -> tuple[str, ...]:
@@ -121,6 +134,8 @@ class NonEvmDexAdapter:
             out = self._astroport_quote(entry, sell_denom, buy_denom, int(sell_amount))
         elif entry.kind == "liquidswap":
             out = self._liquidswap_quote(entry, sell_denom, buy_denom, int(sell_amount))
+        elif entry.kind == "jupiter":
+            out = self._jupiter_quote(entry, sell_denom, buy_denom, int(sell_amount), slippage_bps)
         else:
             raise ValueError(f"unsupported non-EVM kind {entry.kind}")
         if out <= 0:
@@ -134,8 +149,11 @@ class NonEvmDexAdapter:
 
     # --- HTTP helpers ------------------------------------------------------
 
-    def _get_json(self, url: str) -> dict:
-        req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "Dragon-Arbitrage/2.1"})
+    def _get_json(self, url: str, headers: dict[str, str] | None = None) -> dict:
+        request_headers = {"Accept": "application/json", "User-Agent": "Dragon-Arbitrage/2.1"}
+        if headers:
+            request_headers.update(headers)
+        req = urllib.request.Request(url, headers=request_headers)
         with urllib.request.urlopen(req, timeout=self._timeout) as response:
             return json.loads(response.read().decode())
 
@@ -216,6 +234,27 @@ class NonEvmDexAdapter:
         if isinstance(payload, list):
             payload = payload[0] if payload else 0
         return int(payload)
+
+    def _jupiter_quote(self, venue: NonEvmVenue, sell: str, buy: str, amount: int, slippage_bps: int) -> int:
+        api_key = os.getenv("JUPITER_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("Jupiter is enabled but JUPITER_API_KEY is not configured")
+        query = urllib.parse.urlencode({
+            "inputMint": sell,
+            "outputMint": buy,
+            "amount": str(amount),
+            "slippageBps": str(max(0, int(slippage_bps))),
+        })
+        payload = self._get_json(
+            f"{venue.endpoint}?{query}",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        if payload.get("error") or payload.get("code", 0) >= 400:
+            raise RuntimeError(f"Jupiter quote failed: {payload.get('error') or payload.get('message') or payload}")
+        out = payload.get("outAmount")
+        if out is None:
+            raise RuntimeError("Jupiter returned no outAmount")
+        return int(out)
 
 
 def _env_families() -> list[str]:

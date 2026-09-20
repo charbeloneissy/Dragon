@@ -41,8 +41,7 @@ Non-EVM venues (`src/dragon/dex_nonevm.py`):
 
 Notes:
 
-- **Solana** needs a Jupiter API key (`portal.jup.ag`) before a venue can be
-  enabled; the adapter is intentionally not shipped with a hardcoded key.
+- **Solana** uses the Jupiter quote API when `JUPITER_API_KEY` is configured.
 - **Ravencoin (RVN)** is a Bitcoin fork with no EVM and no on-chain AMM/DEX, so
   there is nothing to arbitrage. It is deliberately absent from the registry.
 
@@ -81,7 +80,8 @@ Copy `.env.example` to `.env`. Key settings:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DEX_CHAINS` | `8453` | Comma-separated EVM chain ids to scan |
-| `NONEVM_CHAINS` | *(empty)* | Non-EVM families: `tron,cosmos,aptos` |
+| `NONEVM_CHAINS` | *(empty)* | Non-EVM families: `tron,cosmos,aptos,solana` |
+| `JUPITER_API_KEY` | *(empty)* | Bearer key for Solana Jupiter quotes |
 | `ALCHEMY_API_KEY` | *(empty)* | Alchemy key; covers eth/arb/opt/polygon/base/avax/bnb/linea/zksync/scroll/blast |
 | `INFURA_API_KEY` | *(empty)* | Infura project id |
 | `QUICKNODE_API_KEY` + `QUICKNODE_ENDPOINT` + `QUICKNODE_CHAIN_ID` | *(empty)* | QuickNode endpoint for one chain |

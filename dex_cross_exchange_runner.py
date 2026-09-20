@@ -163,6 +163,7 @@ DEFAULT_QUOTE_TOKENS: dict[int, tuple[str, int]] = {
 NONEVM_PROBES: dict[str, tuple[str, str, str]] = {
     "tron": ("SunSwap_V2", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", "TSSMHYeV2uE9qYH95DqyoCuNCzEL1NvU3S"),
     "cosmos": ("Osmosis", "uosmo", "ibc/27394FB092D2ECCD56123C74F36E4C1F926001CEADA9CA97EA622B25F41E5EB2"),
+    "solana": ("Jupiter", "So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
 }
 
 
