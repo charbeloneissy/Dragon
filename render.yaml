@@ -6,8 +6,7 @@ services:
     plan: free
     branch: main
     buildCommand: pip install --no-cache-dir -r requirements.txt
-    # The local engine is disabled, so run the scanner directly. This keeps
-    # Render's process and health port tied to the actual scanner.
+    # The scanner is the process; it serves its own health and dashboard port.
     startCommand: python dex_cross_exchange_runner.py
     autoDeploy: true
     healthCheckPath: /health
@@ -18,78 +17,31 @@ services:
         value: 10000
       - key: LOG_LEVEL
         value: INFO
-      - key: DEX_CHAIN_ID
-        value: "8453"
-      - key: DEX_QUOTE_TOKEN
-        value: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      # Chains scanned every loop. Add more ids to fan out across venues.
+      - key: DEX_CHAINS
+        value: "8453,42161,10,56,137,43114,1,5000,480,130,324,42220,59144"
+      - key: NONEVM_CHAINS
+        value: "tron,cosmos"
+      # Leave RPCs blank to use the built-in public endpoints. A private RPC
+      # (Alchemy/Infura/QuickNode) is strongly recommended for production.
+      - key: DEX_RPC_URL
+        value: ""
       - key: DEX_TAKER_ADDRESS
         value: "0x000000000000000000000000000000000000dEaD"
-      - key: DEX_OWN_CAPITAL_QUOTE
-        value: "0"
       - key: DEX_FLASH_LOAN_LIQUIDITY_QUOTE
         value: "1000"
-      - key: DEX_QUOTE_TOKEN_DECIMALS
-        value: "6"
       - key: DEX_MIN_NET_PROFIT
         value: "0.005"
       - key: DEX_SAFETY_BUFFER
         value: "0.001"
       - key: DEX_SLIPPAGE_BPS
         value: "50"
-      - key: DEX_MAX_QUOTE_LATENCY_MS
-        value: "1200"
       - key: DEX_POLL_SECONDS
-        value: "2.0"
-      - key: DEX_MAX_QUOTE_CANDIDATES
+        value: "4.0"
+      - key: DEX_MAX_OPPORTUNITIES
         value: "8"
-      - key: DEX_MAX_BASE_TOKENS
-        value: "5"
-      - key: DEX_FAST_CANDIDATES
-        value: "3"
-      - key: DEX_FAST_PROBE_CONCURRENCY
-        value: "2"
-      - key: DEX_PAPER_BASE_TOKENS
-        value: "0x4200000000000000000000000000000000000006,0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf,0x2Ae3F1Ec7F1F5012CFEab0185bfc7aa3cf0DEc22,0x940181a94A35A4569E4529A3CDfB74e38FD98631,0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"
-      - key: DEX_OPTIMIZER_RADIUS
-        value: "0.25"
-      - key: DEX_OPTIMIZER_STEPS
-        value: "4"
-      - key: DEX_RPC_MAX_ATTEMPTS
-        value: "3"
-      - key: DEX_RPC_MAX_CONCURRENCY
-        value: "6"
-      - key: DEX_QUOTE_CONCURRENCY
-        value: "2"
-      - key: DEX_SELL_CONCURRENCY
-        value: "2"
-      - key: DEX_CANDIDATE_CONCURRENCY
-        value: "2"
-      - key: DEX_QUOTE_CACHE_SECONDS
-        value: "0.25"
-      - key: ZEROX_MAX_RPS
-        value: "4"
-      - key: ZEROX_SOURCES_CACHE_SECONDS
-        value: "900"
-      - key: DEX_0X_AGGREGATED
-        value: "false"
-      - key: DEX_0X_OPT_IN
-        value: "false"
-      - key: DEX_DISCOVERY_OPT_IN
-        value: "false"
-      - key: DEX_UNIVERSE_OPT_IN
-        value: "false"
-      - key: DEX_AUTO_DISCOVERY
-        value: "false"
-      - key: DEX_SOURCES
-        value: "Uniswap_V3,Aerodrome"
-      - key: DEX_COMPOUND_PROFITS
-        value: "true"
-      - key: DEX_COMPOUND_RATIO
-        value: "1"
-      - key: DEX_MAX_COMPOUND_QUOTE
-        value: "100"
       - key: FLASH_LOAN_ENABLED
-        value: "true"
+        value: "false"
       - key: FLASH_LOAN_FEE_BPS
         value: "0"
       - key: MEV_PROTECTION_REQUIRED
@@ -98,5 +50,5 @@ services:
         value: "true"
       - key: LIVE_TRADING
         value: "false"
-      - key: DEX_LOCAL_ENGINE
-        value: "false"
+      - key: DRY_RUN
+        value: "true"

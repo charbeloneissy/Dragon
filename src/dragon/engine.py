@@ -1,12 +1,14 @@
 """Dragon production entrypoint.
 
-The legacy Binance triangular runtime is intentionally not imported here.
-The application runtime is provided by the dedicated cross-DEX service module.
+Dragon is a Base DEX cross-exchange arbitrage engine. The deployable runtime is
+the dedicated cross-DEX scanner in ``dex_cross_exchange_runner.py``; this module
+keeps the package entrypoint wired to that same service.
 """
 
 
 def main():
     from src.dragon.cross_exchange_runtime import run
+
     return run()
 
 

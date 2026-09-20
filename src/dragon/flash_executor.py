@@ -81,7 +81,7 @@ class FlashExecutorConfig:
         pool = os.getenv("DEX_AAVE_POOL_ADDRESS", "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5").strip()
         if not rpc or not key or not executor or not owner:
             raise RuntimeError("live flash execution requires DEX_PRIVATE_RPC_URL, DEX_EXECUTOR_OWNER_PRIVATE_KEY, DEX_EXECUTOR_OWNER_ADDRESS and DEX_EXECUTOR_ADDRESS")
-        chain_id = int(os.getenv("DEX_CHAIN_ID", "8453"))
+        chain_id = int(os.getenv("DEX_EXECUTOR_CHAIN_ID", os.getenv("DEX_CHAIN_ID", "8453")))
         decimals = int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS", "6"))
         min_profit = Decimal(os.getenv("DEX_MIN_NET_PROFIT", "0.005"))
         multiplier = Decimal(os.getenv("DEX_MAX_FEE_MULTIPLIER", "1.20"))

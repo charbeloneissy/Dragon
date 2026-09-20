@@ -9,404 +9,375 @@ from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Lock, Thread
 
-from src.dragon.dex_direct import DirectDexAdapter, RpcRateLimitError
-from src.dragon.dex_composite import CompositeDexAdapter
+from src.dragon.chains import get_spec
 from src.dragon.dex_cross_exchange import DexCrossExchangeEngine
-from src.dragon.flash_executor import AaveFlashExecutor, FlashTransactionReverted
-from src.dragon.base_pool_discovery import BASE_WETH, CURATED_PAPER_BASE_TOKENS, discover_recent_base_tokens
+from src.dragon.dex_evm import RpcRateLimitError
+from src.dragon.dex_multichain import MultiChainDexAdapter
 from src.dragon.observability import ExecutionTelemetry
+from src.dragon.venues import venues_for
 
-STATE={"status":"starting","mode":"paper","chain_id":None,"sources":[],"scans":0,"opportunities":0,"last_scan":None,"last_error":None,"started_at":time.time(),"quote_amount":None,"quote_decimals":None,"min_net_profit":None,"safety_buffer":None,"own_capital":"0","flash_liquidity":None,"flash_pool_liquidity":None,"flash_cap":None,"flash_loan_enabled":False,"compounding_enabled":False,"compound_reserve_quote":"0","compound_amount_quote":"0","flash_loan_amount_quote":None,"last_tx_hash":None,"rejections":{},"base_tokens":[],"universe_mode":None,"opportunity_records":[],"data_source":"direct executable quotes; pool event counter is zero unless a local pool stream is enabled"}
-LOCK=Lock()
-METRICS=ExecutionTelemetry()
+STATE = {
+    "status": "starting", "mode": "paper", "chains": [], "chain_details": {},
+    "sources": [], "scans": 0, "opportunities": 0, "last_scan": None,
+    "last_error": None, "started_at": time.time(), "quote_decimals": None,
+    "min_net_profit": None, "safety_buffer": None, "own_capital": "0",
+    "flash_liquidity": None, "flash_cap": None, "flash_loan_enabled": False,
+    "compounding_enabled": False, "compound_amount_quote": "0",
+    "compound_reserve_quote": "0", "last_tx_hash": None, "rejections": {},
+    "base_tokens": {}, "universe_mode": {}, "opportunity_records": [],
+    "data_source": "multi-chain cross-DEX executable quotes (EVM + non-EVM)",
+}
+LOCK = Lock()
+METRICS = ExecutionTelemetry()
+
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        path=self.path.split("?",1)[0]
+        path = self.path.split("?", 1)[0]
         with LOCK:
-            payload=dict(STATE)
-            payload["rejections"]=dict(STATE["rejections"])
-            payload["observability"]=METRICS.snapshot()
-        if path=="/dashboard":
+            payload = dict(STATE)
+            payload["rejections"] = dict(STATE["rejections"])
+            payload["observability"] = METRICS.snapshot()
+        if path == "/dashboard":
             try:
-                with open("dashboard.html","rb") as f: body=f.read()
-                self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8")
-                self.send_header("Cache-Control","no-store"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
+                with open("dashboard.html", "rb") as f:
+                    body = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             except OSError as exc:
-                body=json.dumps({"error":"dashboard unavailable","detail":str(exc)}).encode()
-                self.send_response(500); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body)
+                body = json.dumps({"error": "dashboard unavailable", "detail": str(exc)}).encode()
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             return
-        if path in ("/","/health","/healthz","/api/status"):
-            body=json.dumps(payload,default=str).encode()
-            self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Cache-Control","no-store"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body); return
-        self.send_response(404); self.end_headers()
-    def log_message(self,*_args): return
+        if path in ("/", "/health", "/healthz", "/api/status"):
+            body = json.dumps(payload, default=str).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, *_args):
+        return
+
 
 class DragonHTTPServer(ThreadingHTTPServer):
-    allow_reuse_address=True
-    daemon_threads=True
+    allow_reuse_address = True
+    daemon_threads = True
+
 
 def start_health_server():
-    port=int(os.getenv("PORT","10000"))
-    server=DragonHTTPServer(("0.0.0.0",port),Handler)
-    logging.info("Dragon HTTP server listening on 0.0.0.0:%s",port)
-    Thread(target=server.serve_forever,daemon=True).start()
+    port = int(os.getenv("PORT", "10000"))
+    server = DragonHTTPServer(("0.0.0.0", port), Handler)
+    logging.info("Dragon HTTP server listening on 0.0.0.0:%s", port)
+    Thread(target=server.serve_forever, daemon=True).start()
     return server
 
-def env_required(name):
-    value=os.getenv(name,"").strip()
-    if not value: raise RuntimeError(f"{name} is required")
+
+def env_decimal(name, default):
+    try:
+        value = Decimal(os.getenv(name, default))
+    except InvalidOperation as exc:
+        raise ValueError(f"{name} must be a decimal number") from exc
+    if not value.is_finite():
+        raise ValueError(f"{name} must be finite")
     return value
 
-def validate_evm_address(name,value):
-    value=value.strip()
-    if len(value)!=42 or not value.startswith("0x"): raise ValueError(f"{name} must be a 20-byte EVM address")
-    try: int(value[2:],16)
-    except ValueError as exc: raise ValueError(f"{name} contains non-hex characters") from exc
+
+def env_bool(name, default=False):
+    return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def validate_evm_address(name, value):
+    value = value.strip()
+    if len(value) != 42 or not value.startswith("0x"):
+        raise ValueError(f"{name} must be a 20-byte EVM address")
+    try:
+        int(value[2:], 16)
+    except ValueError as exc:
+        raise ValueError(f"{name} contains non-hex characters") from exc
     return value
 
-def env_decimal(name,default):
-    try: value=Decimal(os.getenv(name,default))
-    except InvalidOperation as exc: raise ValueError(f"{name} must be a decimal number") from exc
-    if not value.is_finite(): raise ValueError(f"{name} must be finite")
-    return value
 
-def env_bool(name,default=False): return os.getenv(name,str(default)).strip().lower() in {"1","true","yes","on"}
+# Default base-token universe per EVM chain: wrapped native plus a few deep assets.
+PAPER_BASE_TOKENS: dict[int, tuple[str, ...]] = {
+    1: ("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",),
+    10: ("0x4200000000000000000000000000000000000006",),
+    56: ("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",),
+    130: ("0x4200000000000000000000000000000000000006",),
+    137: ("0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",),
+    324: ("0x5AEa5775959fBC2557Cc8789bC1bf90A239D9a91",),
+    480: ("0x4200000000000000000000000000000000000006",),
+    5000: ("0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8",),
+    8453: ("0x4200000000000000000000000000000000000006",),
+    42161: ("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",),
+    42220: ("0x471EcE3750Da237f93B8E339c536989b8978a438",),
+    43114: ("0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",),
+    59144: ("0xe5D7C2a44FfddF6b295A15c148167daaAf5CF34f",),
+    534352: ("0x5300000000000000000000000000000000000004",),
+    81457: ("0x4300000000000000000000000000000000000004",),
+}
 
-PAPER_MIN_QUOTE_LATENCY_MS=Decimal("1200")
+# Default quote token (stablecoin) per EVM chain. Overridable via DEX_QUOTE_TOKENS.
+DEFAULT_QUOTE_TOKENS: dict[int, tuple[str, int]] = {
+    1: ("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 6),
+    10: ("0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85", 6),
+    56: ("0x55d398326f99059fF775485246999027B3197955", 18),
+    130: ("0x078D782b760474a361dDA0AF3839290b0EF57AD6", 6),
+    137: ("0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", 6),
+    324: ("0x3355df6D4c9C3035724Fd0e3914dE96A5a83aaf4", 6),
+    480: ("0x79A02482A880bCE3F13e09Da970dC34db4CD24d1", 6),
+    5000: ("0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9", 6),
+    8453: ("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", 6),
+    42161: ("0xaf88d065e77c8cC2239327C5EDb3A432268e5831", 6),
+    42220: ("0xcebA9300f2b948710d2653dD7B07f33A8B32118C", 6),
+    43114: ("0xB97EF9Ef8734C71904D8002F8b8b6Bc66Dd9c48a6E", 6),
+    59144: ("0x176211869cA2b568f2A7D4EE941E073a821EE1ff", 6),
+    534352: ("0x06eFdBFf2a14a7c8E15944D1F4A48F9F95F663A4", 6),
+    81457: ("0x4300000000000000000000000000000000000003", 18),
+}
 
-# Safe paper-mode fallbacks. These only ever apply while LIVE_TRADING is false;
-# live mode still hard-fails when the real values are missing.
-DEFAULT_PAPER_QUOTE_TOKEN="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-PAPER_TAKER_PLACEHOLDER="0x000000000000000000000000000000000000dEaD"
+# Non-EVM chains: (chain, venue, sell_denom, buy_denom).
+NONEVM_PROBES: dict[str, tuple[str, str, str]] = {
+    "tron": ("SunSwap_V2", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", "TSSMHYeV2uE9qYH95DqyoCuNCzEL1NvU3S"),
+    "cosmos": ("Osmosis", "uosmo", "ibc/27394FB092D2ECCD56123C74F36E4C1F926001CEADA9CA97EA622B25F41E5EB2"),
+}
 
-def quote_latency_ms(live):
-    latency=env_decimal("DEX_MAX_QUOTE_LATENCY_MS",str(PAPER_MIN_QUOTE_LATENCY_MS))
-    if latency<=0: raise ValueError("DEX_MAX_QUOTE_LATENCY_MS must be positive")
-    if not live and latency<PAPER_MIN_QUOTE_LATENCY_MS:
-        logging.warning("DEX_MAX_QUOTE_LATENCY_MS=%s is below the paper-mode minimum; using %s",latency,PAPER_MIN_QUOTE_LATENCY_MS)
-        return PAPER_MIN_QUOTE_LATENCY_MS
-    return latency
+
+def _enabled_evm_chains() -> list[int]:
+    raw = os.getenv("DEX_CHAINS", "8453").strip()
+    ids: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            cid = int(part)
+        except ValueError:
+            continue
+        if get_spec(cid) is not None and cid not in ids:
+            ids.append(cid)
+    return ids or [8453]
+
+
+def _enabled_nonevm() -> list[str]:
+    raw = os.getenv("NONEVM_CHAINS", "").strip()
+    return [x.strip().lower() for x in raw.split(",") if x.strip()]
+
+
+def _quote_token_for(chain_id: int) -> tuple[str, int]:
+    configured = os.getenv("DEX_QUOTE_TOKENS", "").strip()
+    if configured:
+        for entry in configured.split(","):
+            parts = entry.split(":")
+            if len(parts) == 3 and parts[0].strip() == str(chain_id):
+                return validate_evm_address("DEX_QUOTE_TOKENS", parts[1]), int(parts[2])
+    default = DEFAULT_QUOTE_TOKENS.get(chain_id)
+    if default is None:
+        raise ValueError(f"no default quote token for chain {chain_id}; set DEX_QUOTE_TOKENS")
+    return default
+
+
+def _base_tokens_for(chain_id: int) -> list[str]:
+    configured = os.getenv("DEX_PAPER_BASE_TOKENS", "").strip()
+    if configured:
+        tokens = [validate_evm_address("DEX_PAPER_BASE_TOKENS", t) for t in configured.split(",") if t.strip()]
+        if tokens:
+            return tokens
+    return list(PAPER_BASE_TOKENS.get(chain_id, ()))
+
 
 def merge_rejections(stats):
     with LOCK:
-        for key,value in stats.items(): STATE["rejections"][key]=int(value)
+        for key, value in stats.items():
+            STATE["rejections"][key] = int(value)
 
 
-def opportunity_view(opportunity, identifier):
+def opportunity_view(opportunity, identifier, chain_label):
     return {
         "id": identifier,
-        "source": "base-dex",
+        "chain": chain_label,
         "buy_source": opportunity.buy_source,
         "sell_source": opportunity.sell_source,
         "base_token": opportunity.base_token,
         "quote_token": opportunity.quote_token,
         "quote_amount": str(opportunity.quote_amount),
-        "compound_amount": str(opportunity.compound_amount),
-        "flash_loan_amount": str(opportunity.flash_loan_amount),
         "gross_profit_quote": str(opportunity.gross_profit_quote),
         "net_profit_quote": str(opportunity.net_profit_quote),
         "gas_cost_quote": str(opportunity.gas_cost_quote),
         "flash_loan_fee_quote": str(opportunity.flash_loan_fee_quote),
         "safety_buffer_quote": str(opportunity.safety_buffer_quote),
-        "mev_buffer_quote": str(opportunity.safety_buffer_quote),
         "status": "ready_for_fresh_simulation",
     }
 
-async def main():
-    logging.basicConfig(level=os.getenv("LOG_LEVEL","INFO"),format="%(asctime)s %(levelname)s %(message)s")
-    start_health_server()
-    adapter=None
+
+async def to_thread(fn, *args, **kwargs):
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
+
+async def scan_evm_chain(adapter, chain_id, *, max_quote, taker, slippage, min_profit):
+    """Scan every venue pair on one EVM chain for one base token."""
+    spec = get_spec(chain_id)
+    quote_token, quote_decimals = _quote_token_for(chain_id)
+    base_tokens = _base_tokens_for(chain_id)
+    venue_names = [v.name for v in venues_for(chain_id)]
+    if len(venue_names) < 2:
+        return [], {}
+    engine = DexCrossExchangeEngine(
+        adapter, venue_names, min_profit=min_profit, quote_token_decimals=quote_decimals,
+        flash_loan_enabled=env_bool("FLASH_LOAN_ENABLED", False),
+        flash_loan_fee_bps=env_decimal("FLASH_LOAN_FEE_BPS", "0"),
+        telemetry=METRICS,
+    )
+    found: list = []
+    for base_token in base_tokens:
+        try:
+            opportunities = await to_thread(
+                engine.scan_max_profitable,
+                chain_id=chain_id, quote_token=quote_token, base_token=base_token,
+                max_quote_amount=max_quote, taker=taker, slippage_bps=slippage,
+            )
+            found.extend(opportunities)
+        except Exception as exc:
+            logging.warning("scan failed chain=%s base=%s error=%s: %s", spec.name, base_token, type(exc).__name__, exc)
+    return found, dict(engine.last_rejections)
+
+
+async def scan_nonevm_chain(adapter, chain, *, slippage):
+    """Probe the configured non-EVM venues and report gross spreads."""
+    probe = NONEVM_PROBES.get(chain)
+    if not probe:
+        return [], {}
+    venue, sell_denom, buy_denom = probe
     try:
-        logging.info("Dragon scanner boot: initializing direct DEX adapter")
-        # Public RPCs can temporarily rate-limit during a deploy/restart. Do not
-        # crash the Render service when that happens. Keep the health endpoint up
-        # and retry with backoff until an endpoint becomes available.
-        rpc_retry_delay = 1.0
+        quote, _ = await to_thread(
+            adapter.quote_unified,
+            chain=chain, venue=venue, sell_token=sell_denom, buy_token=buy_denom,
+            sell_amount=10**6, slippage_bps=slippage, probe=True,
+        )
+        METRICS.increment("nonevm_quotes")
+        logging.info("non-EVM quote chain=%s venue=%s out=%s", chain, venue, quote.buy_amount)
+        return [], {}
+    except Exception as exc:
+        logging.warning("non-EVM probe failed chain=%s venue=%s error=%s: %s", chain, venue, type(exc).__name__, exc)
+        return [], {f"nonevm_{chain}_error": 1}
+
+
+async def main():
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
+    start_health_server()
+    adapter = None
+    try:
+        logging.info("Dragon multi-chain scanner boot")
+        retry = 1.0
         while adapter is None:
             try:
-                direct_adapter = DirectDexAdapter()
-                adapter = CompositeDexAdapter(direct_adapter)
+                adapter = MultiChainDexAdapter()
             except RpcRateLimitError as exc:
-                logging.warning("DEX RPC unavailable during startup; retrying in %.1fs: %s", rpc_retry_delay, exc)
-                await asyncio.sleep(rpc_retry_delay)
-                rpc_retry_delay = min(15.0, rpc_retry_delay * 2.0)
-        logging.info("Multi-DEX adapter connected: sources=%s", adapter.sources(int(os.getenv("DEX_CHAIN_ID","8453"))))
-        chain_id=int(os.getenv("DEX_CHAIN_ID","8453")); live=env_bool("LIVE_TRADING",False)
-        # A missing address must never take the service down. In paper mode no
-        # transaction is ever built, so a placeholder taker is harmless. Live
-        # mode still refuses to start without a real one.
-        quote_token_raw=os.getenv("DEX_QUOTE_TOKEN","").strip()
-        if not quote_token_raw:
-            if live:
-                raise RuntimeError("DEX_QUOTE_TOKEN is required when LIVE_TRADING is enabled")
-            quote_token_raw=DEFAULT_PAPER_QUOTE_TOKEN
-            logging.warning("DEX_QUOTE_TOKEN unset; using paper default %s",quote_token_raw)
-        taker_raw=os.getenv("DEX_TAKER_ADDRESS","").strip()
-        if not taker_raw:
-            if live:
-                raise RuntimeError("DEX_TAKER_ADDRESS is required when LIVE_TRADING is enabled")
-            taker_raw=PAPER_TAKER_PLACEHOLDER
-            logging.warning("DEX_TAKER_ADDRESS unset; using paper placeholder %s (no tx is ever submitted)",taker_raw)
-        taker_config=validate_evm_address("DEX_TAKER_ADDRESS",taker_raw); quote_token=validate_evm_address("DEX_QUOTE_TOKEN",quote_token_raw); universe_opt_in=env_bool("DEX_UNIVERSE_OPT_IN",False); base_token_raw=os.getenv("DEX_BASE_TOKEN","").strip() if universe_opt_in else ""; base_token=validate_evm_address("DEX_BASE_TOKEN",base_token_raw) if base_token_raw else ""
-        raw_base_tokens=os.getenv("DEX_BASE_TOKENS","").strip() if universe_opt_in else ""
-        configured_base_tokens=[validate_evm_address("DEX_BASE_TOKENS",x.strip()) for x in raw_base_tokens.split(",") if x.strip()] if raw_base_tokens else []
-        base_tokens=[]
-        if base_token and base_token.lower()!=quote_token.lower():
-            base_tokens.append(base_token)
-        for token in configured_base_tokens:
-            if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
-        if not base_tokens and not live and not universe_opt_in:
-            raw_paper_tokens=os.getenv("DEX_PAPER_BASE_TOKENS","").strip()
-            paper_tokens=tuple(x.strip() for x in raw_paper_tokens.split(",") if x.strip()) if raw_paper_tokens else CURATED_PAPER_BASE_TOKENS
-            for token in paper_tokens:
-                checked=validate_evm_address("DEX_PAPER_BASE_TOKENS",token)
-                if checked.lower()!=quote_token.lower() and checked.lower() not in {x.lower() for x in base_tokens}:
-                    base_tokens.append(checked)
-        auto_discovery=(
-            universe_opt_in
-            and env_bool("DEX_DISCOVERY_OPT_IN",False)
-            and env_bool("DEX_AUTO_DISCOVERY",True)
-        )
-        discovery_lookback=int(os.getenv("DEX_DISCOVERY_BLOCKS","250000"))
-        discovery_chunk=int(os.getenv("DEX_DISCOVERY_CHUNK_BLOCKS","10000"))
-        discovery_max=int(os.getenv("DEX_DISCOVERY_MAX_TOKENS","40"))
-        discovery_refresh=float(os.getenv("DEX_DISCOVERY_REFRESH_SECONDS","300"))
-        if auto_discovery:
-            discovered=discover_recent_base_tokens(adapter,quote_token=quote_token,anchors=(quote_token, BASE_WETH),lookback_blocks=discovery_lookback,chunk_blocks=discovery_chunk,max_tokens=discovery_max)
-            for token in discovered:
-                if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in base_tokens}: base_tokens.append(token)
-        universe_mode="explicit" if universe_opt_in and base_tokens else ("discovery" if auto_discovery else ("paper_curated" if base_tokens else "fallback_weth"))
-        if not base_tokens:
-            # Start with the deepest canonical Base asset when discovery is not
-            # explicitly enabled. This avoids probing random recent tokens.
-            base_tokens=[BASE_WETH]
-        base_tokens=base_tokens[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","8")))]
-        quote_decimals=int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS","6")); own_capital=env_decimal("DEX_OWN_CAPITAL_QUOTE","0")
-        if own_capital<0: raise ValueError("DEX_OWN_CAPITAL_QUOTE cannot be negative")
-        flash_cap=env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE","1000")
-        compound_enabled=env_bool("DEX_COMPOUND_PROFITS",True)
-        compound_ratio=env_decimal("DEX_COMPOUND_RATIO","1")
-        compound_max=env_decimal("DEX_MAX_COMPOUND_QUOTE","100")
-        if not 0 <= compound_ratio <= 1: raise ValueError("DEX_COMPOUND_RATIO must be between 0 and 1")
-        if compound_max < 0: raise ValueError("DEX_MAX_COMPOUND_QUOTE cannot be negative")
-        if own_capital>0 and live: raise ValueError("owned-capital live execution is not enabled by the current executor; keep DEX_OWN_CAPITAL_QUOTE=0 until an owned-capital executor is installed")
-        if flash_cap<0: raise ValueError("DEX_FLASH_LOAN_LIQUIDITY_QUOTE cannot be negative")
-        min_profit=env_decimal("DEX_MIN_NET_PROFIT","0.005"); safety=env_decimal("DEX_SAFETY_BUFFER","0.001")
-        if min_profit<Decimal("0.005"): raise ValueError("DEX_MIN_NET_PROFIT cannot be below 0.005")
-        if safety<0: raise ValueError("DEX_SAFETY_BUFFER cannot be negative")
-        slippage=int(os.getenv("DEX_SLIPPAGE_BPS","50")); latency=quote_latency_ms(live)
-        if not 0<=slippage<=5000: raise ValueError("invalid slippage/latency configuration")
-        flash_enabled=env_bool("FLASH_LOAN_ENABLED",False) and own_capital==0; configured_fee=env_decimal("FLASH_LOAN_FEE_BPS","0")
-        if live:
-            if not flash_enabled: raise RuntimeError("LIVE_TRADING requires FLASH_LOAN_ENABLED=true")
-            if not env_bool("MEV_PROTECTION_REQUIRED",True) or not env_bool("ATOMIC_REPAYMENT_REQUIRED",True): raise RuntimeError("live execution requires MEV protection and atomic repayment")
-            executor=AaveFlashExecutor(); taker=executor.config.executor_address; fee_bps=executor.flash_loan_fee_bps()
-        else:
-            executor=None; taker=taker_config
-            fee_bps=adapter.flash_loan_fee_bps() if flash_enabled else configured_fee
-        if not flash_enabled and configured_fee!=0: raise ValueError("FLASH_LOAN_FEE_BPS requires FLASH_LOAN_ENABLED=true")
-        available=set(adapter.sources(chain_id)); configured=tuple(x.strip() for x in os.getenv("DEX_SOURCES","").split(",") if x.strip()); requested=configured or adapter.sources(chain_id)
-        sources=tuple(x for x in requested if x in available); unsupported=tuple(x for x in requested if x not in available)
-        if unsupported: logging.warning("Ignoring unsupported DEX sources on chain %s: %s",chain_id,unsupported)
-        if len(sources)<2: raise RuntimeError(f"fewer than two usable DEX sources found on chain {chain_id}: requested={requested}, available={sorted(available)}, usable={sources}")
-        sources=sources[:max(2,min(12,int(os.getenv("DEX_MAX_SOURCES","8"))))]
-        engine_kwargs=dict(
-            min_profit=min_profit,
-            quote_token_decimals=quote_decimals,
-            max_quote_latency_ms=latency,
-            safety_buffer_quote=safety,
-            flash_loan_enabled=flash_enabled,
-            flash_loan_fee_bps=fee_bps,
-            telemetry=METRICS,
-        )
-        # Build one isolated engine per token once. Recreating engines inside every
-        # scan cycle repeatedly cloned Web3/RPC adapters and defeated the latency optimization.
-        token_engines={
-            token: DexCrossExchangeEngine(adapter,sources,**engine_kwargs)
-            for token in base_tokens
-        }
-        rpc_pool_size=len(getattr(direct_adapter,"_rpc_urls",[]) or [])
-        rpc_keyed=bool(getattr(direct_adapter,"_has_keyed_endpoint",False))
-        logging.info("DEX RPC pool ready endpoints=%s keyed_provider=%s timeout_s=%.2f",rpc_pool_size,rpc_keyed,getattr(direct_adapter,"_rpc_timeout",0.0))
-        rpc_status=direct_adapter.rpc_status() if hasattr(direct_adapter,"rpc_status") else {}
-        for endpoint in rpc_status.get("endpoints",[]):
-            logging.info("DEX RPC endpoint host=%s keyed=%s selftest=%s",endpoint.get("host"),endpoint.get("keyed"),endpoint.get("selftest"))
-        with LOCK: STATE.update({"status":"running","mode":"live" if live else "paper","chain_id":chain_id,"sources":list(sources),"base_tokens":base_tokens,"universe_mode":universe_mode,"universe_refreshed_at":time.time(),"quote_decimals":quote_decimals,"min_net_profit":str(min_profit),"safety_buffer":str(safety),"own_capital":str(own_capital),"flash_liquidity":str(own_capital if own_capital>0 else flash_cap),"flash_cap":str(flash_cap),"flash_loan_enabled":flash_enabled,"compounding_enabled":bool(live and compound_enabled),"compound_ratio":str(compound_ratio),"compound_max_quote":str(compound_max),"rpc_endpoints":rpc_pool_size,"rpc_keyed_provider":rpc_keyed,"rpc":rpc_status})
+                logging.warning("DEX adapters unavailable; retrying in %.1fs: %s", retry, exc)
+                await asyncio.sleep(retry)
+                retry = min(15.0, retry * 2.0)
+
+        evm_chains = _enabled_evm_chains()
+        nonevm_chains = _enabled_nonevm()
+        min_profit = env_decimal("DEX_MIN_NET_PROFIT", "0.005")
+        if min_profit < Decimal("0.005"):
+            raise ValueError("DEX_MIN_NET_PROFIT cannot be below 0.005")
+        safety = env_decimal("DEX_SAFETY_BUFFER", "0.001")
+        slippage = int(os.getenv("DEX_SLIPPAGE_BPS", "50"))
+        flash_cap = env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE", "1000")
+        taker = os.getenv("DEX_TAKER_ADDRESS", "").strip() or "0x000000000000000000000000000000000000dEaD"
+        poll = float(os.getenv("DEX_POLL_SECONDS", "2.0"))
+
+        chain_details = {}
+        for cid in evm_chains:
+            spec = get_spec(cid)
+            quote_token, quote_decimals = _quote_token_for(cid)
+            chain_details[spec.name] = {
+                "chain_id": cid,
+                "family": "evm",
+                "venues": list(adapter.sources(cid)),
+                "quote_token": quote_token,
+                "quote_decimals": quote_decimals,
+                "base_tokens": _base_tokens_for(cid),
+            }
+        for family in nonevm_chains:
+            chain_details[family] = {
+                "chain_id": family,
+                "family": "non-evm",
+                "venues": list(adapter.sources(family)),
+            }
+        with LOCK:
+            STATE.update({
+                "status": "running",
+                "mode": "live" if env_bool("LIVE_TRADING", False) else "paper",
+                "chains": list(chain_details.keys()),
+                "chain_details": chain_details,
+                "sources": sorted({v for d in chain_details.values() for v in d["venues"]}),
+                "min_net_profit": str(min_profit),
+                "safety_buffer": str(safety),
+                "flash_cap": str(flash_cap),
+                "flash_loan_enabled": env_bool("FLASH_LOAN_ENABLED", False),
+            })
+        total_venues = sum(len(d["venues"]) for d in chain_details.values())
+        logging.info("Dragon multi-chain ready chains=%s venues=%s min_profit=%s", list(chain_details.keys()), total_venues, min_profit)
+
         while True:
             try:
-                if auto_discovery and time.time()-float(STATE.get("universe_refreshed_at") or 0) >= discovery_refresh:
-                    discovered=discover_recent_base_tokens(adapter,quote_token=quote_token,anchors=(quote_token, BASE_WETH),lookback_blocks=discovery_lookback,chunk_blocks=discovery_chunk,max_tokens=discovery_max)
-                    current=list(base_tokens)
-                    for token in discovered:
-                        if token.lower()!=quote_token.lower() and token.lower() not in {x.lower() for x in current}: current.append(token)
-                    base_tokens=current[:max(1,int(os.getenv("DEX_MAX_BASE_TOKENS","8")))]
-                    for token in list(token_engines):
-                        if token not in base_tokens: del token_engines[token]
-                    for token in base_tokens:
-                        if token not in token_engines: token_engines[token]=DexCrossExchangeEngine(adapter,sources,**engine_kwargs)
-                    with LOCK:
-                        STATE["base_tokens"]=base_tokens
-                        STATE["universe_refreshed_at"]=time.time()
-                    logging.info("DEX universe refreshed base_tokens=%s",len(base_tokens))
-                if live:
-                    scale=Decimal(10)**quote_decimals
-                    pool_liquidity=Decimal(executor.available_liquidity_units(quote_token))/scale
-                    actual=min(pool_liquidity,flash_cap)
-                    reserve=Decimal(executor.compound_balance_units(quote_token))/scale if compound_enabled else Decimal("0")
-                    compound_amount_quote=min(reserve*compound_ratio,compound_max)
-                    compound_amount_raw=int(compound_amount_quote*scale)
-                    max_quote=actual+compound_amount_quote; fee_bps=executor.flash_loan_fee_bps()
-                    for token_engine in token_engines.values():
-                        token_engine.flash_loan_fee_bps=fee_bps
-                    if max_quote<=0: raise RuntimeError("no flash-loan liquidity available for the quote token")
-                    with LOCK: STATE.update({"flash_liquidity":str(actual),"flash_pool_liquidity":str(pool_liquidity),"compound_reserve_quote":str(reserve),"compound_amount_quote":str(compound_amount_quote),"flash_loan_amount_quote":str(actual)})
-                else:
-                    max_quote=own_capital if own_capital>0 else flash_cap
-                    compound_amount_raw=0
-                    with LOCK: STATE.update({"flash_liquidity":str(max_quote),"flash_pool_liquidity":None,"compound_reserve_quote":"0","compound_amount_quote":"0","flash_loan_amount_quote":str(max_quote)})
-                # Refresh endpoint counters every cycle so /health shows which
-                # provider is actually serving traffic.
-                if hasattr(direct_adapter,"rpc_status"):
-                    with LOCK: STATE["rpc"]=direct_adapter.rpc_status()
-                all_opportunities=[]
-                aggregate_rejections={}
-                # Fast scanner architecture: use a small live quote to rank the
-                # dynamic universe, then spend expensive multi-size quotes only on
-                # the strongest candidates. The full scan remains the profitability
-                # and execution gate, so the fast probe can never authorize a trade.
-                fast_probe_quote=env_decimal("DEX_FAST_PROBE_QUOTE","0.25")
-                if fast_probe_quote <= 0:
-                    raise ValueError("DEX_FAST_PROBE_QUOTE must be positive")
-                probe_scale=Decimal(10) ** quote_decimals
-                probe_amount=max(1,int(fast_probe_quote*probe_scale))
-                fast_candidates=max(1,min(len(base_tokens),int(os.getenv("DEX_FAST_CANDIDATES","3"))))
-                probe_concurrency=max(1,min(len(base_tokens),int(os.getenv("DEX_FAST_PROBE_CONCURRENCY","4"))))
-                probe_semaphore=asyncio.Semaphore(probe_concurrency)
-
-                async def probe_base_token(scan_base):
-                    async with probe_semaphore:
-                        scan_engine=token_engines[scan_base]
-                        scan_engine.flash_loan_fee_bps=fee_bps
-                        score=await asyncio.to_thread(
-                            scan_engine.fast_probe,
-                            chain_id=chain_id,
-                            quote_token=quote_token,
-                            base_token=scan_base,
-                            quote_amount=probe_amount,
-                            taker=taker,
-                            slippage_bps=slippage,
-                        )
-                        return scan_base, score, dict(scan_engine.last_rejections)
-
-                probe_results=await asyncio.gather(
-                    *(probe_base_token(scan_base) for scan_base in base_tokens),
-                    return_exceptions=True,
-                )
-                ranked=[]
-                for result in probe_results:
-                    if isinstance(result, Exception):
-                        logging.exception("DEX fast probe failed", exc_info=result)
-                        METRICS.increment("quote_failures")
-                        aggregate_rejections["fast_probe_error"]=aggregate_rejections.get("fast_probe_error",0)+1
-                        continue
-                    scan_base, score, rejections=result
-                    ranked.append((score,scan_base))
-                    for key,value in rejections.items():
-                        aggregate_rejections[key]=aggregate_rejections.get(key,0)+int(value)
-                ranked.sort(key=lambda item:item[0], reverse=True)
-                selected=[token for score,token in ranked if score.is_finite()][:fast_candidates]
-                logging.info(
-                    "FAST SCANNER ranked base_tokens=%s selected=%s probe_quote=%s top_gross_bps=%s",
-                    len(base_tokens), selected, fast_probe_quote,
-                    str(ranked[0][0]) if ranked and ranked[0][0].is_finite() else "none",
-                )
-
-                scan_concurrency=max(1,min(len(selected),int(os.getenv("DEX_SCAN_CONCURRENCY","2"))))
-                scan_semaphore=asyncio.Semaphore(scan_concurrency)
-                async def scan_base_token(scan_base):
-                    async with scan_semaphore:
-                        scan_engine=token_engines[scan_base]
-                        scan_engine.flash_loan_fee_bps=fee_bps
-                        found=await asyncio.to_thread(
-                            scan_engine.scan_max_profitable,
-                            chain_id=chain_id,
-                            quote_token=quote_token,
-                            base_token=scan_base,
-                            max_quote_amount=max_quote,
-                            taker=taker,
-                            slippage_bps=slippage,
-                            compound_amount=compound_amount_raw,
-                        )
-                        return scan_base, found, dict(scan_engine.last_rejections)
-                scan_results=await asyncio.gather(
-                    *(scan_base_token(scan_base) for scan_base in selected),
-                    return_exceptions=True,
-                )
-                for result in scan_results:
-                    if isinstance(result, Exception):
-                        logging.exception("DEX base-token scan failed", exc_info=result)
-                        METRICS.increment("quote_failures")
-                        aggregate_rejections["base_token_scan_error"]=aggregate_rejections.get("base_token_scan_error",0)+1
-                        continue
-                    scan_base, found, rejections=result
-                    all_opportunities.extend(found)
-                    for key,value in rejections.items():
-                        aggregate_rejections[key]=aggregate_rejections.get(key,0)+int(value)
-                all_opportunities.sort(key=lambda x: x.net_profit_quote, reverse=True)
-                opportunities=all_opportunities[:max(1,int(os.getenv("DEX_MAX_OPPORTUNITIES","8")))]
-                opportunity_ids = {}
-                opportunity_rows = []
-                for opportunity in opportunities:
-                    identifier = METRICS.record_opportunity(opportunity)
-                    METRICS.mark(identifier, "ready_for_fresh_simulation")
-                    opportunity_ids[id(opportunity)] = identifier
-                    opportunity_rows.append(opportunity_view(opportunity, identifier))
-                merge_rejections(aggregate_rejections)
-                logging.info("DEX scan complete: sources=%s base_tokens=%s candidates_per_token=%s opportunities=%s rejections=%s", sources, len(base_tokens), len(next(iter(token_engines.values()))._candidate_amounts(int(max_quote * (Decimal(10) ** quote_decimals)))), len(opportunities), aggregate_rejections)
-                with LOCK:
-                    STATE["scans"]+=1
-                    STATE["opportunities"]+=len(opportunities)
-                    STATE["last_scan"]=time.time()
-                    STATE["last_error"]=None
-                    STATE["quote_amount"]=str(opportunities[0].quote_amount/(Decimal(10)**quote_decimals)) if opportunities else None
-                    STATE["compound_amount_quote"]=str(Decimal(opportunities[0].compound_amount)/(Decimal(10)**quote_decimals)) if opportunities else STATE.get("compound_amount_quote","0")
-                    STATE["flash_loan_amount_quote"]=str(Decimal(opportunities[0].flash_loan_amount)/(Decimal(10)**quote_decimals)) if opportunities else STATE.get("flash_loan_amount_quote")
-                    STATE["opportunity_records"]=opportunity_rows
-                if opportunities and live:
-                    best=opportunities[0]
-                    identifier=opportunity_ids[id(best)]
-                    max_block=executor.w3.eth.block_number+max(1,int(os.getenv("DEX_MAX_BLOCKS_AHEAD","2")))
-                    tx_hash=None
+                all_found = []
+                rejections = {}
+                for cid in evm_chains:
+                    found, rej = await scan_evm_chain(
+                        adapter, cid, max_quote=flash_cap, taker=taker,
+                        slippage=slippage, min_profit=min_profit,
+                    )
+                    for opp in found:
+                        opp._chain_label = get_spec(cid).name
+                    all_found.extend(found)
+                    for k, v in rej.items():
+                        rejections[k] = rejections.get(k, 0) + int(v)
+                for family in nonevm_chains:
+                    _, rej = await scan_nonevm_chain(adapter, family, slippage=slippage)
+                    for k, v in rej.items():
+                        rejections[k] = rejections.get(k, 0) + int(v)
+                merge_rejections(rejections)
+                all_found.sort(key=lambda x: x.net_profit_quote, reverse=True)
+                opportunities = all_found[:max(1, int(os.getenv("DEX_MAX_OPPORTUNITIES", "8")))]
+                rows = []
+                for index, opp in enumerate(opportunities):
+                    identifier = opp.id if hasattr(opp, "id") else f"{STATE['scans']}-{index}"
                     try:
-                        tx_hash=await asyncio.to_thread(executor.build_and_send,best,max_block_number=max_block)
-                        METRICS.increment("fresh_simulation_passed")
-                        METRICS.mark(identifier, "simulation_passed", simulation_at=time.time())
-                        METRICS.mark_submission(identifier, tx_hash)
-                        receipt=await asyncio.to_thread(executor.wait_for_success,tx_hash,int(os.getenv("DEX_TX_RECEIPT_TIMEOUT","30")))
-                        actual_profit = receipt.get("arb_profit_raw")
-                        actual_profit_quote = None
-                        realized_pnl_quote = None
-                        if actual_profit is not None:
-                            actual_profit_quote = Decimal(str(actual_profit)) / (Decimal(10) ** quote_decimals)
-                            realized_pnl_quote = actual_profit_quote - best.gas_cost_quote
-                            receipt["arb_profit_quote"] = str(actual_profit_quote)
-                        METRICS.mark_included(identifier, receipt, realized_pnl_quote=realized_pnl_quote)
-                        with LOCK: STATE["last_tx_hash"]=tx_hash
-                        logging.info("ATOMIC FLASH TX CONFIRMED hash=%s gas_used=%s realized_pnl_quote=%s",tx_hash,receipt.get("gasUsed"),realized_pnl_quote)
-                        await asyncio.sleep(float(os.getenv("DEX_LIVE_COOLDOWN_SECONDS","1.0")))
-                    except FlashTransactionReverted as exc:
-                        METRICS.mark_reverted(identifier, error=str(exc), tx_hash=exc.tx_hash, receipt=exc.receipt)
-                        raise
-                    except Exception as exc:
-                        METRICS.mark(identifier, "simulation_failed" if tx_hash is None else "inclusion_failed", error=str(exc), tx_hash=tx_hash)
-                        raise
-                else: await asyncio.sleep(float(os.getenv("DEX_POLL_SECONDS","0.5")))
+                        METRICS.record_opportunity(opp)
+                    except Exception:
+                        logging.debug("telemetry record_opportunity failed", exc_info=True)
+                    rows.append(opportunity_view(opp, identifier, getattr(opp, "_chain_label", None) or str(opp.chain_id)))
+                with LOCK:
+                    STATE["scans"] += 1
+                    STATE["opportunities"] += len(opportunities)
+                    STATE["last_scan"] = time.time()
+                    STATE["last_error"] = None
+                    STATE["opportunity_records"] = rows
+                logging.info("scan complete chains=%s opportunities=%s rejections=%s", len(evm_chains), len(opportunities), rejections)
+                await asyncio.sleep(poll)
             except Exception as exc:
-                logging.exception("DEX scan/execution failed")
-                with LOCK: STATE["status"]="degraded"; STATE["last_error"]=str(exc)
+                logging.exception("scan/execution failed")
+                with LOCK:
+                    STATE["status"] = "degraded"
+                    STATE["last_error"] = str(exc)
                 await asyncio.sleep(2)
-                with LOCK: STATE["status"]="running"
+                with LOCK:
+                    STATE["status"] = "running"
     finally:
         if adapter is not None:
             try:
@@ -414,4 +385,6 @@ async def main():
             except Exception:
                 logging.exception("failed to close DEX adapter")
 
-if __name__=="__main__": asyncio.run(main())
+
+if __name__ == "__main__":
+    asyncio.run(main())

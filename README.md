@@ -1,88 +1,106 @@
-# Dragon Arbitrage Engine
+# Dragon — Multi-Chain Cross-DEX Arbitrage Engine
 
-Production-oriented Binance Spot triangular arbitrage engine.
+Dragon scans **cross-exchange arbitrage between DEX venues** on EVM and non-EVM
+chains: it prices the same token pair on every supported venue, finds the venue
+where a token is cheap and the venue where it is expensive, and reports the
+round-trip edge after swap fees, gas, flash-loan fees and a safety buffer.
 
-## Quantitative research architecture
+There is no centralized-exchange (CEX) code left in this repository. Every quote
+is an executable on-chain quote.
 
-Dragon now separates **measurement** from **execution policy**. The quantitative layer in `src/dragon/research_architecture.py` is pure research code: it places no orders and mutates no balances.
+## Supported chains
 
-The measurement pipeline is:
+One EVM adapter serves every EVM chain through a shared registry
+(`src/dragon/chains.py`, `src/dragon/venues.py`): adding a chain or venue is a
+registry edit, not new code. Verified live venues:
+
+| Chain | Id | Venues |
+| --- | --- | --- |
+| Ethereum | 1 | Uniswap_V3, SushiSwap_V2, Uniswap_V2, PancakeSwap_V3 |
+| Optimism | 10 | Uniswap_V3, Velodrome_V2 |
+| BNB Chain | 56 | Uniswap_V3, PancakeSwap_V3, Uniswap_V2, PancakeSwap_V2, BiSwap_V2 |
+| Unichain | 130 | Uniswap_V3 |
+| Polygon | 137 | Uniswap_V3, QuickSwap_V2 |
+| zkSync | 324 | Uniswap_V3 |
+| Worldchain | 480 | Uniswap_V3 |
+| Mantle | 5000 | MerchantMoe_V2 |
+| Base | 8453 | Uniswap_V3, Aerodrome, PancakeSwap_V3, SushiSwap_V3, SushiSwap_V2, Uniswap_V2, BaseSwap_V2, SwapBased_V2 |
+| Arbitrum | 42161 | Uniswap_V3, Camelot_V2 |
+| Celo | 42220 | Uniswap_V3 |
+| Avalanche | 43114 | Uniswap_V3, SushiSwap_V2, TraderJoe_V2_1 |
+| Linea | 59144 | Uniswap_V3 |
+
+Non-EVM venues (`src/dragon/dex_nonevm.py`):
+
+| Family | Venue | Status |
+| --- | --- | --- |
+| Tron | SunSwap_V2 | verified live |
+| Cosmos | Osmosis (SQS router) | verified live |
+| Cosmos | Astroport | wired, disabled until `ASTROPORT_*_ROUTER` is set |
+| Aptos | Liquidswap | wired, config-gated |
+
+Notes:
+
+- **Solana** needs a Jupiter API key (`portal.jup.ag`) before a venue can be
+  enabled; the adapter is intentionally not shipped with a hardcoded key.
+- **Ravencoin (RVN)** is a Bitcoin fork with no EVM and no on-chain AMM/DEX, so
+  there is nothing to arbitrage. It is deliberately absent from the registry.
+
+## How it works
 
 ```text
-RAW MARKET SNAPSHOTS
-  -> timestamp / sequence / freshness
-  -> synchronized order books
-  -> depth and executable VWAP
-  -> propagated triangle quantities
-  -> gross edge
-  -> fees
-  -> slippage / market impact
-  -> latency penalty
-  -> volatility
-  -> spread stability / persistence
-  -> net expected P&L
-  -> empirical P(success)
-  -> expected value
-  -> opportunity score / tier
-  -> hard-gate report
-  -> PAPER / REPLAY OUTCOME
-  -> REALIZED P&L
+chains.py / venues.py       registry: chain ids, RPC env, token addresses, venue routers
+        |
+dex_evm.py                  RpcPool (failover, cooldown) + EVM quoting:
+                            Uniswap V2, Uniswap V3 (QuoterV2), stable swaps, LB
+dex_nonevm.py               Tron (SunSwap), Cosmos (Osmosis/Astroport), Aptos (Liquidswap)
+        |
+dex_multichain.py           MultiChainDexAdapter facade: one quote surface for all chains
+        |
+dex_cross_exchange.py       DexCrossExchangeEngine: venue-pair scan, cost model,
+                            dynamic amount optimizer, rejection accounting
+        |
+dex_cross_exchange_runner.py  production entrypoint: HTTP health + dashboard, scan loop
 ```
 
-### Core measurements
+For each base token the engine quotes a buy leg on every venue and a sell leg on
+every other venue, then computes:
 
-- **Executable VWAP:** consumes the required quantity through multiple book levels instead of assuming the best quote is fillable.
-- **Quantity propagation:** each triangle leg receives the actual asset amount produced by the previous leg, so the three legs are not incorrectly evaluated at one constant notional.
-- **Fees:** measured per leg and included in net output.
-- **Slippage and impact:** measured against the best available price for the required quantity.
-- **Spread stability:** rolling count, mean, median, min, max, standard deviation and persistence.
-- **Volatility:** log-return volatility over 1s, 5s, 15s, 60s, 300s and 900s windows.
-- **Latency penalty:** volatility-scaled penalty using `k * sigma_1s * sqrt(latency_seconds)`.
-- **Probability:** Bayesian-smoothed empirical probability from completed paper/replay outcomes. It is not guessed from a score.
-- **Expected value:** `P(success) * profit - (1-P(success)) * loss`.
-- **Score:** 0-100 using net edge, liquidity utilization, persistence and execution-risk penalties. The score cannot override hard gates.
-- **Tiers:** A+ 90-100, A 80-89, B 70-79, C 60-69, below 60 = REJECT.
+```text
+gross_profit = sell_output - quote_invested
+net_profit   = gross_profit - swap_fees - gas_cost - flash_loan_fee - safety_buffer
+```
 
-### Research principle
+Only net-positive routes above `DEX_MIN_NET_PROFIT` are reported.
+`GET /health` returns full machine state; `GET /dashboard` renders `dashboard.html`.
 
-The objective is **repeatable positive expectancy over a sufficiently large sample**, not maximum trade count and not a promise of profit. Thresholds should be calibrated from replay/paper results and then validated on fresh observations.
+## Configuration
 
-The 30-second value is a **decision-cycle interval**, not a market-data refresh interval. WebSocket market data remains continuous.
+Copy `.env.example` to `.env`. Key settings:
 
-## Runtime architecture
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DEX_CHAINS` | `8453` | Comma-separated EVM chain ids to scan |
+| `NONEVM_CHAINS` | *(empty)* | Non-EVM families: `tron,cosmos,aptos` |
+| `<CHAIN>_RPC_URL(S)` | public fallback | Per-chain RPC endpoints |
+| `DEX_SOURCES` | all venues | Restrict venues per chain |
+| `DEX_QUOTE_TOKENS` | per-chain stablecoin | `"8453:0x...:6"` overrides |
+| `DEX_MIN_NET_PROFIT` | `0.005` | Minimum net profit in quote units (floor) |
+| `DEX_FLASH_LOAN_LIQUIDITY_QUOTE` | `1000` | Flash-loan principal cap (quote units) |
+| `DEX_POLL_SECONDS` | `2.0` | Seconds between full scans |
+| `FLASH_LOAN_ENABLED` | `false` | Compute flash-loan fees into net profit |
 
-1. Binance REST connector authenticates the account and loads `exchangeInfo`.
-2. Triangle builder creates executable USDT -> asset A -> asset B -> USDT cycles.
-3. Binance Spot WebSocket streams bookTicker and multi-level depth.
-4. The scanner evaluates the same budget that risk management permits, using order-book depth rather than only top-of-book prices.
-5. Fees, slippage allowance, stale-book checks, notional limits and the 1% risk ceiling gate execution.
-6. The executor places three sequential MARKET legs and refuses to mark the cycle filled unless all three return `FILLED` and the final asset is USDT.
-7. The execution ledger records each completed or failed cycle and reports realized P&L for the running service.
-8. `/health` exposes machine-readable state and `/dashboard` exposes the live monitoring page.
+Without a custom RPC the public endpoints work but are rate-limited; a private
+RPC per chain is strongly recommended for production throughput.
 
-## Environment
+## Run and test
 
-Secrets must only be configured in Render environment variables. Never commit API keys or secrets.
+```bash
+pip install -r requirements.txt
+cp .env.example .env
+python dex_cross_exchange_runner.py     # serves /health and /dashboard
+pytest -q                               # 33 tests
+```
 
-Required live variables:
-
-- `BINANCE_API_KEY`
-- `BINANCE_API_SECRET`
-- `DRY_RUN=false`
-- `LIVE_TRADING=true`
-
-The complete non-secret configuration is in `.env.example`.
-
-## Live-trading safety
-
-Dragon will not start live execution when credentials are missing, when `LIVE_TRADING` conflicts with `DRY_RUN`, when risk configuration is invalid, or when an execution cannot complete a full three-leg cycle.
-
-A Binance API error `-2015` is an exchange-side credential, permission, or IP restriction failure. Code cannot manufacture a valid key. The Render secret must be a valid Binance Spot trading key with the required permissions and compatible IP restrictions.
-
-## DEX hybrid compounding
-
-The active Base DEX path can combine an Aave flash loan with a bounded quote-token reserve retained by the executor. Set `DEX_COMPOUND_PROFITS=true` to retain realized profit, `DEX_COMPOUND_RATIO` to select the fraction reused on the next trade, and `DEX_MAX_COMPOUND_QUOTE` to cap retained-profit exposure. The flash-loan portion is still borrowed and repaid atomically on every trade; a retained reserve does not remove the need for owner-wallet gas. The updated `FlashParams` ABI requires a newly deployed `DragonAaveV3Executor` before live use.
-
-## Important limitation
-
-Triangular Spot arbitrage is sequential. There is no atomic three-leg order on Binance Spot, so market movement between legs remains execution risk. Dragon therefore sizes from current free USDT, uses depth-aware estimates, enforces strict stale-book and risk gates, and records every completed/error cycle.
+Paper mode is the default. Live execution stays disabled until
+`LIVE_TRADING=true` plus a deployed atomic executor are configured.
