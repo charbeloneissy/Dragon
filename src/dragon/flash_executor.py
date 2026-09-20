@@ -94,7 +94,7 @@ class FlashExecutorConfig:
             gas_limit=int(os.getenv("DEX_EXECUTOR_GAS_LIMIT", "0")) or None,
             max_fee_multiplier=multiplier, max_priority_fee_gwei=Decimal(os.getenv("DEX_MAX_PRIORITY_FEE_GWEI", "0.001")),
             mev_required=os.getenv("MEV_PROTECTION_REQUIRED", "true").lower() in {"1","true","yes","on"},
-            compound_profits=os.getenv("DEX_COMPOUND_PROFITS", "true").lower() in {"1","true","yes","on"},
+            compound_profits=False,
         )
 
 
@@ -151,10 +151,8 @@ class AaveFlashExecutor:
         flash_amount = total_amount - compound_amount
         if total_amount <= 0 or flash_amount <= 0:
             raise ValueError("flash amount must be positive")
-        if compound_amount < 0:
-            raise ValueError("compound amount cannot be negative")
-        if compound_amount and not self.config.compound_profits:
-            raise ValueError("compound amount requires DEX_COMPOUND_PROFITS=true")
+        if compound_amount != 0 or self.config.compound_profits:
+            raise ValueError("Dragon is configured for no compounding; compound amount must be zero")
         if opportunity.net_profit_quote < self.config.min_profit_quote:
             raise ValueError("opportunity is below minimum net profit")
         if max_block_number < self.w3.eth.block_number:
