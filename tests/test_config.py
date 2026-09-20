@@ -8,7 +8,11 @@ def test_live_and_dry_run_cannot_both_be_enabled():
 
 def test_paper_quote_latency_has_safe_floor(monkeypatch):
     monkeypatch.setenv("DEX_MAX_QUOTE_LATENCY_MS", "500")
-    assert quote_latency_ms(False) == 1500
+    assert quote_latency_ms(False) == 1200
+
+def test_paper_quote_latency_accepts_tuned_value(monkeypatch):
+    monkeypatch.setenv("DEX_MAX_QUOTE_LATENCY_MS", "1200")
+    assert quote_latency_ms(False) == 1200
 
 def test_live_quote_latency_remains_configurable(monkeypatch):
     monkeypatch.setenv("DEX_MAX_QUOTE_LATENCY_MS", "500")

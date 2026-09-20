@@ -73,12 +73,14 @@ def env_decimal(name,default):
 
 def env_bool(name,default=False): return os.getenv(name,str(default)).strip().lower() in {"1","true","yes","on"}
 
+PAPER_MIN_QUOTE_LATENCY_MS=Decimal("1200")
+
 def quote_latency_ms(live):
-    latency=env_decimal("DEX_MAX_QUOTE_LATENCY_MS","1500")
+    latency=env_decimal("DEX_MAX_QUOTE_LATENCY_MS",str(PAPER_MIN_QUOTE_LATENCY_MS))
     if latency<=0: raise ValueError("DEX_MAX_QUOTE_LATENCY_MS must be positive")
-    if not live and latency<Decimal("1500"):
-        logging.warning("DEX_MAX_QUOTE_LATENCY_MS=%s is below the paper-mode minimum; using 1500",latency)
-        return Decimal("1500")
+    if not live and latency<PAPER_MIN_QUOTE_LATENCY_MS:
+        logging.warning("DEX_MAX_QUOTE_LATENCY_MS=%s is below the paper-mode minimum; using %s",latency,PAPER_MIN_QUOTE_LATENCY_MS)
+        return PAPER_MIN_QUOTE_LATENCY_MS
     return latency
 
 def merge_rejections(stats):
