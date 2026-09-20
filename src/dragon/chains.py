@@ -278,7 +278,7 @@ def rpc_urls(spec: ChainSpec) -> list[str]:
 
 def env_chain_ids() -> list[int]:
     """Chains a deployment wants enabled, from DEX_CHAINS (default: Base only)."""
-    raw = os.getenv("DEX_CHAINS", "8453").strip()
+    raw = os.getenv("DEX_CHAINS", "1,56,43114,8453,42161,10,137,130,324,7777777,480,42220,59144,534352,81457,5000").strip()
     ids: list[int] = []
     for part in raw.split(","):
         part = part.strip()
