@@ -5,7 +5,7 @@ on:
     branches: [main]
   pull_request:
     paths:
-      - "src/dragon/main.py"
+      - "dex_cross_exchange_runner.py"
       - ".github/workflows/fix-dashboard-root.yml"
 
 permissions:
@@ -20,9 +20,9 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          s = Path('src/dragon/main.py').read_text(encoding='utf-8')
+          s = Path('dex_cross_exchange_runner.py').read_text(encoding='utf-8')
           required = [
-              'if self.path == "/":',
+              'if path == "/":',
               'self.send_response(302)',
               'self.send_header("Location", "/dashboard")',
           ]
