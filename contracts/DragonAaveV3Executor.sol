@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-interface IERC20 { function balanceOf(address account) external view returns (uint256); function approve(address spender,uint256 amount) external returns (bool); function transfer(address to,uint256 amount) external returns (bool); }
+interface IERC20 { function balanceOf(address account) external view returns (uint256); function allowance(address owner,address spender) external view returns (uint256); function approve(address spender,uint256 amount) external returns (bool); function transfer(address to,uint256 amount) external returns (bool); }
 interface IAaveV3Pool { function flashLoanSimple(address receiverAddress,address asset,uint256 amount,bytes calldata params,uint16 referralCode) external; }
 interface IFlashLoanSimpleReceiver { function executeOperation(address asset,uint256 amount,uint256 premium,address initiator,bytes calldata params) external returns (bool); }
 
@@ -53,7 +53,7 @@ contract DragonAaveV3Executor is IFlashLoanSimpleReceiver {
     }
     function rescueToken(address token,address to,uint256 amount) external onlyOwner {if(token==address(0)||to==address(0))revert InvalidTarget();_safeTransfer(token,to,amount);}
     function _validateCall(Call memory c) internal view {if(c.target==address(0)||c.target==POOL||c.allowanceTarget==address(0))revert InvalidTarget();if(c.sellToken==address(0)||c.buyToken==address(0)||c.sellToken==c.buyToken)revert InvalidAsset();if(c.sellAmount==0||c.minBuyAmount==0||c.data.length==0)revert InvalidAmount();}
-    function _approve(address token,address spender,uint256 amount) internal {IERC20(token).approve(spender,0);if(!IERC20(token).approve(spender,amount))revert TransferFailed();}
+    function _approve(address token,address spender,uint256 amount) internal { if(IERC20(token).allowance(address(this),spender)>=amount)return; if(!IERC20(token).approve(spender,type(uint256).max))revert TransferFailed(); }
     function _safeTransfer(address token,address to,uint256 amount) internal {if(!IERC20(token).transfer(to,amount))revert TransferFailed();}
     receive() external payable {}
 }
