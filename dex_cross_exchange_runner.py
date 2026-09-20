@@ -405,11 +405,72 @@ async def main():
             try:
                 all_found = []
                 rejections = {}
-                # Scan chains concurrently so the global selector compares fresher
-                # quotes instead of giving early chains a timing advantage. The
-                # semaphore keeps RPC load bounded and can be tuned per deployment.
+                # Phase 1: cheap gross-spread probes across every active chain.
+                # Phase 2: spend the expensive full sizing/second-leg scan only
+                # on chains whose probe economics clear the flash-fee hurdle.
                 chain_workers = max(1, min(len(evm_chains), int(os.getenv("DEX_CHAIN_CONCURRENCY", "3"))))
                 chain_sem = asyncio.Semaphore(chain_workers)
+                probe_fraction = max(Decimal("0.01"), min(Decimal("0.20"), env_decimal("DEX_CHAIN_PROBE_FRACTION", "0.05")))
+                probe_min_bps = env_decimal("DEX_CHAIN_PROBE_MIN_BPS", "5")
+
+                async def _probe_chain(cid):
+                    async with chain_sem:
+                        quote_token, quote_decimals = _quote_token_for(cid)
+                        base_tokens = _base_tokens_for(cid)
+                        cap = quote_units(flash_cap_quote * probe_fraction, quote_decimals)
+                        if cap <= 0 or not base_tokens:
+                            return cid, Decimal("-Infinity"), {"probe_invalid": 1}
+                        # Read the live Aave premium once per chain and use it in
+                        # the cheap ranking. A configured fee is only a fallback
+                        # when flash loans are disabled.
+                        fee_bps = env_decimal("FLASH_LOAN_FEE_BPS", "0")
+                        if env_bool("FLASH_LOAN_ENABLED", False) and hasattr(adapter, "evm") and adapter.evm is not None:
+                            fee_bps = Decimal(str(adapter.evm.flash_loan_fee_bps(cid)))
+                        venue_names = [v.name for v in venues_for(cid)]
+                        engine = DexCrossExchangeEngine(
+                            adapter, venue_names, min_profit=min_profit,
+                            quote_token_decimals=quote_decimals,
+                            flash_loan_enabled=env_bool("FLASH_LOAN_ENABLED", False),
+                            flash_loan_fee_bps=fee_bps, telemetry=METRICS,
+                        )
+                        best = Decimal("-Infinity")
+                        for base in base_tokens:
+                            probe = await to_thread(
+                                engine.fast_probe,
+                                chain_id=cid, quote_token=quote_token, base_token=base,
+                                quote_amount=cap, taker=taker, slippage_bps=slippage,
+                            )
+                            if probe > best:
+                                best = probe
+                        # Probe score is deliberately conservative: estimated
+                        # gross spread minus the live flash premium. Gas remains a
+                        # hard gate in the full scan and is never assumed away.
+                        score = best - fee_bps
+                        return cid, score, {"probe_gross_bps": best, "flash_fee_bps": fee_bps}
+
+                probe_results = await asyncio.gather(
+                    *(_probe_chain(cid) for cid in evm_chains),
+                    return_exceptions=True,
+                )
+                ranked = []
+                for result in probe_results:
+                    if isinstance(result, Exception):
+                        rejections["chain_probe_error"] = rejections.get("chain_probe_error", 0) + 1
+                        logging.warning("chain probe failed: %s: %s", type(result).__name__, result)
+                        continue
+                    cid, score, stats = result
+                    if score.is_finite():
+                        ranked.append((score, cid, stats))
+                    else:
+                        rejections["chain_probe_no_signal"] = rejections.get("chain_probe_no_signal", 0) + 1
+                ranked.sort(reverse=True)
+                # Keep at least two chains when possible. The threshold is only a
+                # prioritization filter; the full engine still enforces gas, slippage,
+                # flash fee, minimum profit and minimum net-bps before execution.
+                scan_count = max(2, min(len(evm_chains), int(os.getenv("DEX_CHAIN_SCAN_TOP_N", str(len(evm_chains))))))
+                selected = [cid for score, cid, stats in ranked if score >= probe_min_bps][:scan_count]
+                if len(selected) < min(2, len(evm_chains)):
+                    selected = [cid for _, cid, _ in ranked[:min(2, len(ranked))]]
 
                 async def _scan_selected_chain(cid):
                     async with chain_sem:
@@ -421,13 +482,13 @@ async def main():
                         )
 
                 chain_results = await asyncio.gather(
-                    *(_scan_selected_chain(cid) for cid in evm_chains),
+                    *(_scan_selected_chain(cid) for cid in selected),
                     return_exceptions=True,
                 )
                 for result in chain_results:
                     if isinstance(result, Exception):
                         rejections["chain_scan_error"] = rejections.get("chain_scan_error", 0) + 1
-                        logging.warning("chain scan failed: %s: %s", type(result).__name__, result)
+                        logging.warning("chain scan failed: %s", type(result).__name__, result)
                         continue
                     cid, (found, rej) = result
                     for opp in found:
