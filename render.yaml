@@ -22,24 +22,12 @@ services:
         value: "8453,42161,10,56,137,43114,1,5000,480,130,324,42220,59144"
       - key: NONEVM_CHAINS
         value: "tron,cosmos,solana"
-      - key: JUPITER_API_KEY
-        value: ""
       - key: JUPITER_QUOTE_URL
         value: "https://api.jup.ag/swap/v1/quote"
       # Leave RPCs blank to use the built-in public endpoints. A private RPC
       # (Alchemy/Infura/QuickNode) is strongly recommended for production.
       # Set ALCHEMY_API_KEY / INFURA_API_KEY / QUICKNODE_* on the service to
       # route every chain through the authenticated endpoint automatically.
-      - key: ALCHEMY_API_KEY
-        value: ""
-      - key: INFURA_API_KEY
-        value: ""
-      - key: QUICKNODE_API_KEY
-        value: ""
-      - key: QUICKNODE_ENDPOINT
-        value: ""
-      - key: QUICKNODE_CHAIN_ID
-        value: ""
       - key: DEX_RPC_URL
         value: ""
       - key: DEX_TAKER_ADDRESS
