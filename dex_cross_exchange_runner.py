@@ -405,13 +405,31 @@ async def main():
             try:
                 all_found = []
                 rejections = {}
-                for cid in evm_chains:
-                    quote_token, quote_decimals = _quote_token_for(cid)
-                    chain_flash_cap = quote_units(flash_cap_quote, quote_decimals)
-                    found, rej = await scan_evm_chain(
-                        adapter, cid, max_quote=chain_flash_cap, taker=taker,
-                        slippage=slippage, min_profit=min_profit, safety_buffer=safety,
-                    )
+                # Scan chains concurrently so the global selector compares fresher
+                # quotes instead of giving early chains a timing advantage. The
+                # semaphore keeps RPC load bounded and can be tuned per deployment.
+                chain_workers = max(1, min(len(evm_chains), int(os.getenv("DEX_CHAIN_CONCURRENCY", "3"))))
+                chain_sem = asyncio.Semaphore(chain_workers)
+
+                async def _scan_selected_chain(cid):
+                    async with chain_sem:
+                        quote_token, quote_decimals = _quote_token_for(cid)
+                        chain_flash_cap = quote_units(flash_cap_quote, quote_decimals)
+                        return cid, await scan_evm_chain(
+                            adapter, cid, max_quote=chain_flash_cap, taker=taker,
+                            slippage=slippage, min_profit=min_profit, safety_buffer=safety,
+                        )
+
+                chain_results = await asyncio.gather(
+                    *(_scan_selected_chain(cid) for cid in evm_chains),
+                    return_exceptions=True,
+                )
+                for result in chain_results:
+                    if isinstance(result, Exception):
+                        rejections["chain_scan_error"] = rejections.get("chain_scan_error", 0) + 1
+                        logging.warning("chain scan failed: %s: %s", type(result).__name__, result)
+                        continue
+                    cid, (found, rej) = result
                     for opp in found:
                         all_found.append((opp, get_spec(cid).name))
                     for k, v in rej.items():
