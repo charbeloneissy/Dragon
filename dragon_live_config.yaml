@@ -5,6 +5,18 @@ strategy:
   triangular: false
   intra_exchange: false
 
+chains:
+  configuration_driven: true
+  enabled:
+    - ethereum
+    - arbitrum
+    - base
+    - optimism
+    - bnb
+    - polygon
+    - avalanche
+  observe_only: []
+
 market:
   type: dex_spot
   spot: true
@@ -26,10 +38,25 @@ arbitrage:
   max_quote_age_ms: 1000
   max_pair_skew_ms: 500
 
-position:
-  sizing: flash_liquidity_dynamic
-  dynamic_sizing: true
-  compound_realized_pnl: true
+opportunity_engine:
+  survival_probability_enabled: true
+  min_survival_probability: 0.60
+  opportunity_half_life_enabled: true
+  latency_budget_enabled: true
+  reject_uncertain_state: true
+  require_fresh_requote_before_execution: true
+  optimize_for_realized_pnl: true
+
+rpc:
+  intelligent_routing: true
+  health_metrics:
+    - latency
+    - errors
+    - freshness
+    - rate_limits
+    - reliability
+  provider_cooldown_seconds: 30
+  state_disagreement_action: reject
 
 execution:
   continuous_scanning: true
@@ -40,6 +67,11 @@ execution:
   live_execution: false
   mev_protection_required: true
   atomic_repayment_required: true
+  dashboard_execution_authority: false
+
+accounting:
+  canonical_metric: realized_net_pnl_after_execution
+  expected_profit_is_not_realized: true
 
 runtime:
   poll_interval_ms: 500

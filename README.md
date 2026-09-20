@@ -1,119 +1,39 @@
-# Dragon — Multi-Chain Cross-DEX Arbitrage Engine
+# Dragon
 
-Dragon scans **cross-exchange arbitrage between DEX venues** on EVM and non-EVM
-chains: it prices the same token pair on every supported venue, finds the venue
-where a token is cheap and the venue where it is expensive, and reports the
-round-trip edge after swap fees, gas, flash-loan fees and a safety buffer.
+Dragon is a configuration-driven, multi-chain DEX arbitrage system.
 
-There is no centralized-exchange (CEX) code left in this repository. Every quote
-is an executable on-chain quote.
+## Core execution principle
 
-## Supported chains
+CONTROL PLANE -> RISK ENGINE -> EXECUTION ENGINE -> CHAIN
 
-One EVM adapter serves every EVM chain through a shared registry
-(`src/dragon/chains.py`, `src/dragon/venues.py`): adding a chain or venue is a
-registry edit, not new code. Verified live venues:
+The dashboard is an observer/control interface only. It is not an execution authority.
 
-| Chain | Id | Venues |
-| --- | --- | --- |
-| Ethereum | 1 | Uniswap_V3, SushiSwap_V2, Uniswap_V2, PancakeSwap_V3 |
-| Optimism | 10 | Uniswap_V3, Velodrome_V2 |
-| BNB Chain | 56 | Uniswap_V3, PancakeSwap_V3, Uniswap_V2, PancakeSwap_V2, BiSwap_V2 |
-| Unichain | 130 | Uniswap_V3 |
-| Polygon | 137 | Uniswap_V3, QuickSwap_V2 |
-| zkSync | 324 | Uniswap_V3 |
-| Worldchain | 480 | Uniswap_V3 |
-| Mantle | 5000 | MerchantMoe_V2 |
-| Base | 8453 | Uniswap_V3, Aerodrome, PancakeSwap_V3, SushiSwap_V3, SushiSwap_V2, Uniswap_V2, BaseSwap_V2, SwapBased_V2 |
-| Arbitrum | 42161 | Uniswap_V3, Camelot_V2 |
-| Celo | 42220 | Uniswap_V3 |
-| Avalanche | 43114 | Uniswap_V3, SushiSwap_V2, TraderJoe_V2_1 |
-| Linea | 59144 | Uniswap_V3 |
-| Scroll | 534352 | SyncSwap_V2, Uniswap_V3, SushiSwap_V2 |
+## Opportunity lifecycle
 
-Non-EVM venues (`src/dragon/dex_nonevm.py`):
+Observe -> Synchronize State -> Detect -> Predict Survival -> Optimize -> Risk -> Simulate -> Requote -> Targeted Submit -> Confirm -> Prove P&L -> Learn -> Reprioritize
 
-| Family | Venue | Status |
-| --- | --- | --- |
-| Tron | SunSwap_V2 | verified live |
-| Cosmos | Osmosis (SQS router) | verified live |
-| Cosmos | Astroport | wired, disabled until `ASTROPORT_*_ROUTER` is set |
-| Aptos | Liquidswap | wired, config-gated |
+An opportunity is not considered realized until the blockchain receipt and accounting layer establish the actual net P&L.
 
-Notes:
+## Multi-chain
 
-- **Solana** uses the Jupiter quote API when `JUPITER_API_KEY` is configured.
-- **Ravencoin (RVN)** is a Bitcoin fork with no EVM and no on-chain AMM/DEX, so
-  there is nothing to arbitrage. It is deliberately absent from the registry.
+Chains are registry-driven. A chain advertises its RPC providers, native token, DEX venues, gas/finality characteristics and execution capabilities. The core opportunity engine does not need chain-specific branching to add another registered chain.
 
-## How it works
+The initial production target is the seven-chain set in dragon_live_config.yaml: Ethereum, Arbitrum, Base, Optimism, BNB Chain, Polygon and Avalanche.
 
-```text
-chains.py / venues.py       registry: chain ids, RPC env, token addresses, venue routers
-        |
-dex_evm.py                  RpcPool (failover, cooldown) + EVM quoting:
-                            Uniswap V2, Uniswap V3 (QuoterV2), stable swaps, LB
-dex_nonevm.py               Tron (SunSwap), Cosmos (Osmosis/Astroport), Aptos (Liquidswap)
-        |
-dex_multichain.py           MultiChainDexAdapter facade: one quote surface for all chains
-        |
-dex_cross_exchange.py       DexCrossExchangeEngine: venue-pair scan, cost model,
-                            dynamic amount optimizer, rejection accounting
-        |
-dex_cross_exchange_runner.py  production entrypoint: HTTP health + dashboard, scan loop
-```
+Other registered chains can remain observe-only until their venue/liquidity/execution adapters are validated.
 
-For each base token the engine quotes a buy leg on every venue and a sell leg on
-every other venue, then computes:
+## RPC intelligence
 
-```text
-gross_profit = sell_output - quote_invested
-net_profit   = gross_profit - swap_fees - gas_cost - flash_loan_fee - safety_buffer
-```
+Dragon maintains provider health information and routes around degraded providers. Quote validity includes freshness and execution-latency budget checks. If critical state disagrees across providers, the opportunity is rejected instead of guessing.
 
-Only net-positive routes above `DEX_MIN_NET_PROFIT` are reported.
-`GET /health` returns full machine state; `GET /dashboard` renders `dashboard.html`.
+## Profit proof
 
-### Requested universe
+Expected profit is always net of configured costs:
 
-The screenshot-derived universe contains 48 selected chains and native assets.
-It is exposed in `/health` as `universe` and in the dashboard as active versus
-watchlist counts. `DEX_CHAINS` and `NONEVM_CHAINS` still control executable
-quote scans; chains without a verified adapter remain visible as watchlist
-entries until their RPC, token map, and at least two EVM DEX venues are verified.
+gross edge - DEX fees - gas - flash-loan fee - slippage - MEV reserve - risk buffer
 
-## Configuration
+Realized P&L is calculated separately from actual execution results and is the canonical accounting metric.
 
-Copy `.env.example` to `.env`. Key settings:
+## Safety
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `DEX_CHAINS` | `8453` | Comma-separated EVM chain ids to scan |
-| `UNIVERSE_CHAINS` | *(all)* | Filter the 48 requested chain/native-coin watchlist |
-| `NONEVM_CHAINS` | *(empty)* | Non-EVM families: `tron,cosmos,aptos,solana` |
-| `JUPITER_API_KEY` | *(empty)* | Bearer key for Solana Jupiter quotes |
-| `ALCHEMY_API_KEY` | *(empty)* | Alchemy key; covers eth/arb/opt/polygon/base/avax/bnb/linea/zksync/scroll/blast |
-| `INFURA_API_KEY` | *(empty)* | Infura project id |
-| `QUICKNODE_API_KEY` + `QUICKNODE_ENDPOINT` + `QUICKNODE_CHAIN_ID` | *(empty)* | QuickNode endpoint for one chain |
-| `<CHAIN>_RPC_URL(S)` | public fallback | Per-chain RPC endpoints (always win over providers) |
-| `DEX_SOURCES` | all venues | Restrict venues per chain |
-| `DEX_QUOTE_TOKENS` | per-chain stablecoin | `"8453:0x...:6"` overrides |
-| `DEX_MIN_NET_PROFIT` | `0.005` | Minimum net profit in quote units (floor) |
-| `DEX_FLASH_LOAN_LIQUIDITY_QUOTE` | `1000` | Flash-loan principal cap (quote units) |
-| `DEX_POLL_SECONDS` | `2.0` | Seconds between full scans |
-| `FLASH_LOAN_ENABLED` | `false` | Compute flash-loan fees into net profit |
-
-Without a custom RPC the public endpoints work but are rate-limited; a private
-RPC per chain is strongly recommended for production throughput.
-
-## Run and test
-
-```bash
-pip install -r requirements.txt
-cp .env.example .env
-python dex_cross_exchange_runner.py     # serves /health and /dashboard
-pytest -q                               # 33 tests
-```
-
-Paper mode is the default. Live execution stays disabled until
-`LIVE_TRADING=true` plus a deployed atomic executor are configured.
+Current repository configuration keeps live execution disabled. Enabling live execution requires verified executor-contract compatibility, atomic repayment, private/appropriate transaction routing where required, and an independently validated risk/execution path.

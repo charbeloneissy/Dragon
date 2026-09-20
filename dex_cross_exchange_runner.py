@@ -17,6 +17,7 @@ from src.dragon.observability import ExecutionTelemetry
 from src.dragon.rpc_providers import load_providers, provider_status
 from src.dragon.universe import universe_payload
 from src.dragon.venues import venues_for
+from src.dragon.opportunity_engine import OpportunityEngine
 
 STATE = {
     "status": "starting", "mode": "paper", "chains": [], "chain_details": {},
@@ -32,6 +33,12 @@ STATE = {
 }
 LOCK = Lock()
 METRICS = ExecutionTelemetry()
+OPPORTUNITY_ENGINE = OpportunityEngine(
+    min_net_profit=Decimal(os.getenv("DEX_MIN_NET_PROFIT", "0.005")),
+    max_quote_age_ms=int(os.getenv("DEX_MAX_QUOTE_AGE_MS", "1000")),
+    min_survival_probability=Decimal(os.getenv("DEX_MIN_SURVIVAL_PROBABILITY", "0.60")),
+    require_mev_protection=os.getenv("MEV_PROTECTION_REQUIRED", "true").strip().lower() in {"1", "true", "yes", "on"},
+)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -237,7 +244,11 @@ def opportunity_view(opportunity, identifier, chain_label):
         "gas_cost_quote": str(opportunity.gas_cost_quote),
         "flash_loan_fee_quote": str(opportunity.flash_loan_fee_quote),
         "safety_buffer_quote": str(opportunity.safety_buffer_quote),
-        "status": "ready_for_fresh_simulation",
+        "status": "detected",
+        "expected_net_profit_quote": str(opportunity.net_profit_quote),
+        "survival_probability": None,
+        "priority_score": str(OPPORTUNITY_ENGINE.priority_score(opportunity.net_profit_quote, Decimal("0.50"))),
+        "execution_authority": "risk_engine_only",
     }
 
 
