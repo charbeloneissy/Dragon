@@ -408,7 +408,7 @@ async def main():
                 # Phase 1: cheap gross-spread probes across every active chain.
                 # Phase 2: spend the expensive full sizing/second-leg scan only
                 # on chains whose probe economics clear the flash-fee hurdle.
-                chain_workers = max(1, min(len(evm_chains), int(os.getenv("DEX_CHAIN_CONCURRENCY", "3"))))
+                chain_workers = max(1, min(len(evm_chains), int(os.getenv("DEX_CHAIN_CONCURRENCY", str(len(evm_chains))))))
                 chain_sem = asyncio.Semaphore(chain_workers)
                 probe_fraction = max(Decimal("0.01"), min(Decimal("0.20"), env_decimal("DEX_CHAIN_PROBE_FRACTION", "0.05")))
                 probe_min_bps = env_decimal("DEX_CHAIN_PROBE_MIN_BPS", "5")
@@ -456,7 +456,7 @@ async def main():
                 for result in probe_results:
                     if isinstance(result, Exception):
                         rejections["chain_probe_error"] = rejections.get("chain_probe_error", 0) + 1
-                        logging.warning("chain probe failed: %s: %s", type(result).__name__, result)
+                        logging.warning("chain probe failed: %s", type(result).__name__, result)
                         continue
                     cid, score, stats = result
                     if score.is_finite():
@@ -464,13 +464,16 @@ async def main():
                     else:
                         rejections["chain_probe_no_signal"] = rejections.get("chain_probe_no_signal", 0) + 1
                 ranked.sort(reverse=True)
-                # Keep at least two chains when possible. The threshold is only a
-                # prioritization filter; the full engine still enforces gas, slippage,
-                # flash fee, minimum profit and minimum net-bps before execution.
-                scan_count = max(2, min(len(evm_chains), int(os.getenv("DEX_CHAIN_SCAN_TOP_N", str(len(evm_chains))))))
-                selected = [cid for score, cid, stats in ranked if score >= probe_min_bps][:scan_count]
-                if len(selected) < min(2, len(evm_chains)):
-                    selected = [cid for _, cid, _ in ranked[:min(2, len(ranked))]]
+
+                # Probe results are for prioritisation/telemetry only. They must
+                # never remove a healthy configured chain from the scan. This was
+                # the bug that made a large watchlist appear to have only one
+                # working chain.
+                selected = list(evm_chains)
+                logging.info(
+                    "full multi-chain scan selected=%s configured=%s",
+                    len(selected), len(evm_chains),
+                )
 
                 async def _scan_selected_chain(cid):
                     async with chain_sem:
