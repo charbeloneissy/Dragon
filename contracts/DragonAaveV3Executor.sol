@@ -18,7 +18,7 @@ contract DragonAaveV3Executor is IFlashLoanSimpleReceiver {
     function transferOwnership(address newOwner) external onlyOwner {if(newOwner==address(0))revert InvalidTarget();emit OwnershipTransferred(owner,newOwner);owner=newOwner;}
     function executeFlashArbitrage(address asset,uint256 amount,FlashParams calldata params) external onlyOwner nonReentrant {
         if(params.owner!=owner)revert ProfitRecipientMismatch();
-        if(!params.compoundProfit&&params.compoundAmount!=0)revert InvalidAmount();
+        if(params.compoundProfit||params.compoundAmount!=0)revert InvalidAmount();
         if(asset==address(0)||asset!=params.first.sellToken||asset!=params.second.buyToken)revert InvalidAsset();
         if(amount==0||params.first.sellAmount!=amount+params.compoundAmount)revert InvalidAmount(); if(params.maxBlockNumber<block.number)revert InvalidBlock();
         _validateCall(params.first);_validateCall(params.second);if(params.first.buyToken!=params.second.sellToken)revert InvalidAsset();
@@ -31,8 +31,7 @@ contract DragonAaveV3Executor is IFlashLoanSimpleReceiver {
         if(params.maxBlockNumber<block.number)revert InvalidBlock();
         if(params.first.sellToken!=asset||params.second.buyToken!=asset||params.first.sellAmount!=amount+params.compoundAmount)revert InvalidAsset();
         if(params.first.buyToken!=params.second.sellToken)revert InvalidAsset();_validateCall(params.first);_validateCall(params.second);
-        if(params.compoundAmount!=0){uint256 balanceAfterLoan=IERC20(asset).balanceOf(address(this)); if(balanceAfterLoan<amount||balanceAfterLoan-amount<params.compoundAmount)revert PreExistingBalance();}
-        _approve(params.first.sellToken,params.first.allowanceTarget,amount+params.compoundAmount);
+        _approve(params.first.sellToken,params.first.allowanceTarget,amount);
         uint256 baseBefore=IERC20(params.first.buyToken).balanceOf(address(this));
         (bool okFirst,)=params.first.target.call(params.first.data);if(!okFirst)revert FirstLegFailed();
         uint256 baseAfter=IERC20(params.first.buyToken).balanceOf(address(this));
@@ -46,8 +45,8 @@ contract DragonAaveV3Executor is IFlashLoanSimpleReceiver {
         uint256 repayment=amount+premium;uint256 roundTripOutput=quoteAfterSecond-quoteBeforeSecond;
         if(roundTripOutput<repayment+params.compoundAmount)revert RepaymentShortfall();
         uint256 profit=roundTripOutput-repayment-params.compoundAmount;if(profit<params.minProfit)revert ProfitTooSmall();
-        _approvePool(asset);uint256 retainedProfit=params.compoundProfit?profit:0;
-        if(!params.compoundProfit&&profit>0)_safeTransfer(asset,params.owner,profit);
+        _approvePool(asset);uint256 retainedProfit=0;
+        if(profit>0)_safeTransfer(asset,params.owner,profit);
         emit FlashArbitrageExecuted(asset,amount,premium,profit,params.compoundAmount,retainedProfit,params.first.target,params.second.target);return true;
     }
     function rescueToken(address token,address to,uint256 amount) external onlyOwner {if(token==address(0)||to==address(0))revert InvalidTarget();_safeTransfer(token,to,amount);}
