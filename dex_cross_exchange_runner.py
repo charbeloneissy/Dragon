@@ -345,7 +345,7 @@ async def main():
         min_profit = env_decimal("DEX_MIN_NET_PROFIT", "0.0025")
         if min_profit < Decimal("0.0025"):
             raise ValueError("DEX_MIN_NET_PROFIT cannot be below 0.0025")
-        safety = env_decimal("DEX_SAFETY_BUFFER", "0.001")
+        safety = Decimal("0")
         slippage = int(os.getenv("DEX_SLIPPAGE_BPS", "50"))
         flash_cap_quote = env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE", "10000")
         if flash_cap_quote <= 0:
