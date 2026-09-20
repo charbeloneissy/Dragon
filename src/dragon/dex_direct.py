@@ -102,7 +102,11 @@ class DirectDexAdapter:
             "Direct DEX RPC failover configured endpoints=%s active=%s",
             len(urls), self._rpc_host(self.rpc_url),
         )
-        self._rpc_selftest = self._run_rpc_selftest()
+        try:
+            self._rpc_selftest = self._run_rpc_selftest()
+        except Exception as exc:
+            logging.warning("RPC selftest unavailable error=%s: %s", type(exc).__name__, exc)
+            self._rpc_selftest = ["error" for _ in urls]
 
         self._native_rate_cache = {}
         # Short quote cache reduces duplicate RPC calls during one scan without
@@ -140,28 +144,47 @@ class DirectDexAdapter:
 
         A provider that rejects the key returns an HTTP error here, which is the
         only reliable way to distinguish "key invalid" from "endpoint slow".
+        This runs in a bounded thread pool: a hung provider socket must never
+        block service startup, because Render's health check would then 502 the
+        whole service. Every failure is reported, never raised.
         """
-        results = []
-        expected = "0x2105"
-        for idx, url in enumerate(self._rpc_urls):
-            label = self._rpc_host(url)
-            try:
-                w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": max(2.0, self._rpc_timeout)}))
-                chain = hex(int(w3.eth.chain_id))
-                if chain == expected:
-                    results.append("ok")
-                    logging.info("RPC selftest endpoint=%s host=%s chain=%s keyed=%s", idx, label, chain, self._keyed_endpoints[idx])
-                else:
-                    results.append(f"wrong_chain:{chain}")
-                    logging.warning("RPC selftest endpoint=%s host=%s returned chain=%s; Base expected %s", idx, label, chain, expected)
-            except Exception as exc:
-                message = str(exc)
-                if "401" in message or "403" in message or "unauthorized" in message.lower() or "invalid" in message.lower():
-                    results.append("auth_failed")
-                else:
-                    results.append(f"error:{type(exc).__name__}")
-                logging.warning("RPC selftest endpoint=%s host=%s failed keyed=%s error=%s: %s", idx, label, self._keyed_endpoints[idx], type(exc).__name__, message[:200])
+        results = ["untested" for _ in self._rpc_urls]
+        try:
+            with ThreadPoolExecutor(max_workers=min(4, len(self._rpc_urls))) as pool:
+                futures = {
+                    pool.submit(self._probe_endpoint, url): idx
+                    for idx, url in enumerate(self._rpc_urls)
+                }
+                for future in as_completed(futures, timeout=max(3.0, 2.0 + self._rpc_timeout)):
+                    idx = futures[future]
+                    try:
+                        results[idx] = future.result()
+                    except Exception as exc:
+                        results[idx] = f"error:{type(exc).__name__}"
+                        logging.warning("RPC selftest endpoint=%s host=%s raised %s", idx, self._rpc_host(self._rpc_urls[idx]), type(exc).__name__)
+        except Exception as exc:
+            logging.warning("RPC selftest aborted error=%s: %s", type(exc).__name__, exc)
         return results
+
+    def _probe_endpoint(self, url: str) -> str:
+        idx = self._rpc_urls.index(url)
+        label = self._rpc_host(url)
+        expected = "0x2105"
+        try:
+            w3 = Web3(Web3.HTTPProvider(url, request_kwargs={"timeout": max(2.0, self._rpc_timeout)}))
+            chain = hex(int(w3.eth.chain_id))
+            if chain == expected:
+                logging.info("RPC selftest endpoint=%s host=%s chain=%s keyed=%s", idx, label, chain, self._keyed_endpoints[idx])
+                return "ok"
+            logging.warning("RPC selftest endpoint=%s host=%s returned chain=%s; Base expected %s", idx, label, chain, expected)
+            return f"wrong_chain:{chain}"
+        except Exception as exc:
+            message = str(exc)
+            if "401" in message or "403" in message or "unauthorized" in message.lower() or "invalid" in message.lower():
+                logging.warning("RPC selftest endpoint=%s host=%s auth_failed keyed=%s", idx, label, self._keyed_endpoints[idx])
+                return "auth_failed"
+            logging.warning("RPC selftest endpoint=%s host=%s failed keyed=%s error=%s: %s", idx, label, self._keyed_endpoints[idx], type(exc).__name__, message[:200])
+            return f"error:{type(exc).__name__}"
 
     def rpc_status(self) -> dict:
         """Public, secret-free view of the RPC pool for the health endpoint."""
