@@ -28,6 +28,18 @@ services:
       # (Alchemy/Infura/QuickNode) is strongly recommended for production.
       # Set ALCHEMY_API_KEY / INFURA_API_KEY / QUICKNODE_* on the service to
       # route every chain through the authenticated endpoint automatically.
+      - key: ALCHEMY_API_KEY
+        sync: false
+      - key: INFURA_API_KEY
+        sync: false
+      - key: JUPITER_API_KEY
+        sync: false
+      - key: QUICKNODE_API_KEY
+        sync: false
+      - key: QUICKNODE_ENDPOINT
+        sync: false
+      - key: QUICKNODE_CHAIN_ID
+        sync: false
       - key: DEX_RPC_URL
         value: ""
       - key: DEX_TAKER_ADDRESS
