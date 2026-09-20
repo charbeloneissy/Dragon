@@ -50,6 +50,8 @@ services:
         value: "0.0025"
       - key: DEX_SAFETY_BUFFER
         value: "0"
+      - key: DEX_GAS_ESTIMATE_MULTIPLIER
+        value: "1.05"
       - key: DEX_SLIPPAGE_BPS
         value: "50"
       - key: DEX_POLL_SECONDS
