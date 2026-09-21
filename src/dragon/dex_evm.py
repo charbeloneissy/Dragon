@@ -638,7 +638,14 @@ class EvmDexAdapter(_EvmDexCore):
                 fee_pair = ()
             else:
                 raise ValueError(f"unsupported venue kind {venue.kind}")
-        except RpcRateLimitError:
+        except RpcRateLimitError as exc:
+            # A failed venue quote can be a deterministic pair-capability miss,
+            # not an infrastructure outage. Cache that distinction so the
+            # scanner does not repeatedly spend RPC calls on dead pairs.
+            message = str(exc).lower()
+            if "liquidity for pair" in message:
+                self._pair_capability_cache[capability_key] = time.monotonic() + self._pair_capability_ttl
+                raise RuntimeError(str(exc)) from exc
             raise
         except RuntimeError as exc:
             message = str(exc).lower()
