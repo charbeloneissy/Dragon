@@ -32,7 +32,7 @@ def test_credit_delegation_snapshot_health_factor():
         total_collateral_base=1000,
         total_debt_base=250,
         available_borrows_base=500,
-        health_factor_wad=Decimal("2.5") * 10**18,
+        health_factor_wad=int(Decimal("2.5") * 10**18),
         emode_category=1,
     )
     assert snapshot.healthy is True
