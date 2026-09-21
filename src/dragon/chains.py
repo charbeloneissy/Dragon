@@ -277,7 +277,7 @@ def rpc_urls(spec: ChainSpec) -> list[str]:
     # Keep explicit endpoints, but never allow a single public provider to
     # become a hard dependency. Base in particular gets independent fallbacks
     # so a dRPC 429 cannot collapse the whole quote engine.
-    if urls and spec.chain_id == 8453 and os.getenv("DEX_RPC_AUTO_FALLBACK", "true").strip().lower() in {"1", "true", "yes", "on"}:
+    if urls and spec.chain_id == 8453 and os.getenv("DEX_RPC_AUTO_FALLBACK", "false").strip().lower() in {"1", "true", "yes", "on"}:
         for url in (
             "https://mainnet.base.org",
             "https://base-rpc.publicnode.com",
