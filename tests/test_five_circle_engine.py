@@ -20,7 +20,7 @@ def test_challenge_rejects_candidate_that_only_looks_profitable():
         execution_stress_bps=100,
     )
     result = engine.run(
-        [opp("0.0055", gross="0.0056", gas="0.002")],
+        [opp("0.0052", gross="0.0056", gas="0.002")],
         rotation=1,
         chain_id=8453,
         block_number=100,
