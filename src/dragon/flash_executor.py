@@ -65,7 +65,7 @@ class FlashExecutorConfig:
     pool_address: str
     chain_id: int
     quote_token_decimals: int = 6
-    min_profit_quote: Decimal = Decimal("0.0025")
+    min_profit_quote: Decimal = Decimal("0.005")
     gas_limit: int | None = None
     max_fee_multiplier: Decimal = Decimal("1.20")
     max_priority_fee_gwei: Decimal = Decimal("0.001")
@@ -87,9 +87,9 @@ class FlashExecutorConfig:
         from .aave_markets import get_aave_v3_deployment
         pool = os.getenv("DEX_AAVE_POOL_ADDRESS", "").strip() or get_aave_v3_deployment(chain_id).pool
         decimals = int(os.getenv("DEX_QUOTE_TOKEN_DECIMALS", "6"))
-        min_profit = Decimal(os.getenv("DEX_MIN_NET_PROFIT", "0.0025"))
+        min_profit = Decimal(os.getenv("DEX_MIN_NET_PROFIT", "0.005"))
         multiplier = Decimal(os.getenv("DEX_MAX_FEE_MULTIPLIER", "1.20"))
-        if chain_id <= 0 or not 0 <= decimals <= 36 or min_profit < Decimal("0.0025") or multiplier < Decimal("1"):
+        if chain_id <= 0 or not 0 <= decimals <= 36 or min_profit < Decimal("0.005") or multiplier < Decimal("1"):
             raise ValueError("invalid flash executor chain/decimals/min-profit/fee configuration")
         return cls(
             rpc_url=rpc, private_key=key, executor_address=Web3.to_checksum_address(executor),
