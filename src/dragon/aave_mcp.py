@@ -45,6 +45,9 @@ class AaveMarketSnapshot:
     chain: str
     symbol: str
     reserve_id: str | None
+    market_address: str | None
+    underlying_token_address: str | None
+    underlying_token_name: str | None
     supply_apy_pct: Decimal | None
     available_liquidity: Decimal | None
     utilization_pct: Decimal | None
@@ -80,6 +83,9 @@ class AaveMarketSnapshot:
             "chain": self.chain,
             "symbol": self.symbol,
             "reserve_id": self.reserve_id,
+            "market_address": self.market_address,
+            "underlying_token_address": self.underlying_token_address,
+            "underlying_token_name": self.underlying_token_name,
             "supply_apy_pct": _string(self.supply_apy_pct),
             "incentive_apy_pct": _string(self.incentive_apy_pct),
             "displayed_apy_pct": _string(self.displayed_apy_pct),
@@ -265,8 +271,34 @@ class AaveMCPClient:
 
 
 def _candidate_market_dicts(payload: Any) -> list[dict[str, Any]]:
+    """Extract canonical Aave Reserve objects from MCP output.
+
+    Aave MCP returns reserves with identity nested under:
+      reserve.market.{address,chainId}
+      reserve.underlyingToken.{symbol,address,name}
+    The fallback recursive walk remains for compatible historical payloads.
+    """
     payload = _unwrap_result(payload)
-    candidates = []
+    candidates: list[dict[str, Any]] = []
+    for item in _walk_dicts(payload):
+        if not isinstance(item, dict):
+            continue
+        market = item.get("market")
+        token = item.get("underlyingToken")
+        if isinstance(market, dict) and isinstance(token, dict):
+            symbol = token.get("symbol")
+            if symbol and (
+                "reserveId" in item
+                or "summary" in item
+                or "isFrozen" in item
+                or "isPaused" in item
+                or "supplyApy" in item
+            ):
+                candidates.append(item)
+    if candidates:
+        return candidates
+
+    # Compatibility fallback for older/alternate MCP shapes.
     for item in _walk_dicts(payload):
         symbol = _deep_get(item, "symbol")
         if symbol is None:
@@ -285,7 +317,8 @@ def parse_markets(payload: Any, stablecoins: tuple[str, ...] = DEFAULT_STABLECOI
     seen: set[tuple[str, str, str]] = set()
 
     for item in _candidate_market_dicts(payload):
-        symbol = _deep_get(item, "symbol")
+        token_obj = item.get("underlyingToken") if isinstance(item.get("underlyingToken"), dict) else None
+        symbol = token_obj.get("symbol") if token_obj else _deep_get(item, "symbol")
         if isinstance(symbol, dict):
             symbol = symbol.get("symbol") or symbol.get("name")
         symbol = str(symbol or "").strip()
@@ -298,14 +331,24 @@ def parse_markets(payload: Any, stablecoins: tuple[str, ...] = DEFAULT_STABLECOI
             # leave it explicit as unknown rather than inventing a version.
             version = "unknown"
 
-        chain_id_value = _deep_get(item, "chainId", "chain_id")
+        market_obj = item.get("market") if isinstance(item.get("market"), dict) else {}
+        chain_id_value = market_obj.get("chainId") if market_obj else _deep_get(item, "chainId", "chain_id")
         try:
             chain_id = int(chain_id_value) if chain_id_value is not None else None
         except (TypeError, ValueError):
             chain_id = None
 
-        chain = str(_deep_get(item, "chain", "chainName", "network") or (chain_id or "unknown"))
+        chain = str(
+            market_obj.get("chain")
+            or market_obj.get("chainName")
+            or market_obj.get("network")
+            or _deep_get(item, "chain", "chainName", "network")
+            or (chain_id or "unknown")
+        )
         reserve_id = _deep_get(item, "reserveId", "reserve_id")
+        market_address = market_obj.get("address") if market_obj else _deep_get(item, "marketAddress", "market_address")
+        token_address = token_obj.get("address") if token_obj else _deep_get(item, "tokenAddress", "underlyingTokenAddress")
+        token_name = token_obj.get("name") if token_obj else _deep_get(item, "tokenName", "underlyingTokenName")
         key = (version, str(chain_id), f"{symbol}:{reserve_id}")
         if key in seen:
             continue
@@ -321,7 +364,10 @@ def parse_markets(payload: Any, stablecoins: tuple[str, ...] = DEFAULT_STABLECOI
             chain=chain,
             symbol=symbol,
             reserve_id=str(reserve_id) if reserve_id is not None else None,
-            supply_apy_pct=_pct(_deep_get(item, "supplyApy", "supplyAPY", "supplyRate")),
+            market_address=str(market_address) if market_address is not None else None,
+            underlying_token_address=str(token_address) if token_address is not None else None,
+            underlying_token_name=str(token_name) if token_name is not None else None,
+            supply_apy_pct=_pct(_deep_get(item, "supplyApy", "supplyAPY", "supplyRate", "summary")),
             available_liquidity=_decimal(_deep_get(item, "availableLiquidity", "available_liquidity", "liquidity")),
             utilization_pct=_pct(_deep_get(item, "utilization", "utilizationPct", "utilizationPercentage")),
             supply_cap=_decimal(_deep_get(item, "supplyCap", "supply_cap")),
