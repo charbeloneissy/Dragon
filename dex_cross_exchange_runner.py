@@ -211,6 +211,17 @@ def _enabled_nonevm() -> list[str]:
     return [x.strip().lower() for x in raw.split(",") if x.strip()]
 
 
+def _validate_quote_token_config(chain_id: int) -> tuple[str, int]:
+    """Validate quote-token configuration without allowing one bad chain to crash Dragon."""
+    token, decimals = _quote_token_for(chain_id)
+    if not 0 <= decimals <= 36:
+        raise ValueError(f"quote decimals out of range for chain {chain_id}: {decimals}")
+    validate_evm_address(f"quote token for chain {chain_id}", token)
+    if not _base_tokens_for(chain_id):
+        raise ValueError(f"no base tokens configured for chain {chain_id}")
+    return token, decimals
+
+
 def _quote_token_for(chain_id: int) -> tuple[str, int]:
     configured = os.getenv("DEX_QUOTE_TOKENS", "").strip()
     if configured:
@@ -354,19 +365,44 @@ async def main():
         poll = float(os.getenv("DEX_POLL_SECONDS", "2.0"))
 
         chain_details = {}
+        valid_evm_chains = []
+        quote_validation_errors = {}
         for cid in evm_chains:
             spec = get_spec(cid)
-            quote_token, quote_decimals = _quote_token_for(cid)
-            chain_details[spec.name] = {
-                "chain_id": cid,
-                "family": "evm",
-                "venues": list(adapter.sources(cid)),
-                "quote_token": quote_token,
-                "quote_decimals": quote_decimals,
-                "base_tokens": _base_tokens_for(cid),
-                "flash_scan_cap_quote": str(flash_cap_quote),
-                "flash_scan_cap_raw": str(quote_units(flash_cap_quote, quote_decimals)),
-            }
+            try:
+                quote_token, quote_decimals = _validate_quote_token_config(cid)
+                venues = list(adapter.sources(cid))
+                if not venues:
+                    raise ValueError(f"no DEX venues configured for chain {cid}")
+                valid_evm_chains.append(cid)
+                chain_details[spec.name] = {
+                    "chain_id": cid,
+                    "family": "evm",
+                    "venues": venues,
+                    "quote_token": quote_token,
+                    "quote_decimals": quote_decimals,
+                    "base_tokens": _base_tokens_for(cid),
+                    "flash_scan_cap_quote": str(flash_cap_quote),
+                    "flash_scan_cap_raw": str(quote_units(flash_cap_quote, quote_decimals)),
+                    "quote_config_valid": True,
+                }
+                logging.info("quote config valid chain=%s id=%s token=%s decimals=%s", spec.name, cid, quote_token, quote_decimals)
+            except Exception as exc:
+                quote_validation_errors[spec.name] = str(exc)
+                logging.error("quote config invalid chain=%s id=%s: %s", spec.name, cid, exc)
+                chain_details[spec.name] = {
+                    "chain_id": cid,
+                    "family": "evm",
+                    "venues": list(adapter.sources(cid)),
+                    "quote_config_valid": False,
+                    "quote_config_error": str(exc),
+                    "status": "disabled",
+                }
+        evm_chains = valid_evm_chains
+        if quote_validation_errors:
+            logging.warning("disabled chains due to invalid quote configuration: %s", quote_validation_errors)
+        if not evm_chains and not nonevm_chains:
+            raise ValueError("no chains passed startup configuration validation")
         for family in nonevm_chains:
             chain_details[family] = {
                 "chain_id": family,
