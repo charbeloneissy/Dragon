@@ -29,6 +29,7 @@ FLASH_EXECUTOR_ABI = [
             {"internalType": "uint256", "name": "amount", "type": "uint256"},
             {
                 "components": [
+                    {"internalType": "uint256", "name": "minProfit", "type": "uint256"},
                     {
                         "components": [
                             {"internalType": "address", "name": "token", "type": "address"},
@@ -49,7 +50,16 @@ FLASH_EXECUTOR_ABI = [
                         "name": "calls",
                         "type": "tuple[]",
                     },
-                    {"internalType": "uint256", "name": "minProfit", "type": "uint256"},
+                    {
+                        "components": [
+                            {"internalType": "address", "name": "spoke", "type": "address"},
+                            {"internalType": "uint256", "name": "reserveId", "type": "uint256"},
+                            {"internalType": "uint16", "name": "bps", "type": "uint16"},
+                        ],
+                        "internalType": "struct DragonAaveFlashExecutor.YieldPlan",
+                        "name": "yieldPlan",
+                        "type": "tuple",
+                    },
                 ],
                 "internalType": "struct DragonAaveFlashExecutor.FlashPlan",
                 "name": "plan",
@@ -109,6 +119,9 @@ def encode_flash_loan(
     min_profit: int,
     approvals: Iterable[tuple[str, str, int]],
     calls: Iterable[tuple[str, int, bytes]],
+    yield_spoke: str | None = None,
+    yield_reserve_id: int = 0,
+    yield_bps: int = 0,
 ):
     """Build unsigned Dragon -> Aave flashLoanSimple calldata.
 
@@ -127,7 +140,16 @@ def encode_flash_loan(
         (Web3.to_checksum_address(target), int(value), data)
         for target, value, data in calls
     ]
-    plan = (approval_rows, call_rows, int(min_profit))
+    if yield_bps < 0 or yield_bps > 10_000:
+        raise ValueError("yield_bps must be between 0 and 10000")
+    if yield_bps and not yield_spoke:
+        raise ValueError("yield_spoke is required when yield_bps is non-zero")
+    yield_plan = (
+        Web3.to_checksum_address(yield_spoke) if yield_spoke else "0x0000000000000000000000000000000000000000",
+        int(yield_reserve_id),
+        int(yield_bps),
+    )
+    plan = (int(min_profit), approval_rows, call_rows, yield_plan)
     return executor_contract.functions.startFlashLoan(
         Web3.to_checksum_address(asset), int(amount), plan
     ).build_transaction({"from": Web3.to_checksum_address(os.getenv("DEX_EXECUTOR_OWNER_ADDRESS", executor))})
