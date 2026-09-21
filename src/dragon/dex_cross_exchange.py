@@ -619,7 +619,6 @@ class DexCrossExchangeEngine:
                 self._reject("cross_gross_negative")
             elif net <= 0:
                 self._reject("cross_net_negative_after_costs")
-            if net > 0:
             if net < self.min_profit:
                 self._reject("net_profit_below_min")
                 return
