@@ -413,6 +413,79 @@ class AaveMCPClient:
             )
         return item
 
+    async def follow_next_actions(
+        self,
+        result: Any,
+        *,
+        user: str,
+        version: str = "v4",
+        max_actions: int = 3,
+    ) -> dict[str, Any]:
+        """Follow safe, read-only next_actions returned by Aave MCP.
+
+        The Aave response envelope may instruct the caller to run a follow-up
+        such as get_user_summary after an action preview. Only read tools are
+        followed here; no state-changing tool is ever auto-executed.
+        """
+        next_actions = result.get("next_actions") if isinstance(result, dict) else []
+        if not isinstance(next_actions, list):
+            return {"results": [], "skipped": []}
+
+        followups: list[dict[str, Any]] = []
+        skipped: list[str] = []
+
+        for raw in next_actions[: max(0, int(max_actions))]:
+            text = str(raw).strip().lower()
+            if text.startswith("get_user_summary"):
+                try:
+                    followups.append({
+                        "action": raw,
+                        "tool": "get_user_summary",
+                        "result": await self.get_user_summary(user=user, version=version),
+                    })
+                except Exception as exc:
+                    followups.append({
+                        "action": raw,
+                        "tool": "get_user_summary",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+            elif text.startswith("get_user_positions"):
+                try:
+                    followups.append({
+                        "action": raw,
+                        "tool": "get_user_positions",
+                        "result": await self.get_user_positions(user=user, version=version),
+                    })
+                except Exception as exc:
+                    followups.append({
+                        "action": raw,
+                        "tool": "get_user_positions",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+            elif text.startswith("get_user_rewards"):
+                try:
+                    followups.append({
+                        "action": raw,
+                        "tool": "get_user_rewards",
+                        "result": await self.call(
+                            "get_user_rewards",
+                            {"user": user, "version": version},
+                        ),
+                    })
+                except Exception as exc:
+                    followups.append({
+                        "action": raw,
+                        "tool": "get_user_rewards",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+            else:
+                skipped.append(str(raw))
+
+        return {"results": followups, "skipped": skipped}
+
+    async def get_user_rewards(self, *, user: str, version: str = "all") -> Any:
+        return await self.call("get_user_rewards", {"user": user, "version": version})
+
     async def preview_action(self, **arguments: Any) -> Any:
         """Simulate a protocol action without executing it."""
         return await self.call("preview_action", arguments)
