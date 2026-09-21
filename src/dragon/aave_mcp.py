@@ -53,7 +53,6 @@ _READ_TOOLS = {
     "get_proposal_payloads",
     "get_started",
     "get_aave_guide",
-    "tools/list",
 }
 
 # These tools only prepare/simulate. They never sign or relay a transaction.
@@ -304,8 +303,8 @@ class AaveMCPClient:
     async def list_tools(self) -> Any:
         """Return the server's live tools/list inventory.
 
-        Aave's documentation states that tools/list is authoritative when its
-        schema differs from static documentation.
+        Aave documents tools/list as authoritative when its schema differs
+        from the static documentation.
         """
         return await self._rpc_request("tools/list", {})
 
