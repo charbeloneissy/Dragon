@@ -38,7 +38,7 @@ STATE = {
     "aave_mcp_error": None, "aave_stable_yields": [], "aave_stable_markets": 0,
     "aave_stable_vaults_enabled": False, "aave_stable_vaults": [], "aave_stable_vault_error": None,
     "aave_v4_enabled": False, "aave_v4_chains": [], "aave_v4_arc": None, "aave_v4_last_update": None,
-    "aave_v4_error": None,
+    "aave_v4_error": None, "aave_v4_liquidity": {"spokes": [], "reserves": []}, "aave_v4_liquidity_error": None,
     "data_source": "multi-chain cross-DEX executable quotes (EVM + non-EVM) + Aave MCP read-only market data",
 }
 LOCK = Lock()
@@ -76,6 +76,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
             return
+        if path == "/api/aave/v4/liquidity":
+            body = json.dumps({
+                "enabled": payload.get("aave_v4_enabled", False),
+                "error": payload.get("aave_v4_liquidity_error"),
+                "liquidity": payload.get("aave_v4_liquidity", {"spokes": [], "reserves": []}),
+            }, default=str).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if path == "/api/aave/v4/chains":
             body = json.dumps({
                 "enabled": payload.get("aave_v4_enabled", False),
@@ -304,6 +318,41 @@ def merge_rejections(stats):
     with LOCK:
         for key, value in stats.items():
             STATE["rejections"][key] = int(value)
+
+async def refresh_aave_v4_liquidity():
+    """Refresh Arc/V4 Spoke + Reserve liquidity off the latency-critical quote path."""
+    enabled = env_bool("AAVE_V4_LIQUIDITY_ENABLED", True)
+    interval = max(30.0, float(os.getenv("AAVE_V4_LIQUIDITY_REFRESH_SECONDS", "60")))
+    chain_id = int(os.getenv("AAVE_V4_LIQUIDITY_CHAIN_ID", str(AAVE_V4_ARC_CHAIN_ID)))
+    client = AaveGraphQLClient()
+    if not enabled:
+        return
+
+    while True:
+        try:
+            spokes = await client.spokes({"query": {"chainIds": [chain_id]}})
+            reserves = await client.reserves({"query": {"chainIds": [chain_id]}})
+            with LOCK:
+                STATE["aave_v4_liquidity"] = {
+                    "spokes": spokes,
+                    "reserves": reserves,
+                }
+                STATE["aave_v4_liquidity_error"] = None
+            logging.info(
+                "AaveKit V4 liquidity refreshed chain=%s spokes=%s reserves=%s",
+                chain_id, len(spokes), len(reserves),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            with LOCK:
+                STATE["aave_v4_liquidity_error"] = f"{type(exc).__name__}: {exc}"
+            logging.warning(
+                "AaveKit V4 liquidity refresh failed: %s: %s",
+                type(exc).__name__, exc,
+            )
+        await asyncio.sleep(interval)
+
 
 async def refresh_aave_v4():
     """Refresh AaveKit v4 chain metadata without blocking DEX scans."""
@@ -586,6 +635,7 @@ async def main():
 
         aave_task = asyncio.create_task(refresh_aave_mcp())
         aave_v4_task = asyncio.create_task(refresh_aave_v4())
+        aave_v4_liquidity_task = asyncio.create_task(refresh_aave_v4_liquidity())
 
         while True:
             try:
@@ -738,6 +788,12 @@ async def main():
             aave_v4_task.cancel()
             try:
                 await aave_v4_task
+            except asyncio.CancelledError:
+                pass
+        if "aave_v4_liquidity_task" in locals():
+            aave_v4_liquidity_task.cancel()
+            try:
+                await aave_v4_liquidity_task
             except asyncio.CancelledError:
                 pass
         if adapter is not None:
