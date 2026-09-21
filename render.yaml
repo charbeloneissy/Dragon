@@ -16,6 +16,14 @@ services:
         value: 10000
       - key: LOG_LEVEL
         value: INFO
+      - key: DRAGON_ADMIN_ENABLED
+        value: "true"
+      - key: DRAGON_ADMIN_BIND
+        value: "127.0.0.1"
+      - key: DRAGON_ADMIN_PORT
+        value: "50051"
+      - key: DRAGON_ADMIN_TOKEN
+        sync: false
       - key: DEX_CHAINS
         value: "1,56,43114,8453,42161,10,137,130,324,7777777,480,42220,59144,534352,81457,5000"
       - key: NONEVM_CHAINS
