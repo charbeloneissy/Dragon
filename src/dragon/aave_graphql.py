@@ -319,7 +319,7 @@ class AaveGraphQLClient:
                     timeout=self.timeout,
                     headers={"content-type": "application/json", "accept": "application/json"},
                 ) as client:
-                    response = await client.post(self.url, json=payload)
+                    response = await client.post(url, json=payload)
 
                 response.raise_for_status()
                 body = response.json()
