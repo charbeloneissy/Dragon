@@ -260,6 +260,8 @@ def opportunity_view(opportunity, identifier, chain_label, quote_decimals):
         "quote_token": opportunity.quote_token,
         "quote_amount": str(opportunity.quote_amount),
         "quote_amount_human": str(human_quote_amount(opportunity.quote_amount, quote_decimals)),
+        "flash_loan_amount": str(opportunity.flash_loan_amount),
+        "flash_multiplier": str(opportunity.flash_multiplier.quantize(Decimal("0.01"))),
         "gross_profit_quote": str(opportunity.gross_profit_quote),
         "net_profit_quote": str(opportunity.net_profit_quote),
         "gas_cost_quote": str(opportunity.gas_cost_quote),
