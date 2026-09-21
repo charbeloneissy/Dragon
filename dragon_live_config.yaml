@@ -23,9 +23,9 @@ arbitrage:
   include_gas_cost: true
   include_slippage: true
   include_mev_reserve: true
-  max_quote_age_ms: 500
-  max_pair_skew_ms: 500
-  quote_deadline_ms: 500
+  max_quote_age_ms: 4000
+  max_pair_skew_ms: 4000
+  quote_deadline_ms: 4000
 
 position:
   sizing: flash_liquidity_dynamic
