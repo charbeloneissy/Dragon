@@ -27,6 +27,7 @@ from src.dragon.aave_address_book import snapshot as aave_address_snapshot
 from src.dragon.aave_stable_vault import load_validated_stable_vaults
 from src.dragon.aave_flash import env_flash_loan_config, validate_config as validate_flash_loan_config
 from src.dragon.aave_umbrella import AaveUmbrellaClient, choose_umbrella_candidates
+from src.dragon.aerodrome_opportunity import AerodromeOpportunityEngine, snapshot_from_dict
 
 STATE = {
     "status": "starting", "mode": "paper", "chains": [], "chain_details": {},
@@ -55,11 +56,33 @@ STATE = {
     "aave_horizon_enabled": False, "aave_horizon_last_update": None,
     "aave_horizon_error": None, "aave_horizon_market": None,
     "aave_agent": {"workflow": AAVE_AGENT_WORKFLOW, "sources": AAVE_AGENT_SOURCES, "policy": "discover-inspect-simulate-build-wallet-sign-confirm"},
+    "aerodrome": {"enabled": True, "mode": "read_only", "deployment_allowed": False, "opportunities": [], "last_update": None, "error": None},
     "aave_address_book": aave_address_snapshot(),
     "data_source": "multi-chain cross-DEX executable quotes (EVM + non-EVM) + Aave MCP read-only market data",
 }
 LOCK = Lock()
 METRICS = ExecutionTelemetry()
+AERODROME_ENGINE = AerodromeOpportunityEngine()
+
+def refresh_aerodrome_opportunities() -> None:
+    """Evaluate configured Aerodrome snapshots; never deploy capital."""
+    raw = os.getenv("AERODROME_POOLS_JSON", "").strip()
+    if not raw:
+        with LOCK:
+            STATE["aerodrome"].update({"enabled": True, "mode": "read_only", "deployment_allowed": False, "opportunities": [], "last_update": time.time(), "error": None})
+        return
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, list):
+            raise ValueError("AERODROME_POOLS_JSON must be a JSON array")
+        pools = [snapshot_from_dict(item) for item in payload if isinstance(item, dict)]
+        rows = AERODROME_ENGINE.rank(pools)
+        with LOCK:
+            STATE["aerodrome"].update({"enabled": True, "mode": "read_only", "deployment_allowed": False, "opportunities": rows[:20], "last_update": time.time(), "error": None})
+    except Exception as exc:
+        logging.warning("Aerodrome opportunity evaluation failed: %s", exc)
+        with LOCK:
+            STATE["aerodrome"].update({"enabled": True, "mode": "read_only", "deployment_allowed": False, "opportunities": [], "last_update": time.time(), "error": str(exc)})
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1041,7 +1064,8 @@ async def main():
                     STATE["last_scan"] = time.time()
                     STATE["last_error"] = None
                     STATE["opportunity_records"] = rows
-                logging.info("scan complete chains=%s opportunities=%s rejections=%s", len(evm_chains), len(opportunities), rejections)
+                refresh_aerodrome_opportunities()
+                logging.info("scan complete chains=%s opportunities=%s rejections=%s aerodrome_candidates=%s", len(evm_chains), len(opportunities), rejections, len(STATE.get("aerodrome", {}).get("opportunities", [])))
                 await asyncio.sleep(poll)
             except Exception as exc:
                 logging.exception("scan/execution failed")
