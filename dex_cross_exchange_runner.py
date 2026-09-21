@@ -32,6 +32,7 @@ from src.dragon.aave_flash import env_flash_loan_config, validate_config as vali
 from src.dragon.aave_umbrella import AaveUmbrellaClient, choose_umbrella_candidates
 from src.dragon.aerodrome_opportunity import AerodromeOpportunityEngine, snapshot_from_dict
 from src.dragon.economic_agent import EconomicDecisionAgent
+from src.dragon.dragon_core import DragonCore, ChainState, EconomicCandidate
 
 STATE = {
     "status": "starting", "mode": "paper", "chains": [], "chain_details": {},
@@ -66,6 +67,7 @@ STATE = {
     "triangular_enabled": False, "triangular_opportunities": 0,
     "execution_capacity": 8, "gas_sponsor_enabled": False, "gas_sponsor_required": False,
     "economic_agent": {"enabled": True, "last_update": None, "ranked_orders": [], "chain_memory": {}},
+    "dragon_core": {},
 }
 LOCK = Lock()
 METRICS = ExecutionTelemetry()
@@ -889,6 +891,7 @@ async def main():
         capacity = ExecutionCapacity(initial=int(os.getenv("DEX_MAX_EXECUTION_CONCURRENCY", "8")), maximum=max(1, int(os.getenv("DEX_MAX_EXECUTION_CONCURRENCY", "64"))))
         sponsor_manager = GasSponsorManager(min_net_profit=min_profit)
         economic_agent = EconomicDecisionAgent(history_size=int(os.getenv("ECONOMIC_AGENT_HISTORY_SIZE", "256")), min_profit=min_profit)
+        dragon_core = DragonCore(min_profit=min_profit)
 
         stable_vaults = []
         stable_vault_error = None
@@ -945,6 +948,12 @@ async def main():
                 "family": "non-evm",
                 "venues": list(adapter.sources(family)),
             }
+        for cid in evm_chains:
+            try:
+                dragon_core.observe_chain(ChainState(chain_id=cid, block_timestamp=time.time()))
+            except Exception:
+                logging.debug("Dragon Core chain observation failed", exc_info=True)
+
         with LOCK:
             STATE.update({
                 "status": "running",
@@ -1131,6 +1140,35 @@ async def main():
                         "ranked_orders": [{"chain_id": order.chain_id, "net_profit_quote": str(order.net_profit_quote), "expected_net_profit_quote": str(order.expected_net_profit_quote), "execution_probability": str(order.execution_probability), "freshness_factor": str(order.freshness_factor), "latency_factor": str(order.latency_factor), "capital_efficiency": str(order.capital_efficiency), "economic_priority": str(order.economic_priority), "reason": order.reason} for order in economic_orders[:max(1, int(os.getenv("DEX_MAX_OPPORTUNITIES", "8")))]],
                         "chain_memory": economic_agent.snapshot(),
                     }
+                # Feed normalized opportunities into the Dragon Core. This is a paper/economic layer only;
+                # it never signs or broadcasts a transaction.
+                core_candidates = []
+                for opp, _label in all_found:
+                    if hasattr(opp, "route"):
+                        continue
+                    try:
+                        core_candidates.append(EconomicCandidate(
+                            chain_id=int(opp.chain_id),
+                            source=f"{opp.buy_source}->{opp.sell_source}",
+                            route=(str(opp.buy_source), str(opp.sell_source)),
+                            quote_amount=Decimal(str(opp.quote_amount)),
+                            gross_profit=Decimal(str(opp.gross_profit_quote)),
+                            gas_cost=Decimal(str(opp.gas_cost_quote)),
+                            swap_fees=Decimal("0"),
+                            borrow_cost=Decimal(str(opp.flash_loan_fee_quote)),
+                            slippage_cost=Decimal("0"),
+                            mev_cost=Decimal("0"),
+                            safety_buffer=Decimal(str(opp.safety_buffer_quote)),
+                            freshness_ms=Decimal("0"),
+                            latency_ms=Decimal("0"),
+                            liquidity_factor=Decimal("1"),
+                            execution_probability=Decimal("1"),
+                        ))
+                    except Exception:
+                        logging.debug("Dragon Core opportunity normalization failed", exc_info=True)
+                core_orders = dragon_core.rank(core_candidates)
+                with LOCK:
+                    STATE["dragon_core"] = dragon_core.snapshot()
                 economic_order_by_id = {id(order.opportunity): order for order in economic_orders}
                 rows = []
                 for index, (opp, chain_label) in enumerate(top):
