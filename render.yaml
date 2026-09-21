@@ -33,7 +33,7 @@ services:
       - key: HELIUS_API_KEY
         sync: false
       - key: HELIUS_WSS_URL
-        value: "wss://atlas-mainnet.helius-rpc.com/"
+        value: "wss://mainnet.helius-rpc.com/"
       - key: SOLANA_COMMITMENT
         value: "processed"
       - key: SOLANA_WSS_RECONNECT_SECONDS
@@ -56,11 +56,13 @@ services:
         value: "0.5"
       - key: JUPITER_QUOTE_URL
         value: "https://api.jup.ag/swap/v1/quote"
+      - key: HELIUS_SENDER_ENDPOINT
+        value: "https://sender.helius-rpc.com/fast?swqos_only=true"
+      - key: SOLANA_LIVE_EXECUTION_ENABLED
+        value: "false"
       - key: ALCHEMY_API_KEY
         sync: false
       - key: INFURA_API_KEY
-        sync: false
-      - key: JUPITER_API_KEY
         sync: false
       - key: QUICKNODE_API_KEY
         sync: false
