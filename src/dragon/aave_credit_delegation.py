@@ -255,13 +255,13 @@ class AaveV3CreditDelegationClient:
         amount: int,
         chain_id: int,
     ) -> dict[str, Any]:
-        validate_credit_delegation_request(
-            pool="0x0000000000000000000000000000000000000001",
-            asset="0x0000000000000000000000000000000000000002",
-            delegator=delegator,
-            delegatee=delegatee,
-            amount=amount,
-        )
+        _checksum(variable_debt_token, "variable_debt_token")
+        _checksum(delegator, "delegator")
+        _checksum(delegatee, "delegatee")
+        if amount <= 0:
+            raise ValueError("delegated amount must be positive")
+        if delegator.lower() == delegatee.lower():
+            raise ValueError("delegatee must differ from delegator")
         tx = self._debt_token(variable_debt_token).functions.approveDelegation(
             _checksum(delegatee, "delegatee"),
             int(amount),
