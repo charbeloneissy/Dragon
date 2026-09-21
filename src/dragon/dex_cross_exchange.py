@@ -694,7 +694,7 @@ class DexCrossExchangeEngine:
                 job = futures[future]
                 try:
                     sell_result = future.result()
-                    self._observe_quote_latency(sell_result[5][0])
+                    self._observe_quote_latency(sell_result[4][0])
                     _process_sell(job, sell_result)
                 except Exception as exc:
                     source = job[3]
