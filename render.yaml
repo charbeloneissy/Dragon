@@ -25,9 +25,9 @@ services:
       - key: DRAGON_ADMIN_TOKEN
         sync: false
       - key: DEX_CHAINS
-        value: "1,56,43114,8453,42161,10,137,130,324,7777777,480,42220,59144,534352,81457,5000"
+        value: "8453"
       - key: NONEVM_CHAINS
-        value: "solana"
+        value: ""
       - key: JUPITER_QUOTE_URL
         value: "https://api.jup.ag/swap/v1/quote"
       - key: ALCHEMY_API_KEY
@@ -59,7 +59,17 @@ services:
       - key: DEX_SLIPPAGE_BPS
         value: "50"
       - key: DEX_POLL_SECONDS
-        value: "4.0"
+        value: "0.5"
+      - key: DRAGON_BASE_VENUES
+        value: "Aerodrome,Uniswap_V3"
+      - key: TRIANGULAR_ARBITRAGE_ENABLED
+        value: "false"
+      - key: DRAGON_CHALLENGE_GAS_BPS
+        value: "2000"
+      - key: DRAGON_CHALLENGE_EXECUTION_BPS
+        value: "100"
+      - key: DRAGON_CHALLENGE_MAX_CANDIDATES
+        value: "8"
       - key: FREE_RENDER_HEALTH_PING_MINUTES
         value: "5"
       - key: AMPLITUDE_ENABLED

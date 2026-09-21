@@ -34,6 +34,7 @@ from src.dragon.aerodrome_opportunity import AerodromeOpportunityEngine, snapsho
 from src.dragon.economic_agent import EconomicDecisionAgent
 from src.dragon.dragon_core import DragonCore, ChainState, EconomicCandidate
 from src.dragon.base_live import BaseLiveReader
+from src.dragon.five_circle_engine import FiveCircleEngine
 
 STATE = {
     "status": "starting", "mode": "paper", "chains": [], "chain_details": {},
@@ -70,6 +71,7 @@ STATE = {
     "economic_agent": {"enabled": True, "last_update": None, "ranked_orders": [], "chain_memory": {}},
     "dragon_core": {},
     "base_live": {},
+    "five_circle": {"rotation": 0, "status": "waiting", "selected": None, "decisions": []},
 }
 LOCK = Lock()
 METRICS = ExecutionTelemetry()
@@ -469,7 +471,8 @@ async def scan_triangular_chain(adapter, chain_id, *, max_quote, min_profit):
     if not env_bool("TRIANGULAR_ARBITRAGE_ENABLED", True): return [], {}
     cycle = _triangular_tokens_for(chain_id)
     if cycle is None: return [], {"triangular_cycle_not_configured": 1}
-    venue_names = [v.name for v in venues_for(chain_id)]
+    configured_venues = [x.strip() for x in os.getenv("DRAGON_BASE_VENUES", "").split(",") if x.strip()]
+    venue_names = [v.name for v in venues_for(chain_id) if not configured_venues or v.name in configured_venues]
     if not venue_names: return [], {"triangular_no_venues": 1}
     engine = TriangularEngine(adapter, min_profit=min_profit, quote_decimals=int(_quote_token_for(chain_id)[1]),
                               flash_fee_bps=env_decimal("FLASH_LOAN_FEE_BPS", "0"),
@@ -797,7 +800,8 @@ async def scan_evm_chain(adapter, chain_id, *, max_quote, taker, slippage, min_p
     spec = get_spec(chain_id)
     quote_token, quote_decimals = _quote_token_for(chain_id)
     base_tokens = _base_tokens_for(chain_id)
-    venue_names = [v.name for v in venues_for(chain_id)]
+    configured_venues = [x.strip() for x in os.getenv("DRAGON_BASE_VENUES", "").split(",") if x.strip()]
+    venue_names = [v.name for v in venues_for(chain_id) if not configured_venues or v.name in configured_venues]
     if len(venue_names) < 2:
         return [], {}
     flash_enabled = env_bool("FLASH_LOAN_ENABLED", False)
@@ -894,7 +898,14 @@ async def main():
         sponsor_manager = GasSponsorManager(min_net_profit=min_profit)
         economic_agent = EconomicDecisionAgent(history_size=int(os.getenv("ECONOMIC_AGENT_HISTORY_SIZE", "256")), min_profit=min_profit)
         dragon_core = DragonCore(min_profit=min_profit)
+        five_circle = FiveCircleEngine(
+            min_profit=min_profit,
+            gas_stress_bps=env_decimal("DRAGON_CHALLENGE_GAS_BPS", "2000"),
+            execution_stress_bps=env_decimal("DRAGON_CHALLENGE_EXECUTION_BPS", "100"),
+            max_candidates=int(os.getenv("DRAGON_CHALLENGE_MAX_CANDIDATES", "8")),
+        )
         base_reader = BaseLiveReader()
+        rotation = 0
 
         stable_vaults = []
         stable_vault_error = None
@@ -1002,6 +1013,7 @@ async def main():
 
         while True:
             try:
+                rotation += 1
                 all_found = []
                 try:
                     base_snapshot = await to_thread(base_reader.snapshot)
@@ -1139,6 +1151,29 @@ async def main():
                     for k, v in rej.items():
                         rejections[k] = rejections.get(k, 0) + int(v)
                 merge_rejections(rejections)
+                # Five-circle gate: fast discovery/optimization, adversarial stress,
+                # explicit proof status, then an execution gate. The current runtime
+                # remains paper-only until an exact simulator result is supplied.
+                base_block = int(STATE.get("base_live", {}).get("block_number", 0))
+                base_candidates = [opp for opp, _label in all_found if getattr(opp, "chain_id", None) == 8453]
+                circle_result = five_circle.run(
+                    base_candidates,
+                    rotation=rotation,
+                    chain_id=8453,
+                    block_number=base_block,
+                    simulation_passed=False,
+                )
+                with LOCK:
+                    STATE["five_circle"] = {
+                        "rotation": rotation,
+                        "status": "ready_for_simulation" if circle_result.decisions[-1].circle == "PROVE" else ("candidate_survived" if circle_result.selected else "rejected"),
+                        "selected": None if circle_result.selected is None else {
+                            "buy_source": getattr(circle_result.selected, "buy_source", None),
+                            "sell_source": getattr(circle_result.selected, "sell_source", None),
+                            "net_profit_quote": str(getattr(circle_result.selected, "net_profit_quote", "0")),
+                        },
+                        "decisions": [{"circle": d.circle, "passed": d.passed, "candidate_count": len(d.candidates), "reason": d.reason} for d in circle_result.decisions],
+                    }
                 opp_chain_labels = {id(opp): chain_label for opp, chain_label in all_found}
                 economic_orders = economic_agent.rank([opp for opp, _ in all_found])
                 if economic_orders:
