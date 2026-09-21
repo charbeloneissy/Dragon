@@ -80,9 +80,15 @@ class RpcPool:
         self.urls = urls
         self._keyed = [self._is_keyed(url) for url in urls]
         self._has_keyed = any(self._keyed)
-        configured = float(os.getenv("DEX_RPC_TIMEOUT_SECONDS", "0.9")) if timeout is None else float(timeout)
+        configured = float(os.getenv("DEX_RPC_TIMEOUT_SECONDS", "0.4")) if timeout is None else float(timeout)
         ceiling = 2.0 if self._has_keyed else 1.2
-        self.timeout = max(0.2, min(ceiling, configured))
+        # RPC HTTP timeout must fit inside Dragon's hard quote deadline.
+        # The previous 0.9s default exceeded the 500ms quote budget, causing
+        # RpcPool.call() to reject every request before it was sent.
+        hard_deadline = max(100.0, float(os.getenv("DEX_HARD_QUOTE_DEADLINE_MS", "500"))) / 1000.0
+        deadline_margin = max(0.05, min(0.15, hard_deadline * 0.20))
+        timeout_ceiling = max(0.2, hard_deadline - deadline_margin)
+        self.timeout = max(0.2, min(ceiling, configured, timeout_ceiling))
         self._index = 0
         self._failures = [0] * len(urls)
         self._cooldown_until = [0.0] * len(urls)
