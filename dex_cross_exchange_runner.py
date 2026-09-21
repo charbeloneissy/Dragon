@@ -876,8 +876,8 @@ async def main():
         evm_chains = _enabled_evm_chains()
         nonevm_chains = _enabled_nonevm()
         min_profit = env_decimal("DEX_MIN_NET_PROFIT", "0.0025")
-        if min_profit < Decimal("0.0025"):
-            raise ValueError("DEX_MIN_NET_PROFIT cannot be below 0.0025")
+        if min_profit < Decimal("0.005"):
+            raise ValueError("DEX_MIN_NET_PROFIT cannot be below 0.005")
         safety = Decimal("0")
         slippage = int(os.getenv("DEX_SLIPPAGE_BPS", "50"))
         flash_cap_quote = env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE", "10000")
@@ -1131,6 +1131,7 @@ async def main():
                         "ranked_orders": [{"chain_id": order.chain_id, "net_profit_quote": str(order.net_profit_quote), "expected_net_profit_quote": str(order.expected_net_profit_quote), "execution_probability": str(order.execution_probability), "freshness_factor": str(order.freshness_factor), "latency_factor": str(order.latency_factor), "capital_efficiency": str(order.capital_efficiency), "economic_priority": str(order.economic_priority), "reason": order.reason} for order in economic_orders[:max(1, int(os.getenv("DEX_MAX_OPPORTUNITIES", "8")))]],
                         "chain_memory": economic_agent.snapshot(),
                     }
+                economic_order_by_id = {id(order.opportunity): order for order in economic_orders}
                 rows = []
                 for index, (opp, chain_label) in enumerate(top):
                     if hasattr(opp, "route"):
