@@ -150,6 +150,45 @@ class AaveMarketSnapshot:
         }
 
 
+def parse_human_amount(value: str) -> Decimal:
+    """Parse Aave main-unit amounts: positive plain decimal, no exponent/hex."""
+    text = str(value).strip()
+    if not text or text.startswith(("+", "-")) or "e" in text.lower() or text.lower().startswith("0x"):
+        raise ValueError("Aave amounts must be positive plain decimal strings")
+    try:
+        amount = Decimal(text)
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError("Aave amounts must be positive plain decimal strings") from exc
+    if not amount.is_finite() or amount <= 0:
+        raise ValueError("Aave amount must be positive and finite")
+    return amount
+
+
+def _validate_chain_coverage(result: Any, requested_chains: set[int] | None = None) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {"chainsCovered": [], "chainsNotCovered": [], "chainsNotServed": [], "needs_retry": False}
+    def normalize(values: Any) -> list[Any]:
+        return list(values) if isinstance(values, (list, tuple)) else []
+    covered = normalize(result.get("chainsCovered"))
+    not_covered = normalize(result.get("chainsNotCovered"))
+    not_served = normalize(result.get("chainsNotServed"))
+    requested = requested_chains or set()
+    if requested:
+        missing_requested = [
+            chain for chain in not_covered
+            if str(chain) in {str(x) for x in requested}
+        ]
+    else:
+        missing_requested = not_covered
+    return {
+        "chainsCovered": covered,
+        "chainsNotCovered": not_covered,
+        "chainsNotServed": not_served,
+        "needs_retry": bool(missing_requested),
+        "retry_chains": missing_requested,
+    }
+
+
 def _string(value: Decimal | None) -> str | None:
     return None if value is None else str(value)
 
@@ -778,6 +817,8 @@ async def prepare_supply(
         "chainId": int(chain_id),
         "amount": {"erc20": {"value": str(amount)}},
     }
+    human_amount = parse_human_amount(str(amount))
+    request["amount"] = {"erc20": {"value": str(human_amount)}}
     if enable_collateral:
         request["enableCollateral"] = True
 
@@ -831,7 +872,7 @@ async def prepare_withdraw(
         raise AaveMCPError("cannot withdraw while the Aave reserve is paused")
 
     if amount is not None:
-        requested = Decimal(str(amount))
+        requested = parse_human_amount(str(amount))
         if not requested.is_finite() or requested <= 0:
             raise ValueError("withdraw amount must be positive and finite")
         if withdrawable is not None and requested > Decimal(str(withdrawable)):
