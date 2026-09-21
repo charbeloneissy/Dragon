@@ -86,7 +86,7 @@ EVM_CHAINS: dict[int, ChainSpec] = {
         explorer="https://basescan.org",
         rpc_env="DEX_RPC_URL",
         rpc_fallback_env="DEX_RPC_URLS",
-        default_rpc="https://base-rpc.publicnode.com",
+        default_rpc="https://mainnet.base.org",
     ),
     42161: ChainSpec(
         chain_id=42161,
@@ -279,6 +279,7 @@ def rpc_urls(spec: ChainSpec) -> list[str]:
     # so a dRPC 429 cannot collapse the whole quote engine.
     if urls and spec.chain_id == 8453 and os.getenv("DEX_RPC_AUTO_FALLBACK", "true").strip().lower() in {"1", "true", "yes", "on"}:
         for url in (
+            "https://mainnet.base.org",
             "https://base-rpc.publicnode.com",
             "https://base.llamarpc.com",
             "https://1rpc.io/base",
