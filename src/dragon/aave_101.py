@@ -27,16 +27,24 @@ class AavePositionState:
 
 
 class Aave101Model:
-    """Minimal protocol model used to keep lending semantics separate from Dragon's DEX/flash path.
+    """Keep Aave lending semantics separate from Dragon's atomic liquidity path.
 
-    Reserve flags follow Aave MCP safety semantics. Flash loans are classified as
-    atomic liquidity operations, not as collateralized user lending positions.
+    The reserve-flag rules here intentionally cover only the lending actions
+    documented by Aave MCP. Flash-loan eligibility is handled by the live
+    Pool/flash-loan adapter instead of being inferred from lending flags.
     """
 
     @staticmethod
-    def can_execute_reserve_action(state: AaveReserveState, action: AaveAction) -> bool:
+    def can_execute_lending_action(state: AaveReserveState, action: AaveAction) -> bool:
         if action == AaveAction.FLASH_LOAN:
-            return True
+            raise ValueError("flash-loan eligibility is not a lending-reserve rule")
+        if action not in {
+            AaveAction.SUPPLY,
+            AaveAction.BORROW,
+            AaveAction.WITHDRAW,
+            AaveAction.REPAY,
+        }:
+            raise ValueError(f"unsupported lending action: {action}")
         if state.paused:
             return False
         if state.frozen and action in {AaveAction.SUPPLY, AaveAction.BORROW}:
@@ -45,16 +53,28 @@ class Aave101Model:
 
     @staticmethod
     def has_borrowing_power(position: AavePositionState) -> bool:
-        return bool(position.collateral_enabled and position.health_factor is not None and position.health_factor > 0)
+        return bool(
+            position.collateral_enabled
+            and position.health_factor is not None
+            and position.health_factor > 0
+        )
 
     @staticmethod
     def is_liquidatable(position: AavePositionState) -> bool:
-        return bool(position.health_factor is not None and position.health_factor < Decimal("1"))
+        return bool(
+            position.health_factor is not None
+            and position.health_factor < Decimal("1")
+        )
 
     @staticmethod
     def context(action: AaveAction) -> str:
         if action == AaveAction.FLASH_LOAN:
             return "atomic_liquidity"
-        if action in {AaveAction.SUPPLY, AaveAction.BORROW, AaveAction.WITHDRAW, AaveAction.REPAY}:
+        if action in {
+            AaveAction.SUPPLY,
+            AaveAction.BORROW,
+            AaveAction.WITHDRAW,
+            AaveAction.REPAY,
+        }:
             return "collateralized_lending"
         return "unknown"
