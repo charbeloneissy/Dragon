@@ -164,6 +164,12 @@ def parse_human_amount(value: str) -> Decimal:
     return amount
 
 
+def canonical_human_amount(value: str) -> str:
+    amount = parse_human_amount(value)
+    text = format(amount, "f").rstrip("0").rstrip(".")
+    return text or "0"
+
+
 def _validate_chain_coverage(result: Any, requested_chains: set[int] | None = None) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {"chainsCovered": [], "chainsNotCovered": [], "chainsNotServed": [], "needs_retry": False}
@@ -815,10 +821,10 @@ async def prepare_supply(
         "sender": sender,
         "reserve": reserve,
         "chainId": int(chain_id),
-        "amount": {"erc20": {"value": str(amount)}},
+        "amount": {"erc20": {"value": canonical_human_amount(str(amount))}},
     }
     human_amount = parse_human_amount(str(amount))
-    request["amount"] = {"erc20": {"value": str(human_amount)}}
+    request["amount"] = {"erc20": {"value": canonical_human_amount(str(amount))}}
     if enable_collateral:
         request["enableCollateral"] = True
 
@@ -879,7 +885,7 @@ async def prepare_withdraw(
             raise AaveMCPError(
                 f"withdraw amount {requested} exceeds live withdrawable amount {withdrawable}"
             )
-        value: dict[str, Any] = {"exact": str(requested)}
+        value: dict[str, Any] = {"exact": canonical_human_amount(str(amount))}
     else:
         value = {"max": True}
 
