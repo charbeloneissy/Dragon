@@ -31,6 +31,7 @@ from src.dragon.aave_stable_vault import load_validated_stable_vaults
 from src.dragon.aave_flash import env_flash_loan_config, validate_config as validate_flash_loan_config
 from src.dragon.aave_umbrella import AaveUmbrellaClient, choose_umbrella_candidates
 from src.dragon.aerodrome_opportunity import AerodromeOpportunityEngine, snapshot_from_dict
+from src.dragon.economic_agent import EconomicDecisionAgent
 
 STATE = {
     "status": "starting", "mode": "paper", "chains": [], "chain_details": {},
@@ -64,6 +65,7 @@ STATE = {
     "data_source": "multi-chain multi-scanner executable quotes + triangular/cross-DEX + Aave MCP read-only market data",
     "triangular_enabled": False, "triangular_opportunities": 0,
     "execution_capacity": 8, "gas_sponsor_enabled": False, "gas_sponsor_required": False,
+    "economic_agent": {"enabled": True, "last_update": None, "ranked_orders": [], "chain_memory": {}},
 }
 LOCK = Lock()
 METRICS = ExecutionTelemetry()
@@ -886,6 +888,7 @@ async def main():
         triangular_enabled = env_bool("TRIANGULAR_ARBITRAGE_ENABLED", True)
         capacity = ExecutionCapacity(initial=int(os.getenv("DEX_MAX_EXECUTION_CONCURRENCY", "8")), maximum=max(1, int(os.getenv("DEX_MAX_EXECUTION_CONCURRENCY", "64"))))
         sponsor_manager = GasSponsorManager(min_net_profit=min_profit)
+        economic_agent = EconomicDecisionAgent(history_size=int(os.getenv("ECONOMIC_AGENT_HISTORY_SIZE", "256")), min_profit=min_profit)
 
         stable_vaults = []
         stable_vault_error = None
@@ -1036,6 +1039,7 @@ async def main():
                     *(_probe_chain(cid) for cid in evm_chains),
                     return_exceptions=True,
                 )
+                probe_scores: dict[int, Decimal] = {}
                 ranked = []
                 for result in probe_results:
                     if isinstance(result, Exception):
@@ -1043,6 +1047,7 @@ async def main():
                         logging.warning("chain probe failed: %s: %s", type(result).__name__, result)
                         continue
                     cid, score, stats = result
+                    probe_scores[int(cid)] = score
                     if score.is_finite():
                         ranked.append((score, cid, stats))
                     else:
@@ -1053,7 +1058,9 @@ async def main():
                 # never remove a healthy configured chain from the scan. This was
                 # the bug that made a large watchlist appear to have only one
                 # working chain.
-                selected = list(evm_chains)
+                selected = economic_agent.prioritize_chains(evm_chains, probe_scores)
+                if not selected:
+                    selected = list(evm_chains)
                 logging.info(
                     "full multi-chain scan selected=%s configured=%s",
                     len(selected), len(evm_chains),
@@ -1110,8 +1117,20 @@ async def main():
                     for k, v in rej.items():
                         rejections[k] = rejections.get(k, 0) + int(v)
                 merge_rejections(rejections)
-                all_found.sort(key=lambda pair: pair[0].net_profit_quote, reverse=True)
+                opp_chain_labels = {id(opp): chain_label for opp, chain_label in all_found}
+                economic_orders = economic_agent.rank([opp for opp, _ in all_found])
+                if economic_orders:
+                    all_found = [(order.opportunity, opp_chain_labels.get(id(order.opportunity), get_spec(order.chain_id).name)) for order in economic_orders]
+                else:
+                    all_found.sort(key=lambda pair: pair[0].net_profit_quote, reverse=True)
                 top = all_found[:max(1, int(os.getenv("DEX_MAX_OPPORTUNITIES", "8")))]
+                with LOCK:
+                    STATE["economic_agent"] = {
+                        "enabled": True,
+                        "last_update": time.time(),
+                        "ranked_orders": [{"chain_id": order.chain_id, "net_profit_quote": str(order.net_profit_quote), "expected_net_profit_quote": str(order.expected_net_profit_quote), "execution_probability": str(order.execution_probability), "freshness_factor": str(order.freshness_factor), "latency_factor": str(order.latency_factor), "capital_efficiency": str(order.capital_efficiency), "economic_priority": str(order.economic_priority), "reason": order.reason} for order in economic_orders[:max(1, int(os.getenv("DEX_MAX_OPPORTUNITIES", "8")))]],
+                        "chain_memory": economic_agent.snapshot(),
+                    }
                 rows = []
                 for index, (opp, chain_label) in enumerate(top):
                     if hasattr(opp, "route"):
