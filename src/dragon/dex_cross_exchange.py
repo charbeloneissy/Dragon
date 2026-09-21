@@ -43,7 +43,7 @@ class DexCrossExchangeEngine:
 
     def __init__(self, adapter, sources: Iterable[str], min_profit: Decimal = Decimal("0.0025"), quote_token_decimals: int = 6, max_quote_latency_ms: Decimal = Decimal(os.getenv("DEX_MAX_QUOTE_LATENCY_MS", "500")), safety_buffer_quote: Decimal = Decimal("0"), flash_loan_enabled: bool = False, flash_loan_fee_bps: Decimal = Decimal("0"), native_to_quote_rate: Decimal = Decimal("0"), min_net_bps: Decimal = Decimal("15"), telemetry=None):
         if quote_token_decimals < 0 or quote_token_decimals > 36: raise ValueError("quote_token_decimals must be between 0 and 36")
-        if Decimal(min_profit) < Decimal("0.0025"): raise ValueError("min_profit cannot be below 0.0025")
+        if Decimal(min_profit) < Decimal("0.005"): raise ValueError("min_profit cannot be below 0.005")
         if Decimal(max_quote_latency_ms) <= 0: raise ValueError("max_quote_latency_ms must be positive")
         if Decimal(safety_buffer_quote) < 0: raise ValueError("safety_buffer_quote cannot be negative")
         if Decimal(flash_loan_fee_bps) < 0 or Decimal(flash_loan_fee_bps) > 1000: raise ValueError("flash_loan_fee_bps must be between 0 and 1000")
@@ -54,7 +54,7 @@ class DexCrossExchangeEngine:
         self.sources = tuple(dict.fromkeys(s.strip() for s in sources if s.strip()))
         self.min_profit = Decimal(min_profit)
         self.quote_token_decimals = quote_token_decimals
-        self.max_quote_latency_ms = Decimal(max_quote_latency_ms)
+        self.max_quote_latency_ms = min(Decimal(max_quote_latency_ms), Decimal(os.getenv("DEX_HARD_QUOTE_DEADLINE_MS", "500")))
         self.safety_buffer_quote = Decimal(safety_buffer_quote)
         self.flash_loan_enabled = bool(flash_loan_enabled)
         self.flash_loan_fee_bps = Decimal(flash_loan_fee_bps)
@@ -196,7 +196,7 @@ class DexCrossExchangeEngine:
             return Decimal("Infinity")
         return (gas_native / Decimal(10) ** 18) * native_to_quote_rate
 
-    def _candidate_amounts(self, ceiling: int) -> list[int]:
+    def _candidate_amounts(self, ceiling: int, floor: int = 1) -> list[int]:
         """Build a dynamic size grid from available capital/liquidity.
 
         The grid is deliberately independent of a fixed dollar size. It samples
@@ -205,16 +205,15 @@ class DexCrossExchangeEngine:
         small balances to larger executable liquidity without pretending that
         a single size is optimal for every route.
         """
-        if ceiling <= 0: return []
-        configured = int(os.getenv("DEX_MAX_QUOTE_CANDIDATES", "4"))
+        floor = max(1, int(floor))
+        if ceiling < floor or ceiling <= 0: return []
+        configured = int(os.getenv("DEX_MAX_QUOTE_CANDIDATES", "8"))
         max_candidates = max(4, min(32, configured))
         if max_candidates == 1: return [ceiling]
         # Always include both a small probe and the full flash-liquidity ceiling;
         # the old fixed prefix stopped at 60% when candidates were reduced to 8.
-        fractions = [
-            Decimal("0.05"), Decimal("0.10"), Decimal("0.20"), Decimal("0.30"),
-            Decimal("0.40"), Decimal("0.50"), Decimal("0.75"), Decimal("1.00"),
-        ]
+        span = ceiling - floor
+        fractions = [Decimal("0"), Decimal("0.05"), Decimal("0.15"), Decimal("0.30"), Decimal("0.50"), Decimal("0.70"), Decimal("0.85"), Decimal("1.00")]
         # Keep the grid representative when the candidate budget is small:
         # always probe both low size and full available size instead of truncating
         # the fraction list at 30%, which can miss the most profitable size.
@@ -228,20 +227,21 @@ class DexCrossExchangeEngine:
                     selected.append(fractions[len(selected)])
         else:
             selected = fractions[:]
-        amounts = [max(1, int(Decimal(ceiling) * f)) for f in selected]
+        amounts = [floor + int(Decimal(span) * f) for f in selected]
         if max_candidates > len(fractions):
             for i in range(len(fractions) + 1, max_candidates + 1):
                 amounts.append(max(1, (ceiling * i) // max_candidates))
         return sorted(set(amounts))
 
-    def _refinement_amounts(self, best_amount: int, ceiling: int, candidates: list[int]) -> list[int]:
+    def _refinement_amounts(self, best_amount: int, ceiling: int, candidates: list[int], floor: int = 1) -> list[int]:
         """Generate a local refinement grid around the best coarse size."""
         if best_amount <= 0 or ceiling <= 0:
             return []
         radius = Decimal(os.getenv("DEX_OPTIMIZER_RADIUS", "0.25"))
         steps = max(2, min(8, int(os.getenv("DEX_OPTIMIZER_STEPS", "4"))))
         radius = max(Decimal("0.05"), min(Decimal("0.75"), radius))
-        lo = max(1, int(Decimal(best_amount) * (Decimal("1") - radius)))
+        floor = max(1, int(floor))
+        lo = max(floor, int(Decimal(best_amount) * (Decimal("1") - radius)))
         hi = min(ceiling, int(Decimal(best_amount) * (Decimal("1") + radius)))
         if hi <= lo:
             return []
@@ -336,15 +336,24 @@ class DexCrossExchangeEngine:
 
     def scan_max_profitable(self, *, chain_id: int, quote_token: str, base_token: str, max_quote_amount: Decimal, taker: str, slippage_bps: int = 50, compound_amount: int = 0) -> list[DexOpportunity]:
         if max_quote_amount <= 0: raise ValueError("max_quote_amount must be positive")
-        scale = Decimal(10) ** self.quote_token_decimals; ceiling = int(max_quote_amount * scale)
-        if ceiling <= 0: return []
+        scale = Decimal(10) ** self.quote_token_decimals
+        configured_min = Decimal(os.getenv("DEX_MIN_FLASH_LOAN_QUOTE", "100"))
+        configured_max = Decimal(os.getenv("DEX_MAX_FLASH_LOAN_QUOTE", "3000"))
+        if not configured_min.is_finite() or configured_min <= 0:
+            raise ValueError("DEX_MIN_FLASH_LOAN_QUOTE must be positive")
+        if not configured_max.is_finite() or configured_max < configured_min:
+            raise ValueError("DEX_MAX_FLASH_LOAN_QUOTE must be >= DEX_MIN_FLASH_LOAN_QUOTE")
+        effective_max = min(Decimal(max_quote_amount), configured_max)
+        ceiling = int(effective_max * scale)
+        floor = int(configured_min * scale)
+        if ceiling < floor or ceiling <= 0: return []
         compound_amount = int(compound_amount)
         if compound_amount != 0:
             raise ValueError("Dragon is configured for no compounding; compound_amount must be zero")
         self.last_rejections = {}; profitable: list[DexOpportunity] = []
         # Size the flash-loan portion independently, then add retained profits to
         # every candidate. Aave liquidity remains the hard ceiling for the loan.
-        loan_candidates = self._candidate_amounts(ceiling - compound_amount)
+        loan_candidates = self._candidate_amounts(ceiling - compound_amount, floor=floor)
         candidates = [candidate + compound_amount for candidate in loan_candidates]
 
         # Candidate sizes are independent. Evaluate them concurrently so the scan
@@ -370,7 +379,7 @@ class DexCrossExchangeEngine:
         if profitable:
             best = max(profitable, key=lambda x: (x.net_profit_quote, x.quote_amount))
             refined = [
-                amount for amount in self._refinement_amounts(best.quote_amount, ceiling, candidates)
+                amount for amount in self._refinement_amounts(best.quote_amount, ceiling, candidates, floor=floor)
                 if amount > compound_amount
             ]
             if refined:
@@ -395,7 +404,7 @@ class DexCrossExchangeEngine:
         best = max(profitable, key=lambda x: (x.net_profit_quote, x.net_profit_quote / Decimal(x.quote_amount)))
         # Compute the multiplier only after route selection and executable-size
         # optimization. 1x equals the minimum 5% sizing probe.
-        minimum_probe = max(Decimal("1"), Decimal(max_quote_amount) * Decimal("0.05"))
+        minimum_probe = configured_min
         selected_human = Decimal(best.quote_amount) / (Decimal(10) ** self.quote_token_decimals)
         multiplier = selected_human / minimum_probe
         best = replace(best, flash_multiplier=multiplier)
@@ -436,7 +445,8 @@ class DexCrossExchangeEngine:
                 try:
                     source, (quote, execution) = future.result()
                 except Exception as exc:
-                    logging.warning("DEX buy quote failed source=%s sell=%s buy=%s amount=%s error=%s: %s", source, quote_token, base_token, quote_amount, type(exc).__name__, exc)
+                    category = "INFRA_FAILURE" if any(x in str(exc).lower() for x in ("deadline", "rate limit", "rate-limit", "endpoint", "timeout", "rpc")) else "QUOTE_FAILURE"
+                    logging.warning("DEX buy quote failed category=%s source=%s sell=%s buy=%s amount=%s error=%s: %s", category, source, quote_token, base_token, quote_amount, type(exc).__name__, exc)
                     self._reject("buy_quote_error"); continue
                 quote_latency = self._quote_latency(quote)
                 if quote_latency > self.max_quote_latency_ms:
@@ -590,7 +600,7 @@ class DexCrossExchangeEngine:
                 "DEX ROUND_TRIP buy=%s sell=%s token=%s start_quote_raw=%s leg1_base_raw=%s leg2_quote_raw=%s return=%.8f gross=%s gross_bps=%.3f cost=%s cost_bps=%.3f gas=%s flash_fee=%s mev=%s safety=%s net=%s net_bps=%.3f",
                 buy_source, source, base_token, quote_amount, buy_execution.buy_amount,
                 final_amount, round_trip_return, gross, gross_bps, cost_quote, cost_bps,
-                gas_cost_quote, flash_loan_fee_quote, self.safety_buffer_quote,
+                gas_cost_quote, flash_loan_fee_quote, mev_reserve_quote, self.safety_buffer_quote,
                 net, net_bps,
             )
             if not net.is_finite():
