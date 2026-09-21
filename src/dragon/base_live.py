@@ -13,7 +13,7 @@ from web3 import Web3
 
 
 BASE_CHAIN_ID = 8453
-BASE_RPC_DEFAULT = "https://mainnet.base.org"
+BASE_RPC_DEFAULT = "https://base-rpc.publicnode.com"
 AAVE_V3_BASE_POOL = Web3.to_checksum_address("0xA238Dd80C259a72e81d7e4664a9801593F98d1c5")
 AAVE_V3_BASE_PROVIDER = Web3.to_checksum_address("0xe20fCBdBfFC4Dd138cE8b2E6FBb6CB49777ad64D")
 
@@ -40,7 +40,7 @@ POOL_ABI = [
 
 class BaseLiveReader:
     def __init__(self, rpc_url: str | None = None, timeout: float = 8.0):
-        self.rpc_url = rpc_url or os.getenv("BASE_RPC_URL", BASE_RPC_DEFAULT)
+        self.rpc_url = rpc_url or os.getenv("BASE_RPC_URL") or os.getenv("DEX_RPC_URL") or BASE_RPC_DEFAULT
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url, request_kwargs={"timeout": timeout}))
         self.pool = self.w3.eth.contract(address=AAVE_V3_BASE_POOL, abi=POOL_ABI)
 
