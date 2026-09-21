@@ -190,3 +190,40 @@ def test_vault_set_fee_request_normalizes_transaction_request():
         "value": "0",
         "chainId": 1,
     }
+
+
+def test_v4_supply_eligibility_and_user_suppliable():
+    payload = {
+        "data": {
+            "reserves": [
+                {
+                    "version": "v4",
+                    "market": {"address": "0x1", "chainId": 1},
+                    "underlyingToken": {"symbol": "USDC", "name": "USD Coin", "address": "0x2"},
+                    "reserveId": "good",
+                    "supplyApy": "7.5",
+                    "canSupply": True,
+                    "canUseAsCollateral": True,
+                    "status": {"frozen": False, "paused": False},
+                    "userState": {"suppliable": {"amount": {"value": "1000"}}},
+                },
+                {
+                    "version": "v4",
+                    "market": {"address": "0x3", "chainId": 1},
+                    "underlyingToken": {"symbol": "USDC", "name": "USD Coin", "address": "0x4"},
+                    "reserveId": "blocked",
+                    "supplyApy": "20.0",
+                    "canSupply": False,
+                    "canUseAsCollateral": True,
+                    "status": {"frozen": False, "paused": False},
+                    "userState": {"suppliable": {"amount": {"value": "1000"}}},
+                },
+            ]
+        }
+    }
+    rows = parse_markets(payload)
+    assert rows[0].can_supply is True
+    assert rows[0].can_use_as_collateral is True
+    assert rows[0].suppliable == Decimal("1000")
+    ranked = rank_stablecoin_supply(rows)
+    assert [r.reserve_id for r in ranked] == ["good"]
