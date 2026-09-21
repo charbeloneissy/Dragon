@@ -53,7 +53,7 @@ V3_ROUTER_ABI = [
 # Aerodrome/Velodrome-style router: V2 shapes plus a per-hop stable flag.
 STABLE_ROUTER_ABI = [
     {"inputs": [{"internalType": "uint256", "name": "amountIn", "type": "uint256"}, {"components": [{"internalType": "address", "name": "from", "type": "address"}, {"internalType": "address", "name": "to", "type": "address"}, {"internalType": "bool", "name": "stable", "type": "bool"}, {"internalType": "address", "name": "factory", "type": "address"}], "internalType": "struct IRouter.Route[]", "name": "routes", "type": "tuple[]"}], "name": "getAmountsOut", "outputs": [{"internalType": "uint256[]", "name": "amounts", "type": "uint256[]"}], "stateMutability": "view", "type": "function"},
-    {"inputs": [{"internalType": "uint256", "name": "amountIn", "type": "uint256"}, {"internalType": "uint256", "name": "amountOutMin", "type": "uint256"}, {"components": [{"internalType": "address", "name": "from", "type": "address"}, {"internalType": "address", "name": "to", "type": "address"}, {"internalType": "bool", "name": "stable", "type": "bool"}, {"internalType": "address", "name": "factory", "type": "address"}], "internalType": "struct IRouter.Route[]", "name": "routes", "type": "tuple[]"}], "name": "swapExactTokensForTokens", "outputs": [{"internalType": "uint256[]", "name": "amounts", "type": "uint256[]"}], "stateMutability": "nonpayable", "type": "function"},
+    {"inputs": [{"internalType": "uint256", "name": "amountIn", "type": "uint256"}, {"internalType": "uint256", "name": "amountOutMin", "type": "uint256"}, {"components": [{"internalType": "address", "name": "from", "type": "address"}, {"internalType": "address", "name": "to", "type": "address"}, {"internalType": "bool", "name": "stable", "type": "bool"}, {"internalType": "address", "name": "factory", "type": "address"}], "internalType": "struct IRouter.Route[]", "name": "routes", "type": "tuple[]"}, {"internalType": "address", "name": "to", "type": "address"}, {"internalType": "uint256", "name": "deadline", "type": "uint256"}], "name": "swapExactTokensForTokens", "outputs": [{"internalType": "uint256[]", "name": "amounts", "type": "uint256[]"}], "stateMutability": "nonpayable", "type": "function"},
     {"inputs": [], "name": "defaultFactory", "outputs": [{"internalType": "address", "name": "", "type": "address"}], "stateMutability": "view", "type": "function"},
 ]
 
@@ -684,7 +684,7 @@ class EvmDexAdapter(_EvmDexCore):
             return router.encode_abi("exactInput", args=[(encoded, self._addr(taker), amount_in, min_out)])
         if venue.kind == "stable":
             router = self._contract(chain_id, venue.router, STABLE_ROUTER_ABI)
-            return router.encode_abi("swapExactTokensForTokens", args=[amount_in, min_out, list(path)])
+            return router.encode_abi("swapExactTokensForTokens", args=[amount_in, min_out, list(path), self._addr(taker), tx_deadline])
         raise ValueError(f"calldata not supported for venue kind {venue.kind}")
 
 def _stable_flag_combinations(hops: int):
