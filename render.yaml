@@ -5,8 +5,7 @@ services:
     region: frankfurt
     plan: free
     branch: main
-    buildCommand: pip install --no-cache-dir -r requirements.txt
-    # The scanner is the process; it serves its own health and dashboard port.
+    buildCommand: python -m pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
     startCommand: python dex_cross_exchange_runner.py
     autoDeploy: true
     healthCheckPath: /health
@@ -17,17 +16,12 @@ services:
         value: 10000
       - key: LOG_LEVEL
         value: INFO
-      # Chains scanned every loop. Add more ids to fan out across venues.
       - key: DEX_CHAINS
         value: "1,56,43114,8453,42161,10,137,130,324,7777777,480,42220,59144,534352,81457,5000"
       - key: NONEVM_CHAINS
         value: "solana"
       - key: JUPITER_QUOTE_URL
         value: "https://api.jup.ag/swap/v1/quote"
-      # Leave RPCs blank to use the built-in public endpoints. A private RPC
-      # (Alchemy/Infura/QuickNode) is strongly recommended for production.
-      # Set ALCHEMY_API_KEY / INFURA_API_KEY / QUICKNODE_* on the service to
-      # route every chain through the authenticated endpoint automatically.
       - key: ALCHEMY_API_KEY
         sync: false
       - key: INFURA_API_KEY
@@ -56,12 +50,8 @@ services:
         value: "50"
       - key: DEX_POLL_SECONDS
         value: "4.0"
-      # Free Render keep-awake target: an external monitor should GET /health
-      # at least every 5 minutes. This setting documents the expected cadence;
-      # it does not generate outbound pings from Dragon itself.
       - key: FREE_RENDER_HEALTH_PING_MINUTES
         value: "5"
-      # Amplitude runtime telemetry. The API key must be added securely in Render.
       - key: AMPLITUDE_ENABLED
         value: "true"
       - key: AMPLITUDE_API_KEY
