@@ -101,6 +101,16 @@ window.amplitude.add(window.sessionReplay.plugin({ sampleRate: 1 }));
     window.setTimeout(function () { sendToAmplitude(attempt + 1); }, RETRY_DELAY_MS);
   }
 
+  function logExperimentsAndVariations() {
+    if (!window.amplitude || typeof window.amplitude.track !== "function") return false;
+
+    window.amplitude.track("TL_Experiments", {
+      "Experiment 1": "Variation 1",
+      "Experiment 2": "baseline"
+    });
+    return true;
+  }
+
   // Expose a small test hook without requiring Optimizely in production.
   window.dragonOptimizelyAmplitude = {
     send: function () { return sendData(); },
