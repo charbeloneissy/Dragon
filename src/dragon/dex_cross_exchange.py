@@ -78,6 +78,34 @@ class DexCrossExchangeEngine:
             self._quote_adapters = {source: adapter for source in self.sources}
         self._isolated_quote_adapters = isolate and all(self._quote_adapters.get(source) is not adapter for source in self.sources)
         self.last_rejections: dict[str, int] = {}
+        # Adaptive quote deadline: start at the hard ceiling, then tighten/expand
+        # from observed live quote latency without ever exceeding that ceiling.
+        self._latency_ewma_ms: float | None = None
+        self._latency_samples = 0
+
+    def _observe_quote_latency(self, quote: DexQuote) -> None:
+        latency = self._quote_latency(quote)
+        if not latency.is_finite() or latency < 0:
+            return
+        value = float(latency)
+        alpha = min(0.5, max(0.05, float(os.getenv("DEX_LATENCY_EWMA_ALPHA", "0.25"))))
+        previous = self._latency_ewma_ms
+        self._latency_ewma_ms = value if previous is None else (alpha * value + (1.0 - alpha) * previous)
+        self._latency_samples += 1
+
+    def _dynamic_quote_deadline_ms(self) -> Decimal:
+        """Choose a live quote deadline from observed latency."""
+        hard_max = min(Decimal(self.max_quote_latency_ms), Decimal(os.getenv("DEX_HARD_QUOTE_DEADLINE_MS", "500")))
+        floor = Decimal(os.getenv("DEX_MIN_DYNAMIC_QUOTE_DEADLINE_MS", "100"))
+        multiplier = Decimal(os.getenv("DEX_DYNAMIC_DEADLINE_MULTIPLIER", "2.0"))
+        headroom = Decimal(os.getenv("DEX_DYNAMIC_DEADLINE_HEADROOM_MS", "50"))
+        if floor <= 0 or multiplier <= 0 or headroom < 0:
+            raise ValueError("dynamic quote deadline parameters are invalid")
+        floor = min(floor, hard_max)
+        if self._latency_ewma_ms is None or self._latency_samples < 3:
+            return hard_max
+        target = Decimal(str(self._latency_ewma_ms)) * multiplier + headroom
+        return min(hard_max, max(floor, target))
 
     def _metric(self, name: str, amount: int = 1) -> None:
         if self.telemetry is not None:
@@ -436,10 +464,18 @@ class DexCrossExchangeEngine:
 
         # All venue quotes are independent. Run them concurrently with a bounded worker pool
         # so adding venues improves coverage without creating unbounded threads.
+        quote_deadline_ms = self._dynamic_quote_deadline_ms()
+        logging.debug("DEX adaptive quote deadline_ms=%s ewma_ms=%s samples=%s", quote_deadline_ms, self._latency_ewma_ms, self._latency_samples)
+        def _buy_dynamic(source):
+            return source, quote_adapters.get(source, self.adapter).quote_single_source(
+                chain_id=chain_id, sell_token=quote_token, buy_token=base_token,
+                sell_amount=quote_amount, taker=taker, source=source, slippage_bps=slippage_bps,
+                deadline=time.perf_counter() + float(quote_deadline_ms) / 1000.0,
+            )
         max_quote_workers = max(1, min(len(self.sources), int(os.getenv("DEX_QUOTE_CONCURRENCY", "1"))))
         pool = ThreadPoolExecutor(max_workers=max_quote_workers)
-        futures = {pool.submit(_buy, source): source for source in self.sources}
-        done, pending = wait(futures, timeout=float(self.max_quote_latency_ms) / 1000)
+        futures = {pool.submit(_buy_dynamic, source): source for source in self.sources}
+        done, pending = wait(futures, timeout=float(quote_deadline_ms) / 1000)
         for future in done:
                 source = futures[future]
                 try:
@@ -464,6 +500,7 @@ class DexCrossExchangeEngine:
                 if execution.buy_amount <= 0:
                     self._reject("buy_zero_output"); continue
                 buy_quotes[source] = (quote, execution)
+                self._observe_quote_latency(quote)
                 self._metric("quote_observations")
 
         if pending:
@@ -483,13 +520,14 @@ class DexCrossExchangeEngine:
                     continue
                 sell_jobs.append((buy_source, buy_quote, buy_execution, source, bought_amount))
 
+        sell_deadline_ms = self._dynamic_quote_deadline_ms()
         def _sell(job):
             buy_source, buy_quote, buy_execution, source, bought_amount = job
             sell_adapter = quote_adapters.get(source, self.adapter)
             return buy_source, buy_quote, buy_execution, source, sell_adapter.quote_single_source(
                 chain_id=chain_id, sell_token=base_token, buy_token=quote_token,
                 sell_amount=bought_amount, taker=taker, source=source, slippage_bps=slippage_bps,
-                deadline=time.perf_counter() + float(self.max_quote_latency_ms) / 1000.0,
+                deadline=time.perf_counter() + float(sell_deadline_ms) / 1000.0,
             )
 
         def _process_sell(job, result):
@@ -655,7 +693,9 @@ class DexCrossExchangeEngine:
             for future in done:
                 job = futures[future]
                 try:
-                    _process_sell(job, future.result())
+                    sell_result = future.result()
+                    self._observe_quote_latency(sell_result[5][0])
+                    _process_sell(job, sell_result)
                 except Exception as exc:
                     source = job[3]
                     logging.warning(
@@ -665,7 +705,7 @@ class DexCrossExchangeEngine:
                     self._reject("sell_quote_error")
             if pending:
                 self._reject("sell_quote_timeout")
-                logging.info("DEX sell quote deadline expired pending=%s limit_ms=%s", len(pending), self.max_quote_latency_ms)
+                logging.info("DEX sell quote deadline expired pending=%s limit_ms=%s", len(pending), sell_deadline_ms)
             pool.shutdown(wait=False, cancel_futures=True)
 
         if not buy_quotes: self._reject("no_buy_sources")
