@@ -800,7 +800,8 @@ async def scan_evm_chain(adapter, chain_id, *, max_quote, taker, slippage, min_p
     spec = get_spec(chain_id)
     quote_token, quote_decimals = _quote_token_for(chain_id)
     base_tokens = _base_tokens_for(chain_id)
-    venue_names = [v.name for v in venues_for(chain_id)]
+    configured_venues = [x.strip() for x in os.getenv("DRAGON_BASE_VENUES", "").split(",") if x.strip()]
+    venue_names = [v.name for v in venues_for(chain_id) if not configured_venues or v.name in configured_venues]
     if len(venue_names) < 2:
         return [], {}
     flash_enabled = env_bool("FLASH_LOAN_ENABLED", False)
