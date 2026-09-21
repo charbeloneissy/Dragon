@@ -8,6 +8,8 @@ import httpx
 
 
 AAVE_V4_GRAPHQL_URL = "https://api.v4.aave.com/graphql"
+AAVE_V3_GRAPHQL_URL = "https://api.v3.aave.com/graphql"
+AAVE_HORIZON_POOL_ADDRESS = "0xAe05Cd22df81871bc7cC2a04BeCfb516bFe332C8"
 AAVE_V4_ARC_CHAIN_ID = 5042
 
 
@@ -275,8 +277,10 @@ class AaveGraphQLClient:
         self,
         url: str | None = None,
         timeout: float | None = None,
+        v3_url: str | None = None,
     ) -> None:
         self.url = (url or os.getenv("AAVE_V4_GRAPHQL_URL", AAVE_V4_GRAPHQL_URL)).rstrip("/")
+        self.v3_url = (v3_url or os.getenv("AAVE_V3_GRAPHQL_URL", AAVE_V3_GRAPHQL_URL)).rstrip("/")
         configured_timeout = float(
             timeout if timeout is not None else os.getenv("AAVE_V4_GRAPHQL_TIMEOUT_SECONDS", "8")
         )
@@ -285,6 +289,21 @@ class AaveGraphQLClient:
 
     async def query(
         self,
+        query: str,
+        variables: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._query_url(self.url, query, variables)
+
+    async def query_v3(
+        self,
+        query: str,
+        variables: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return await self._query_url(self.v3_url, query, variables)
+
+    async def _query_url(
+        self,
+        url: str,
         query: str,
         variables: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -319,11 +338,11 @@ class AaveGraphQLClient:
         raise AaveGraphQLError(f"AaveKit GraphQL request failed: {last_error}") from last_error
 
     async def horizon_market(self) -> dict[str, Any] | None:
-        data = await self.query(
+        data = await self.query_v3(
             self.HORIZON_MARKET_QUERY,
             {
                 "request": {
-                    "address": "0xAe05Cd22df81871bc7cC2a04BeCfb516bFe332C8",
+                    "address": AAVE_HORIZON_POOL_ADDRESS,
                     "chainId": 1,
                 }
             },
