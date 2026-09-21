@@ -11,6 +11,9 @@ from threading import Lock, Thread
 
 from src.dragon.chains import get_spec, rpc_urls_for
 from src.dragon.dex_cross_exchange import DexCrossExchangeEngine
+from src.dragon.triangular import TriangularEngine
+from src.dragon.gas_sponsor import GasSponsorManager
+from src.dragon.execution_datacenter import ExecutionCapacity
 from src.dragon.dex_evm import RpcRateLimitError
 from src.dragon.dex_multichain import MultiChainDexAdapter
 from src.dragon.observability import ExecutionTelemetry
@@ -58,7 +61,9 @@ STATE = {
     "aave_agent": {"workflow": AAVE_AGENT_WORKFLOW, "sources": AAVE_AGENT_SOURCES, "policy": "discover-inspect-simulate-build-wallet-sign-confirm"},
     "aerodrome": {"enabled": True, "mode": "read_only", "deployment_allowed": False, "opportunities": [], "last_update": None, "error": None},
     "aave_address_book": aave_address_snapshot(),
-    "data_source": "multi-chain cross-DEX executable quotes (EVM + non-EVM) + Aave MCP read-only market data",
+    "data_source": "multi-chain multi-scanner executable quotes + triangular/cross-DEX + Aave MCP read-only market data",
+    "triangular_enabled": False, "triangular_opportunities": 0,
+    "execution_capacity": 8, "gas_sponsor_enabled": False, "gas_sponsor_required": False,
 }
 LOCK = Lock()
 METRICS = ExecutionTelemetry()
@@ -440,6 +445,45 @@ def _base_tokens_for(chain_id: int) -> list[str]:
     return list(PAPER_BASE_TOKENS.get(chain_id, ()))
 
 
+def _triangular_tokens_for(chain_id: int) -> tuple[str, str, str] | None:
+    """Return an operator-verified three-token cycle for a chain."""
+    raw = os.getenv("DEX_TRIANGULAR_TOKENS", "").strip()
+    if not raw: return None
+    for entry in raw.split(","):
+        parts = [p.strip() for p in entry.split(":")]
+        if len(parts) != 4 or parts[0] != str(chain_id): continue
+        try:
+            tokens = tuple(validate_evm_address(f"triangular token {i}", p) for i, p in enumerate(parts[1:], 1))
+        except ValueError: continue
+        if len(set(t.lower() for t in tokens)) != 3: continue
+        return tokens
+    return None
+
+async def scan_triangular_chain(adapter, chain_id, *, max_quote, min_profit):
+    if not env_bool("TRIANGULAR_ARBITRAGE_ENABLED", True): return [], {}
+    cycle = _triangular_tokens_for(chain_id)
+    if cycle is None: return [], {"triangular_cycle_not_configured": 1}
+    venue_names = [v.name for v in venues_for(chain_id)]
+    if not venue_names: return [], {"triangular_no_venues": 1}
+    engine = TriangularEngine(adapter, min_profit=min_profit, quote_decimals=int(_quote_token_for(chain_id)[1]),
+                              flash_fee_bps=env_decimal("FLASH_LOAN_FEE_BPS", "0"),
+                              max_workers=int(os.getenv("DEX_MAX_LEG_WORKERS", "24")))
+    routes = engine.discover_routes(chain_id, venue_names, cycle)
+    found = await to_thread(engine.optimize, routes, max_quote)
+    return found, {}
+
+def triangular_view(opportunity, identifier, chain_label, quote_decimals):
+    return {"id": identifier, "strategy": "triangular", "chain": chain_label,
+            "venues": list(opportunity.route.venues),
+            "tokens": [opportunity.route.token_a, opportunity.route.token_b, opportunity.route.token_c],
+            "quote_amount": str(opportunity.quote_amount),
+            "quote_amount_human": str(human_quote_amount(opportunity.quote_amount, quote_decimals)),
+            "final_amount": str(opportunity.final_amount),
+            "gross_profit_quote": str(opportunity.gross_profit_quote),
+            "net_profit_quote": str(opportunity.net_profit_quote),
+            "gas_cost_quote": str(opportunity.gas_cost_quote),
+            "flash_loan_fee_quote": str(opportunity.flash_loan_fee_quote),
+            "status": "ready_for_fresh_simulation"}
 def merge_rejections(stats):
     with LOCK:
         for key, value in stats.items():
@@ -838,7 +882,10 @@ async def main():
         if flash_cap_quote <= 0:
             raise ValueError("DEX_FLASH_LOAN_LIQUIDITY_QUOTE must be positive")
         taker = os.getenv("DEX_TAKER_ADDRESS", "").strip() or "0x000000000000000000000000000000000000dEaD"
-        poll = float(os.getenv("DEX_POLL_SECONDS", "2.0"))
+        poll = float(os.getenv("DEX_POLL_SECONDS", "0.5"))
+        triangular_enabled = env_bool("TRIANGULAR_ARBITRAGE_ENABLED", True)
+        capacity = ExecutionCapacity(initial=int(os.getenv("DEX_MAX_EXECUTION_CONCURRENCY", "8")), maximum=max(1, int(os.getenv("DEX_MAX_EXECUTION_CONCURRENCY", "64"))))
+        sponsor_manager = GasSponsorManager(min_net_profit=min_profit)
 
         stable_vaults = []
         stable_vault_error = None
@@ -898,6 +945,10 @@ async def main():
         with LOCK:
             STATE.update({
                 "status": "running",
+                "triangular_enabled": triangular_enabled,
+                "gas_sponsor_enabled": env_bool("GAS_SPONSOR_ENABLED", True),
+                "gas_sponsor_required": env_bool("GAS_SPONSOR_REQUIRED", False),
+                "execution_capacity": capacity.current,
                 "mode": "live" if env_bool("LIVE_TRADING", False) else "paper",
                 "chains": list(chain_details.keys()),
                 "chain_details": chain_details,
@@ -1031,6 +1082,29 @@ async def main():
                         all_found.append((opp, get_spec(cid).name))
                     for k, v in rej.items():
                         rejections[k] = rejections.get(k, 0) + int(v)
+                triangular_results = []
+                if triangular_enabled:
+                    triangular_results = await asyncio.gather(
+                        *(scan_triangular_chain(adapter, cid,
+                          max_quote=quote_units(flash_cap_quote, _quote_token_for(cid)[1]),
+                          min_profit=min_profit) for cid in selected),
+                        return_exceptions=True,
+                    )
+                tri_count = 0
+                for result in triangular_results:
+                    if isinstance(result, Exception):
+                        rejections["triangular_scan_error"] = rejections.get("triangular_scan_error", 0) + 1
+                        logging.warning("triangular scan failed: %s: %s", type(result).__name__, result)
+                        continue
+                    found, rej = result
+                    tri_count += len(found)
+                    for opp in found:
+                        all_found.append((opp, get_spec(opp.route.chain_id).name))
+                    for k, v in rej.items():
+                        rejections[k] = rejections.get(k, 0) + int(v)
+                with LOCK:
+                    STATE["triangular_opportunities"] = tri_count
+                    STATE["execution_capacity"] = capacity.current
                 for family in nonevm_chains:
                     _, rej = await scan_nonevm_chain(adapter, family, slippage=slippage)
                     for k, v in rej.items():
@@ -1040,21 +1114,33 @@ async def main():
                 top = all_found[:max(1, int(os.getenv("DEX_MAX_OPPORTUNITIES", "8")))]
                 rows = []
                 for index, (opp, chain_label) in enumerate(top):
-                    identifier = opportunity_hash(
-                        chain_id=opp.chain_id,
-                        buy_source=opp.buy_source,
-                        sell_source=opp.sell_source,
-                        base_token=opp.base_token,
-                        quote_token=opp.quote_token,
-                        quote_amount=opp.quote_amount,
-                        quote_version="v1",
-                    )
+                    if hasattr(opp, "route"):
+                        identifier = opportunity_hash(
+                            chain_id=opp.route.chain_id,
+                            buy_source=opp.route.venues[0],
+                            sell_source=opp.route.venues[-1],
+                            base_token=opp.route.token_b,
+                            quote_token=opp.route.token_a,
+                            quote_amount=opp.quote_amount,
+                            quote_version="tri-v1",
+                        )
+                    else:
+                        identifier = opportunity_hash(
+                            chain_id=opp.chain_id,
+                            buy_source=opp.buy_source,
+                            sell_source=opp.sell_source,
+                            base_token=opp.base_token,
+                            quote_token=opp.quote_token,
+                            quote_amount=opp.quote_amount,
+                            quote_version="v1",
+                        )
                     try:
                         METRICS.record_opportunity(opp)
                     except Exception:
                         logging.debug("telemetry record_opportunity failed", exc_info=True)
-                    quote_decimals = int(next((d["quote_decimals"] for d in chain_details.values() if d.get("chain_id") == opp.chain_id), 6))
-                    row = opportunity_view(opp, identifier, chain_label, quote_decimals)
+                    opp_chain_id = opp.route.chain_id if hasattr(opp, "route") else opp.chain_id
+                    quote_decimals = int(next((d["quote_decimals"] for d in chain_details.values() if d.get("chain_id") == opp_chain_id), 6))
+                    row = triangular_view(opp, identifier, chain_label, quote_decimals) if hasattr(opp, "route") else opportunity_view(opp, identifier, chain_label, quote_decimals)
                     row["hash_algorithm"] = "SHA-256"
                     rows.append(row)
                 opportunities = top
