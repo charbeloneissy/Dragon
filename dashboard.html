@@ -16,6 +16,96 @@ window.amplitude.init("ff01e1ea98c4ada7f1273581870ab80e", {
   fetchRemoteConfig: true
 });
 window.amplitude.add(window.sessionReplay.plugin({ sampleRate: 1 }));
+
+// Optimizely -> Amplitude Browser SDK 2.x integration.
+// Safe no-op unless the dashboard is running inside an Optimizely extension
+// context that provides window.optimizely, campaignId, and extension settings.
+(function initOptimizelyAmplitudeIntegration() {
+  var dataSent = false;
+  var MAX_ATTEMPTS = 9;
+  var RETRY_DELAY_MS = 1000;
+  var fallbackConfig = {
+    property_prefix: "[Optimizely Experiment]",
+    send_event: "n",
+    event_name: "User in Experiment"
+  };
+
+  function configValue(name) {
+    try {
+      if (window.extension && window.extension[name] !== undefined) {
+        return window.extension[name];
+      }
+    } catch (_) {}
+    return fallbackConfig[name];
+  }
+
+  function getCampaignId() {
+    try {
+      if (typeof campaignId !== "undefined" && campaignId !== null) return campaignId;
+    } catch (_) {}
+    try {
+      if (window.campaignId !== undefined && window.campaignId !== null) return window.campaignId;
+    } catch (_) {}
+    return null;
+  }
+
+  function getCampaignInfo() {
+    var id = getCampaignId();
+    if (!id || !window.optimizely || typeof window.optimizely.get !== "function") return null;
+    try {
+      var state = window.optimizely.get("state");
+      if (!state || typeof state.getDecisionObject !== "function") return null;
+      return state.getDecisionObject({ campaignId: id });
+    } catch (error) {
+      if (window.console && console.debug) console.debug("Optimizely decision lookup unavailable", error);
+      return null;
+    }
+  }
+
+  function sendData() {
+    if (dataSent || !window.amplitude || typeof window.amplitude.identify !== "function") return false;
+    if (typeof window.amplitude.Identify !== "function") return false;
+
+    var campaignInfo = getCampaignInfo();
+    if (!campaignInfo || !campaignInfo.experiment || !campaignInfo.variation) return false;
+
+    var prefix = String(configValue("property_prefix") || fallbackConfig.property_prefix);
+    var identify = new window.amplitude.Identify().set(
+      prefix + " " + campaignInfo.experiment,
+      campaignInfo.variation
+    );
+    window.amplitude.identify(identify);
+
+    if (String(configValue("send_event")) === "y" && typeof window.amplitude.track === "function") {
+      var eventName = String(configValue("event_name") || fallbackConfig.event_name);
+      window.amplitude.track(eventName, {
+        "[Optimizely Campaign]": campaignInfo.campaign,
+        "[Optimizely Experiment]": campaignInfo.experiment,
+        "[Optimizely Variation]": campaignInfo.variation,
+        "[Optimizely Holdback]": campaignInfo.holdback
+      });
+    }
+
+    dataSent = true;
+    return true;
+  }
+
+  function sendToAmplitude(attempt) {
+    if (dataSent || attempt >= MAX_ATTEMPTS) return;
+    if (window.amplitude && typeof window.amplitude.track === "function" && typeof window.amplitude.identify === "function") {
+      if (sendData()) return;
+    }
+    window.setTimeout(function () { sendToAmplitude(attempt + 1); }, RETRY_DELAY_MS);
+  }
+
+  // Expose a small test hook without requiring Optimizely in production.
+  window.dragonOptimizelyAmplitude = {
+    send: function () { return sendData(); },
+    reset: function () { dataSent = false; }
+  };
+
+  sendToAmplitude(0);
+})();
 </script>
 </head>
 <body>
