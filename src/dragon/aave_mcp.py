@@ -664,45 +664,55 @@ class AaveMCPClient:
 
 
 def _candidate_market_dicts(payload: Any) -> list[dict[str, Any]]:
-    """Extract canonical Aave Reserve objects from MCP output across current and legacy MCP shapes.
+    """Extract Aave reserve/market rows across current and legacy MCP shapes.
 
-    Aave MCP returns reserves with identity nested under:
-      reserve.market.{address,chainId}
-      reserve.underlyingToken.{symbol,address,name}
-    The fallback recursive walk remains for compatible historical payloads.
+    Token identity may appear as underlyingToken or token, and market metadata
+    may be carried by a parent object. Do not require one nesting shape.
     """
     payload = _unwrap_result(payload)
     candidates: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+
     for item in _walk_dicts(payload):
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or id(item) in seen_ids:
             continue
-        market = item.get("market")
+
         token = item.get("underlyingToken")
-        if isinstance(market, dict) and isinstance(token, dict):
-            symbol = token.get("symbol")
-            if symbol and (
-                "reserveId" in item
-                or "summary" in item
-                or "isFrozen" in item
-                or "isPaused" in item
-                or "supplyApy" in item
-            ):
-                candidates.append(item)
-    if candidates:
-        return candidates
+        if not isinstance(token, dict):
+            token = item.get("token")
+        symbol = token.get("symbol") if isinstance(token, dict) else item.get("symbol")
 
-    # Compatibility fallback for older/alternate MCP shapes.
-    for item in _walk_dicts(payload):
-        symbol = _deep_get(item, "symbol")
-        if symbol is None:
-            token = _deep_get(item, "token")
-            symbol = _deep_get(token, "symbol") if isinstance(token, dict) else None
-        supply = _deep_get(item, "supplyApy", "supplyAPY", "supplyRate")
-        reserve = _deep_get(item, "reserveId", "reserve_id")
-        if symbol is not None and (supply is not None or reserve is not None):
+        reserve_like = any(key in item for key in (
+            "reserveId", "reserve_id", "reserve", "summary", "settings",
+            "status", "canSupply", "canBorrow", "supplyApy", "supplyAPY",
+            "supplyRate", "availableLiquidity", "liquidity", "isFrozen",
+            "isPaused", "suppliable",
+        ))
+        market_like = isinstance(item.get("market"), dict) or any(
+            key in item for key in ("marketAddress", "market_address", "chainId", "chain_id")
+        )
+
+        if symbol and (reserve_like or market_like):
             candidates.append(item)
-    return candidates
+            seen_ids.add(id(item))
 
+    if not candidates:
+        for item in _walk_dicts(payload):
+            if not isinstance(item, dict):
+                continue
+            symbol = _deep_get(item, "symbol")
+            if symbol is None:
+                token = _deep_get(item, "token", "underlyingToken")
+                symbol = _deep_get(token, "symbol") if isinstance(token, dict) else None
+            if symbol is None:
+                continue
+            if any(_deep_get(item, key) is not None for key in (
+                "reserveId", "reserve_id", "supplyApy", "supplyAPY",
+                "supplyRate", "availableLiquidity", "liquidity",
+            )):
+                candidates.append(item)
+
+    return candidates
 
 def parse_markets(payload: Any, stablecoins: tuple[str, ...] = DEFAULT_STABLECOINS) -> list[AaveMarketSnapshot]:
     allowed = {s.upper() for s in stablecoins}
