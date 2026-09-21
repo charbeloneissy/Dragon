@@ -69,3 +69,51 @@ def test_load_from_env(monkeypatch):
     configs = load_stable_vaults_from_env()
     assert len(configs) == 1
     assert configs[0].name == "demo"
+
+
+def test_build_deposit_and_withdraw_transactions():
+    from src.dragon.aave_stable_vault import (
+        build_deposit_tx,
+        build_execute_withdrawal_tx,
+        build_request_withdrawal_tx,
+    )
+
+    vault = "0x1234567890abcdef1234567890abcdef12345678"
+    user = "0x1111111111111111111111111111111111111111"
+    usdc = "0x2222222222222222222222222222222222222222"
+
+    deposit = build_deposit_tx(
+        chain_id=8453,
+        vault=vault,
+        user=user,
+        asset=usdc,
+        amount=1000000,
+        policy_data="0x",
+    )
+    request = build_request_withdrawal_tx(
+        chain_id=8453,
+        vault=vault,
+        user=user,
+        requested_amount_ray=10**27,
+        policy_data="0x",
+    )
+    execute = build_execute_withdrawal_tx(
+        chain_id=8453,
+        vault=vault,
+        user=user,
+        asset_out=usdc,
+        min_amount_out=990000,
+        iou_amount_ray=10**27,
+        policy_data="0x",
+    )
+
+    for tx in (deposit, request, execute):
+        assert tx["to"] == vault
+        assert tx["value"] == "0"
+        assert tx["chainId"] == 8453
+        assert tx["data"].startswith("0x")
+        assert len(tx["data"]) > 10
+
+    assert deposit["data"].startswith("0x")
+    assert request["data"].startswith("0x")
+    assert execute["data"].startswith("0x")
