@@ -42,6 +42,18 @@ services:
         value: "10"
       - key: SOLANA_TX_ACCOUNT_INCLUDE
         value: ""
+      - key: JUPITER_API_KEY
+        sync: false
+      - key: JUPITER_QUOTE_ALLOW_UNKEYED
+        value: "false"
+      - key: SOLANA_QUOTE_PAIRS
+        value: ""
+      - key: SOLANA_QUOTE_AMOUNTS
+        value: "1000000"
+      - key: SOLANA_QUOTE_SLIPPAGE_BPS
+        value: "50"
+      - key: SOLANA_QUOTE_POLL_SECONDS
+        value: "0.5"
       - key: JUPITER_QUOTE_URL
         value: "https://api.jup.ag/swap/v1/quote"
       - key: ALCHEMY_API_KEY
