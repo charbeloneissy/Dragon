@@ -246,10 +246,6 @@ class _EvmDexCore:
         self.gas_limit = max(100_000, int(os.getenv("DEX_GAS_LIMIT", "300000")))
         self.flash_loan_pool = os.getenv("DEX_AAVE_POOL_ADDRESS", "").strip()
 
-    def _flash_loan_pool_address(self, chain_id: int) -> str:
-        """Resolve the configured Aave V3 Pool per chain, with a global fallback."""
-        return os.getenv(f"DEX_AAVE_POOL_{int(chain_id)}", "").strip() or self.flash_loan_pool
-
         wanted = chain_ids if chain_ids is not None else env_chain_ids()
         for cid in wanted:
             spec = get_spec(cid)
@@ -273,6 +269,11 @@ class _EvmDexCore:
             )
         if not self._pools:
             raise RpcRateLimitError("no EVM chain could be initialized; check DEX_CHAINS and RPC env vars")
+
+    def _flash_loan_pool_address(self, chain_id: int) -> str:
+        """Resolve the configured Aave V3 Pool per chain, with a global fallback."""
+        return os.getenv(f"DEX_AAVE_POOL_{int(chain_id)}", "").strip() or self.flash_loan_pool
+
 
     # --- helpers -----------------------------------------------------------
 
