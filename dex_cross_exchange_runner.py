@@ -20,6 +20,7 @@ from src.dragon.universe import universe_payload
 from src.dragon.venues import venues_for
 from src.dragon.hash_utils import opportunity_hash
 from src.dragon.aave_mcp import AaveMCPClient, DEFAULT_STABLECOINS, fetch_best_stablecoin_yields
+from src.dragon.aave_stable_vault import load_validated_stable_vaults
 from src.dragon.aave_flash import env_flash_loan_config, validate_config as validate_flash_loan_config
 
 STATE = {
@@ -34,6 +35,7 @@ STATE = {
     "rpc_providers": {}, "rpc_hosts": {},
     "aave_mcp_enabled": False, "aave_mcp_last_update": None,
     "aave_mcp_error": None, "aave_stable_yields": [], "aave_stable_markets": 0,
+    "aave_stable_vaults_enabled": False, "aave_stable_vaults": [], "aave_stable_vault_error": None,
     "data_source": "multi-chain cross-DEX executable quotes (EVM + non-EVM) + Aave MCP read-only market data",
 }
 LOCK = Lock()
@@ -71,6 +73,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
             return
+        if path == "/api/aave/stable-vaults":
+            body = json.dumps({
+                "enabled": payload.get("aave_stable_vaults_enabled", False),
+                "error": payload.get("aave_stable_vault_error"),
+                "vaults": payload.get("aave_stable_vaults", []),
+            }, default=str).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if path == "/api/aave/yields":
             body = json.dumps({
                 "enabled": payload.get("aave_mcp_enabled", False),
@@ -431,6 +447,16 @@ async def main():
         taker = os.getenv("DEX_TAKER_ADDRESS", "").strip() or "0x000000000000000000000000000000000000dEaD"
         poll = float(os.getenv("DEX_POLL_SECONDS", "2.0"))
 
+        stable_vaults = []
+        stable_vault_error = None
+        if env_bool("AAVE_STABLE_VAULTS_ENABLED", False):
+            try:
+                stable_vaults = load_validated_stable_vaults()
+                logging.info("Aave Stable Vault configuration loaded vaults=%s", len(stable_vaults))
+            except Exception as exc:
+                stable_vault_error = f"{type(exc).__name__}: {exc}"
+                logging.error("Aave Stable Vault configuration invalid: %s", stable_vault_error)
+
         chain_details = {}
         valid_evm_chains = []
         quote_validation_errors = {}
@@ -495,6 +521,9 @@ async def main():
                     get_spec(cid).name: [rpc_host(u) for u in rpc_urls_for(cid)]
                     for cid in evm_chains
                 },
+                "aave_stable_vaults_enabled": env_bool("AAVE_STABLE_VAULTS_ENABLED", False),
+                "aave_stable_vaults": stable_vaults,
+                "aave_stable_vault_error": stable_vault_error,
             })
         if not any(provider_status(load_providers()).values()):
             logging.warning(
