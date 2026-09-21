@@ -50,6 +50,8 @@ services:
         value: "10000"
       - key: DEX_MIN_NET_PROFIT
         value: "0.005"
+      - key: DEX_MIN_NET_BPS
+        value: "0"
       - key: DEX_SAFETY_BUFFER
         value: "0"
       - key: DEX_GAS_ESTIMATE_MULTIPLIER
