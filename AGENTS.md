@@ -1,32 +1,40 @@
 # Dragon Aave Agent Guide
 
-Dragon uses Aave's official agent pattern:
+Dragon follows Aave's official MCP lifecycle:
 1. Discover live markets and supported chains.
-2. Inspect the exact reserve / position / liquidity state.
+2. Inspect the exact reserve, wallet position, risk parameters, and capacity.
 3. Simulate the exact action.
 4. Build an unsigned execution plan.
-5. Hand the transaction to the external wallet for signing.
-6. Confirm the post-transaction state from chain data.
+5. Wallet-sign externally.
+6. Confirm resulting protocol state before dependent actions.
 
 ## Hard rules
 
-- Never infer a deployment-specific reserve ID, market selector, Hub, Spoke, or price source from memory.
-- Never treat an empty result as proof of zero unless the response says the requested chain was covered.
-- `error` warnings stop the workflow. `warning` must be surfaced. `info` is contextual.
-- Supply / borrow / withdraw / repay flows require simulation before build.
-- A frozen reserve is not universally blocked: withdrawal and repayment may remain valid; supply/borrow rules differ.
-- V4 Health Factor is position-specific. Do not average health factors across positions or chains.
-- A prepared transaction is unsigned. Dragon never stores the user's wallet key and never signs on the user's behalf.
-- Confirm a transaction using resulting protocol state, not only the transaction hash.
+- Never infer a deployment-specific reserve ID, market selector, Hub, Spoke, or price source from memory. Use the selectors returned by get_markets for the current session.
+- A market read without coverage metadata is not evidence about an uncovered chain. Treat chainsNotCovered and chainsNotServed explicitly.
+- Never treat an empty result as proof of zero unless the requested chain is covered.
+- Aave amount inputs are human/main units, not wei/base units. Rates with a Pct suffix are percentages.
+- error warnings stop the workflow. warning must be surfaced. info is contextual.
+- Supply, borrow, withdraw, and repay flows require simulation before build. Never build a borrow or withdraw without the corresponding preview.
+- A frozen or paused reserve is not universally blocked: action eligibility is operation-specific.
+- V4 health factor is position-specific. Never average health factors across positions or chains.
+- A supply is not collateral unless collateral is explicitly enabled.
+- Prepared transactions are unsigned. Dragon never stores a user's wallet key and never signs on the user's behalf.
+- Confirm a submitted transaction from resulting protocol state; a transaction hash alone is not protocol confirmation.
+- For yield analysis, skip frozen, paused, and cap-reached reserves and verify capacity against the intended size. Report read coverage and whether the result is a sample or the full covered population.
+- sGHO is savings, not a lending collateral position; do not treat its rate as utilization-driven lending APY.
+- V3 account-history reads are market/chain scoped; do not present one V3 market's history as a wallet's complete history.
 
 ## Dragon-specific execution rule
 
-Aave intelligence and safety refreshes run off the 500 ms DEX quote path. They can constrain an execution candidate only when the relevant chain, protocol deployment, token, liquidity state, and oracle state are current and known.
+Aave intelligence and safety refreshes remain off the 500 ms DEX quote path. They may constrain an execution candidate only when the relevant chain, protocol deployment, token, liquidity state, and oracle state are current and known.
 
-Official references:
-- https://aave.com/agents
-- https://mcp.aave.com
-- https://aave.com/docs/mcp/safety
-- https://github.com/aave/skills
-- https://github.com/aave-dao/aave-address-book
-- https://github.com/aave/aave-v4
+## Official source snapshot
+
+- Aave MCP docs: https://aave.com/docs/mcp
+- Aave agent docs: https://aave.com/agents
+- Aave MCP endpoint: https://mcp.aave.com
+- Aave skills: https://github.com/aave/skills
+- Skills snapshot: b21a0345f47f5fb8337d6769f927b7b56ff3943a
+- Address Book: https://github.com/aave-dao/aave-address-book
+- Aave V4: https://github.com/aave/aave-v4
