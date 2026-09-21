@@ -12,3 +12,13 @@ def test_unknown_chain_is_rejected():
         assert "unsupported Aave V3 market chain" in str(exc)
     else:
         raise AssertionError("unknown Aave chain should be rejected")
+
+
+def test_market_discovery_requires_rpc():
+    from dragon.aave_markets import AaveMarketDiscovery
+    try:
+        AaveMarketDiscovery({}).discover_markets([1, 8453])
+    except RuntimeError as exc:
+        assert "missing RPC URL for Aave chain 1" in str(exc)
+    else:
+        raise AssertionError("expected missing RPC validation")
