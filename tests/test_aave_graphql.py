@@ -1,0 +1,60 @@
+import asyncio
+
+from src.dragon.aave_graphql import (
+    AAVE_V4_ARC_CHAIN_ID,
+    AaveGraphQLClient,
+)
+
+
+def test_arc_chain_detection(monkeypatch):
+    client = AaveGraphQLClient()
+
+    async def fake_chains():
+        return [
+            {"name": "Ethereum", "chainId": 1},
+            {"name": "Arc", "chainId": AAVE_V4_ARC_CHAIN_ID},
+        ]
+
+    client.chains = fake_chains
+    row = asyncio.run(client.arc_chain())
+    assert row["name"] == "Arc"
+    assert row["chainId"] == 5042
+
+
+def test_processed_transaction_result(monkeypatch):
+    client = AaveGraphQLClient()
+
+    async def fake_query(query, variables=None):
+        assert "hasProcessedKnownTransaction" in query
+        assert variables["operations"] == ["SUPPLY"]
+        assert variables["txHash"].startswith("0x")
+        return {"value": True}
+
+    client.query = fake_query
+    result = asyncio.run(
+        client.has_processed_known_transaction(
+            operations=["SUPPLY"],
+            tx_hash="0x" + "11" * 32,
+        )
+    )
+    assert result is True
+
+
+def test_transaction_query_is_raw_and_unsigned():
+    client = AaveGraphQLClient()
+
+    async def fake_query(query, variables=None):
+        return {
+            "vaultSetFee": {
+                "to": "0x1234567890abcdef1234567890abcdef12345678",
+                "from": "0x1111111111111111111111111111111111111111",
+                "data": "0x1234",
+                "value": "0",
+                "chainId": 5042,
+            }
+        }
+
+    client.query = fake_query
+    result = asyncio.run(client.transaction_query("mutation Foo { foo }"))
+    assert result["vaultSetFee"]["chainId"] == 5042
+    assert result["vaultSetFee"]["data"] == "0x1234"
