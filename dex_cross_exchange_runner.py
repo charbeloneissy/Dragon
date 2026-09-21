@@ -901,7 +901,7 @@ async def main():
         economic_agent = EconomicDecisionAgent(history_size=int(os.getenv("ECONOMIC_AGENT_HISTORY_SIZE", "256")), min_profit=min_profit)
         dragon_core = DragonCore(min_profit=min_profit)
         proof_engine = BaseProofEngine(min_profit=min_profit)
-    atomic_simulator = BaseAtomicSimulator(min_profit=min_profit)
+        atomic_simulator = BaseAtomicSimulator(min_profit=min_profit)
         five_circle = FiveCircleEngine(
             min_profit=min_profit,
             gas_stress_bps=env_decimal("DRAGON_CHALLENGE_GAS_BPS", "2000"),
