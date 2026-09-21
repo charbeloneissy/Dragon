@@ -35,6 +35,7 @@ from src.dragon.economic_agent import EconomicDecisionAgent
 from src.dragon.dragon_core import DragonCore, ChainState, EconomicCandidate
 from src.dragon.base_live import BaseLiveReader
 from src.dragon.five_circle_engine import FiveCircleEngine
+from src.dragon.base_proof_engine import BaseProofEngine
 
 STATE = {
     "status": "starting", "mode": "paper", "chains": [], "chain_details": {},
@@ -898,6 +899,7 @@ async def main():
         sponsor_manager = GasSponsorManager(min_net_profit=min_profit)
         economic_agent = EconomicDecisionAgent(history_size=int(os.getenv("ECONOMIC_AGENT_HISTORY_SIZE", "256")), min_profit=min_profit)
         dragon_core = DragonCore(min_profit=min_profit)
+        proof_engine = BaseProofEngine(min_profit=min_profit)
         five_circle = FiveCircleEngine(
             min_profit=min_profit,
             gas_stress_bps=env_decimal("DRAGON_CHALLENGE_GAS_BPS", "2000"),
@@ -1156,12 +1158,26 @@ async def main():
                 # remains paper-only until an exact simulator result is supplied.
                 base_block = int(STATE.get("base_live", {}).get("block_number", 0))
                 base_candidates = [opp for opp, _label in all_found if getattr(opp, "chain_id", None) == 8453]
+                proof_passed = False
+                proof_candidate = max(base_candidates, key=lambda x: Decimal(str(getattr(x, "net_profit_quote", "-Infinity"))), default=None)
+                if proof_candidate is not None:
+                    try:
+                        proof = await to_thread(
+                            proof_engine.prove,
+                            adapter=adapter,
+                            opportunity=proof_candidate,
+                            taker=taker,
+                            slippage_bps=slippage,
+                        )
+                        proof_passed = bool(proof.passed)
+                    except Exception:
+                        logging.exception("Base proof gate failed")
                 circle_result = five_circle.run(
                     base_candidates,
                     rotation=rotation,
                     chain_id=8453,
                     block_number=base_block,
-                    simulation_passed=False,
+                    simulation_passed=proof_passed,
                 )
                 with LOCK:
                     STATE["five_circle"] = {
