@@ -15,6 +15,7 @@ from src.dragon.dex_evm import RpcRateLimitError
 from src.dragon.dex_multichain import MultiChainDexAdapter
 from src.dragon.observability import ExecutionTelemetry
 from src.dragon.rpc_providers import load_providers, provider_status
+from src.dragon.admin_server import start_admin_server
 from src.dragon.universe import universe_payload
 from src.dragon.venues import venues_for
 
@@ -341,6 +342,13 @@ async def scan_nonevm_chain(adapter, chain, *, slippage):
 async def main():
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
     start_health_server()
+    admin_server = None
+    admin_state = {"enabled": False}
+    try:
+        admin_server, admin_state = start_admin_server()
+    except Exception as exc:
+        # Diagnostics must never prevent the trading scanner from starting.
+        logging.exception("Dragon gRPC admin interface failed to start: %s", exc)
     adapter = None
     try:
         logging.info("Dragon multi-chain scanner boot")
@@ -575,6 +583,11 @@ async def main():
                 adapter.close()
             except Exception:
                 logging.exception("failed to close DEX adapter")
+        if admin_server is not None:
+            try:
+                admin_server.stop(0)
+            except Exception:
+                logging.exception("failed to stop Dragon gRPC admin interface")
 
 
 if __name__ == "__main__":
