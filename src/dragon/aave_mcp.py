@@ -663,6 +663,75 @@ async def prepare_supply(
         "signer": sender,
     }
 
+async def prepare_withdraw(
+    client: AaveMCPClient,
+    *,
+    sender: str,
+    reserve: str,
+    amount: str | None = None,
+    maximum: bool = False,
+    withdrawable: str | None = None,
+    reserve_paused: bool | None = None,
+) -> dict[str, Any]:
+    """Preview and prepare an unsigned Aave V4 withdraw action.
+
+    Uses Aave's exact request shape:
+      amount.erc20.value.exact for a fixed withdrawal, or
+      amount.erc20.value.max for a full withdrawal.
+
+    A caller can pass live position data (withdrawable + paused) to enforce
+    local preflight checks before calling the official MCP preview.
+    """
+    if maximum and amount is not None:
+        raise ValueError("amount and maximum=True are mutually exclusive")
+    if not maximum and amount is None:
+        raise ValueError("amount is required unless maximum=True")
+    if reserve_paused is True:
+        raise AaveMCPError("cannot withdraw while the Aave reserve is paused")
+
+    if amount is not None:
+        requested = Decimal(str(amount))
+        if not requested.is_finite() or requested <= 0:
+            raise ValueError("withdraw amount must be positive and finite")
+        if withdrawable is not None and requested > Decimal(str(withdrawable)):
+            raise AaveMCPError(
+                f"withdraw amount {requested} exceeds live withdrawable amount {withdrawable}"
+            )
+        value: dict[str, Any] = {"exact": str(requested)}
+    else:
+        value = {"max": True}
+
+    request = {
+        "sender": sender,
+        "reserve": reserve,
+        "amount": {"erc20": {"value": value}},
+    }
+
+    preview = await client.preview_action(action={"withdraw": request})
+    if not isinstance(preview, dict):
+        raise AaveMCPError("Aave withdraw preview returned an unexpected response")
+
+    warnings = preview.get("warnings") or []
+    if any(
+        isinstance(w, dict) and str(w.get("level", "")).lower() == "error"
+        for w in warnings
+    ):
+        raise AaveMCPError("Aave withdraw preview returned an error warning")
+
+    simulated = dict(preview)
+    simulated["_dragon_simulation_ok"] = True
+    execution = await client.prepare_action(
+        simulation=simulated,
+        action={"withdraw": request},
+    )
+    return {
+        "simulation": preview,
+        "execution": execution,
+        "unsigned": True,
+        "signer": sender,
+    }
+
+
 async def fetch_stablecoin_yields(client: AaveMCPClient | None = None, stablecoins: tuple[str, ...] = DEFAULT_STABLECOINS) -> list[AaveMarketSnapshot]:
     client = client or AaveMCPClient()
     payload = await client.get_markets(version="all", symbols=list(stablecoins))
