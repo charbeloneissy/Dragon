@@ -19,6 +19,7 @@ from src.dragon.admin_server import start_admin_server
 from src.dragon.universe import universe_payload
 from src.dragon.venues import venues_for
 from src.dragon.hash_utils import opportunity_hash
+from src.dragon.aave_mcp import AaveMCPClient, DEFAULT_STABLECOINS, fetch_best_stablecoin_yields
 from src.dragon.aave_flash import env_flash_loan_config, validate_config as validate_flash_loan_config
 
 STATE = {
@@ -31,7 +32,9 @@ STATE = {
     "compound_reserve_quote": "0", "last_tx_hash": None, "rejections": {},
     "base_tokens": {}, "universe_mode": {}, "universe": [], "opportunity_records": [],
     "rpc_providers": {}, "rpc_hosts": {},
-    "data_source": "multi-chain cross-DEX executable quotes (EVM + non-EVM)",
+    "aave_mcp_enabled": False, "aave_mcp_last_update": None,
+    "aave_mcp_error": None, "aave_stable_yields": [], "aave_stable_markets": 0,
+    "data_source": "multi-chain cross-DEX executable quotes (EVM + non-EVM) + Aave MCP read-only market data",
 }
 LOCK = Lock()
 METRICS = ExecutionTelemetry()
@@ -67,6 +70,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            return
+        if path == "/api/aave/yields":
+            body = json.dumps({
+                "enabled": payload.get("aave_mcp_enabled", False),
+                "last_update": payload.get("aave_mcp_last_update"),
+                "error": payload.get("aave_mcp_error"),
+                "markets": payload.get("aave_stable_markets", 0),
+                "yields": payload.get("aave_stable_yields", []),
+            }, default=str).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if path in ("/", "/health", "/healthz", "/api/status"):
             body = json.dumps(payload, default=str).encode()
@@ -251,6 +269,43 @@ def merge_rejections(stats):
     with LOCK:
         for key, value in stats.items():
             STATE["rejections"][key] = int(value)
+
+async def refresh_aave_mcp():
+    """Refresh Aave V3/V4 stablecoin market data without blocking DEX scans."""
+    enabled = env_bool("AAVE_MCP_ENABLED", True)
+    stablecoins = tuple(
+        x.strip().upper()
+        for x in os.getenv("AAVE_MCP_STABLECOINS", ",".join(DEFAULT_STABLECOINS)).split(",")
+        if x.strip()
+    ) or DEFAULT_STABLECOINS
+    interval = max(30.0, float(os.getenv("AAVE_MCP_REFRESH_SECONDS", "60")))
+    client = AaveMCPClient()
+
+    with LOCK:
+        STATE["aave_mcp_enabled"] = enabled
+    if not enabled:
+        return
+
+    while True:
+        try:
+            rows = await fetch_best_stablecoin_yields(
+                client=client,
+                stablecoins=stablecoins,
+                limit=max(1, min(50, int(os.getenv("AAVE_MCP_TOP_N", "12")))),
+            )
+            with LOCK:
+                STATE["aave_stable_yields"] = rows
+                STATE["aave_stable_markets"] = len(rows)
+                STATE["aave_mcp_last_update"] = time.time()
+                STATE["aave_mcp_error"] = None
+            logging.info("Aave MCP refreshed stablecoin markets=%s", len(rows))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            with LOCK:
+                STATE["aave_mcp_error"] = f"{type(exc).__name__}: {exc}"
+            logging.warning("Aave MCP refresh failed: %s: %s", type(exc).__name__, exc)
+        await asyncio.sleep(interval)
 
 
 def opportunity_view(opportunity, identifier, chain_label, quote_decimals):
@@ -449,6 +504,8 @@ async def main():
         total_venues = sum(len(d["venues"]) for d in chain_details.values())
         logging.info("Dragon multi-chain ready chains=%s venues=%s min_profit=%s", list(chain_details.keys()), total_venues, min_profit)
 
+        aave_task = asyncio.create_task(refresh_aave_mcp())
+
         while True:
             try:
                 all_found = []
@@ -590,6 +647,12 @@ async def main():
                 with LOCK:
                     STATE["status"] = "running"
     finally:
+        if "aave_task" in locals():
+            aave_task.cancel()
+            try:
+                await aave_task
+            except asyncio.CancelledError:
+                pass
         if adapter is not None:
             try:
                 adapter.close()
