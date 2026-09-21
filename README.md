@@ -102,9 +102,27 @@ Copy `.env.example` to `.env`. Key settings:
 | `DEX_FLASH_LOAN_LIQUIDITY_QUOTE` | `1000` | Flash-loan principal cap (quote units) |
 | `DEX_POLL_SECONDS` | `2.0` | Seconds between full scans |
 | `FLASH_LOAN_ENABLED` | `false` | Compute flash-loan fees into net profit |
+| `AERODROME_POOLS_JSON` | empty | Optional live/externally refreshed Aerodrome pool snapshots for read-only capital ranking |
+| `AERODROME_MIN_TVL_USD` | `1000` | Minimum Aerodrome TVL considered by the allocator |
+| `AERODROME_ARB_INTERACTION_WEIGHT` | `0.20` | Weight of Dragon arbitrage interaction in pool score |
+| `AERODROME_LP_RETURN_WEIGHT` | `0.55` | Weight of net LP economics in pool score |
+| `AERODROME_VOTE_RETURN_WEIGHT` | `0.25` | Weight of voting/incentive economics in pool score |
 
 Without a custom RPC the public endpoints work but are rate-limited; a private
 RPC per chain is strongly recommended for production throughput.
+
+### Aerodrome capital allocator
+
+Dragon now includes a **read-only Aerodrome Opportunity Engine**. It evaluates
+pool TVL, trading fees, AERO rewards, voting incentives, estimated impermanent
+loss, gas and Dragon arbitrage interaction. It produces a capital score but
+**cannot deposit, stake, vote or move funds**.
+
+The optional `AERODROME_POOLS_JSON` input is an array of pool snapshots using
+the fields in `src/dragon/aerodrome_opportunity.py`. This keeps the hot
+arbitrage quote path independent from slower Aerodrome economics. The intended
+next data source is a live Aerodrome pool/gauge adapter; until that is wired,
+no capital-allocation action is automatic.
 
 ## Run and test
 
