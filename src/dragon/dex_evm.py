@@ -237,6 +237,8 @@ class _EvmDexCore:
         self._venues: dict[int, dict[str, Venue]] = {}
         self._contracts: dict[tuple[int, str], object] = {}
         self._quote_cache: dict[tuple, tuple[float, tuple]] = {}
+        self._pair_capability_cache: dict[tuple[int, str, str, str], float] = {}
+        self._pair_capability_ttl = max(2.0, float(os.getenv("DEX_PAIR_CAPABILITY_TTL_SECONDS", "15")))
         self._native_rate_cache: dict[tuple, tuple[float, Decimal]] = {}
         self._gas_cache: dict[int, tuple[float, int]] = {}
         self._quote_cache_ttl = max(0.0, float(os.getenv("DEX_QUOTE_CACHE_SECONDS", "0.25")))
@@ -552,22 +554,38 @@ class EvmDexAdapter(_EvmDexCore):
             raise ValueError(f"unsupported venue {source} on chain {chain_id}")
         if int(sell_amount) <= 0:
             raise ValueError("sell_amount must be positive")
+
+        capability_key = (int(chain_id), source, sell_token.lower(), buy_token.lower())
+        capability_until = self._pair_capability_cache.get(capability_key, 0.0)
+        if capability_until > time.monotonic():
+            raise RuntimeError(f"no {source} liquidity for pair (cached capability miss)")
+        if capability_until:
+            self._pair_capability_cache.pop(capability_key, None)
+
         if deadline is None:
             deadline = started + float(os.getenv("DEX_MAX_QUOTE_LATENCY_MS", "2500")) / 1000.0
 
-        if venue.kind == "v2":
-            out, path = self._v2_quote(chain_id, venue, sell_token, buy_token, int(sell_amount), deadline=deadline)
-            fee_pair = ()
-        elif venue.kind == "v3":
-            out, path, fee_pair = self._v3_quote(chain_id, venue, sell_token, buy_token, int(sell_amount), deadline=deadline)
-        elif venue.kind == "stable":
-            out, path, _factory = self._stable_quote(chain_id, venue, sell_token, buy_token, int(sell_amount), deadline=deadline)
-            fee_pair = ()
-        elif venue.kind == "lb":
-            out, path, _amounts = self._lb_quote(chain_id, venue, sell_token, buy_token, int(sell_amount), deadline=deadline)
-            fee_pair = ()
-        else:
-            raise ValueError(f"unsupported venue kind {venue.kind}")
+        try:
+            if venue.kind == "v2":
+                out, path = self._v2_quote(chain_id, venue, sell_token, buy_token, int(sell_amount), deadline=deadline)
+                fee_pair = ()
+            elif venue.kind == "v3":
+                out, path, fee_pair = self._v3_quote(chain_id, venue, sell_token, buy_token, int(sell_amount), deadline=deadline)
+            elif venue.kind == "stable":
+                out, path, _factory = self._stable_quote(chain_id, venue, sell_token, buy_token, int(sell_amount), deadline=deadline)
+                fee_pair = ()
+            elif venue.kind == "lb":
+                out, path, _amounts = self._lb_quote(chain_id, venue, sell_token, buy_token, int(sell_amount), deadline=deadline)
+                fee_pair = ()
+            else:
+                raise ValueError(f"unsupported venue kind {venue.kind}")
+        except RpcRateLimitError:
+            raise
+        except RuntimeError as exc:
+            message = str(exc).lower()
+            if "liquidity for pair" in message:
+                self._pair_capability_cache[capability_key] = time.monotonic() + self._pair_capability_ttl
+            raise
 
         if out <= 0:
             raise RuntimeError(f"{source} returned zero output")
