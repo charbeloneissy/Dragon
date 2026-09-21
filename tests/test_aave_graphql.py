@@ -87,3 +87,63 @@ def test_spokes_and_reserves_and_assets_are_typed_lists(monkeypatch):
     assert asset["id"] == "a1"
     assert multi["summary"]["chainCount"] == 2
     assert len(calls) == 4
+
+
+def test_preview_update_user_position_conditions():
+    client = AaveGraphQLClient()
+
+    async def fake_query(query, variables=None):
+        assert "query Preview" in query
+        assert variables["request"]["action"]["updateUserPositionConditions"]["update"] == "ALL_DYNAMIC_CONFIG"
+        assert variables["request"]["action"]["updateUserPositionConditions"]["userPositionId"] == "UP-1"
+        return {
+            "value": {
+                "id": "UP-1",
+                "riskPremium": {
+                    "before": {"normalized": "1.0"},
+                    "after": {"normalized": "1.0"},
+                },
+                "otherConditions": [],
+            }
+        }
+
+    client.query = fake_query
+    result = asyncio.run(
+        client.preview(
+            {
+                "updateUserPositionConditions": {
+                    "userPositionId": "UP-1",
+                    "update": "ALL_DYNAMIC_CONFIG",
+                }
+            }
+        )
+    )
+    assert result["id"] == "UP-1"
+
+
+def test_update_user_position_conditions_tx_is_unsigned():
+    client = AaveGraphQLClient()
+
+    async def fake_query(query, variables=None):
+        assert "query UpdateUserPositionConditions" in query
+        assert variables["request"]["update"] == "ALL_DYNAMIC_CONFIG"
+        return {
+            "value": {
+                "to": "0x1234567890abcdef1234567890abcdef12345678",
+                "from": "0x1111111111111111111111111111111111111111",
+                "data": "0xdeadbeef",
+                "value": "0",
+                "chainId": 5042,
+                "operations": ["UPDATE_USER_POSITION_CONDITIONS"],
+            }
+        }
+
+    client.query = fake_query
+    result = asyncio.run(
+        client.update_user_position_conditions_tx(
+            user_position_id="UP-1",
+            update="ALL_DYNAMIC_CONFIG",
+        )
+    )
+    assert result["chainId"] == 5042
+    assert result["data"] == "0xdeadbeef"
