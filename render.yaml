@@ -28,6 +28,20 @@ services:
         value: "8453"
       - key: NONEVM_CHAINS
         value: ""
+      - key: SOLANA_HELIUS_ENABLED
+        value: "false"
+      - key: HELIUS_API_KEY
+        sync: false
+      - key: HELIUS_WSS_URL
+        value: "wss://atlas-mainnet.helius-rpc.com/"
+      - key: SOLANA_COMMITMENT
+        value: "processed"
+      - key: SOLANA_WSS_RECONNECT_SECONDS
+        value: "0.5"
+      - key: SOLANA_WSS_MAX_RECONNECT_SECONDS
+        value: "10"
+      - key: SOLANA_TX_ACCOUNT_INCLUDE
+        value: ""
       - key: JUPITER_QUOTE_URL
         value: "https://api.jup.ag/swap/v1/quote"
       - key: ALCHEMY_API_KEY
