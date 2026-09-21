@@ -58,3 +58,32 @@ def test_transaction_query_is_raw_and_unsigned():
     result = asyncio.run(client.transaction_query("mutation Foo { foo }"))
     assert result["vaultSetFee"]["chainId"] == 5042
     assert result["vaultSetFee"]["data"] == "0x1234"
+
+
+def test_spokes_and_reserves_and_assets_are_typed_lists(monkeypatch):
+    client = AaveGraphQLClient()
+    calls = []
+
+    async def fake_query(query, variables=None):
+        calls.append((query, variables))
+        if "query Spokes" in query:
+            return {"spokes": [{"id": "s1", "name": "Arc Main"}]}
+        if "query Reserves" in query:
+            return {"value": [{"id": "r1", "onChainId": "1"}]}
+        if "query Asset(" in query:
+            return {"value": {"id": "a1", "token": {"symbol": "USDC"}}}
+        if "query MultichainAsset(" in query:
+            return {"value": {"summary": {"chainCount": 2}}}
+        raise AssertionError("unexpected query")
+
+    client.query = fake_query
+    spokes = asyncio.run(client.spokes({"query": {"chainIds": [5042]}}))
+    reserves = asyncio.run(client.reserves({"query": {"chainIds": [5042]}}))
+    asset = asyncio.run(client.asset({"query": {"token": {"address": "0x" + "11" * 20, "chainId": 5042}}}))
+    multi = asyncio.run(client.multichain_asset({"query": {"symbol": "USDC"}}))
+
+    assert spokes[0]["id"] == "s1"
+    assert reserves[0]["id"] == "r1"
+    assert asset["id"] == "a1"
+    assert multi["summary"]["chainCount"] == 2
+    assert len(calls) == 4
