@@ -33,6 +33,12 @@ _READ_TOOLS = {
     "get_hub_assets",
 }
 
+_PREPARE_TOOLS = {
+    "vaultSetFee",
+    "vaultWithdrawFees",
+    "vaultTransferOwnership",
+}
+
 
 class AaveMCPError(RuntimeError):
     pass
@@ -196,8 +202,10 @@ class AaveMCPClient:
         self._cache: dict[str, tuple[float, Any]] = {}
 
     async def call(self, tool: str, arguments: dict[str, Any]) -> Any:
-        if tool not in _READ_TOOLS:
-            raise AaveMCPError(f"tool {tool!r} is not allowed in Dragon's read-only Aave adapter")
+        if tool not in _READ_TOOLS and tool not in _PREPARE_TOOLS:
+            raise AaveMCPError(f"tool {tool!r} is not allowed in Dragon's Aave adapter")
+        if tool in _PREPARE_TOOLS:
+            logging.info("Aave Vault prepare-only call tool=%s; no signing or broadcast is performed", tool)
 
         cache_key = json.dumps([tool, arguments], sort_keys=True, separators=(",", ":"))
         now = time.monotonic()
@@ -247,6 +255,31 @@ class AaveMCPClient:
                     await asyncio.sleep(min(2.0, 0.25 * (attempt + 1)))
 
         raise AaveMCPError(f"Aave MCP {tool} failed: {last_error}") from last_error
+
+    async def vault_set_fee(
+        self,
+        *,
+        chain_id: int,
+        vault: str,
+        new_fee_percent: Decimal | str | float,
+    ) -> Any:
+        """Prepare an unsigned Aave Earn Vault fee-update transaction.
+
+        The Aave documentation requires a minimum performance fee of 10%.
+        This method only prepares the transaction; Dragon never signs or
+        broadcasts it.
+        """
+        fee = Decimal(str(new_fee_percent))
+        if not fee.is_finite() or fee < Decimal("10") or fee > Decimal("100"):
+            raise ValueError("Aave Earn Vault performance fee must be between 10% and 100%")
+        return await self.call(
+            "vaultSetFee",
+            {
+                "chainId": int(chain_id),
+                "vault": vault,
+                "newFee": str(fee),
+            },
+        )
 
     async def get_markets(self, version: str = "all", symbols: list[str] | None = None) -> Any:
         args: dict[str, Any] = {"version": version}
