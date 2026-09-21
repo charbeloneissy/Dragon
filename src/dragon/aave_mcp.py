@@ -100,6 +100,9 @@ class AaveMarketSnapshot:
     borrow_cap: Decimal | None
     frozen: bool
     paused: bool
+    can_supply: bool | None
+    can_use_as_collateral: bool | None
+    suppliable: Decimal | None
     rewards: tuple[dict[str, Any], ...]
     raw: dict[str, Any]
 
@@ -140,6 +143,9 @@ class AaveMarketSnapshot:
             "borrow_cap": _string(self.borrow_cap),
             "frozen": self.frozen,
             "paused": self.paused,
+            "can_supply": self.can_supply,
+            "can_use_as_collateral": self.can_use_as_collateral,
+            "suppliable": _string(self.suppliable),
             "rewards": list(self.rewards),
         }
 
@@ -424,16 +430,31 @@ class AaveMCPClient:
         return {key: tx[key] for key in required}
 
 
-    async def get_markets(self, version: str = "all", symbols: list[str] | None = None) -> Any:
+    async def get_markets(
+        self,
+        version: str = "all",
+        symbols: list[str] | None = None,
+        user: str | None = None,
+    ) -> Any:
         args: dict[str, Any] = {"version": version}
         if symbols:
             args["symbols"] = symbols
+        if user:
+            args["user"] = user
         return await self.call("get_markets", args)
 
     async def get_chains(self, version: str = "all") -> Any:
         return await self.call("get_chains", {"version": version})
 
-    async def get_reserve_details(self, version: str, reserve_id: str | None = None, market: str | None = None, token: str | None = None, chain_id: int | None = None) -> Any:
+    async def get_reserve_details(
+        self,
+        version: str,
+        reserve_id: str | None = None,
+        market: str | None = None,
+        token: str | None = None,
+        chain_id: int | None = None,
+        user: str | None = None,
+    ) -> Any:
         args: dict[str, Any] = {"version": version}
         if reserve_id is not None:
             args["reserveId"] = reserve_id
@@ -443,6 +464,8 @@ class AaveMCPClient:
             args["token"] = token
         if chain_id is not None:
             args["chainId"] = chain_id
+        if user is not None:
+            args["user"] = user
         return await self.call("get_reserve_details", args)
 
 
@@ -550,6 +573,15 @@ def parse_markets(payload: Any, stablecoins: tuple[str, ...] = DEFAULT_STABLECOI
             borrow_cap=_decimal(_deep_get(item, "borrowCap", "borrow_cap")),
             frozen=_bool(_deep_get(item, "isFrozen", "frozen")),
             paused=_bool(_deep_get(item, "isPaused", "paused")),
+            can_supply=(
+                _bool(_deep_get(item, "canSupply"))
+                if _deep_get(item, "canSupply") is not None else None
+            ),
+            can_use_as_collateral=(
+                _bool(_deep_get(item, "canUseAsCollateral"))
+                if _deep_get(item, "canUseAsCollateral") is not None else None
+            ),
+            suppliable=_decimal(_deep_get(item, "suppliable", "userState")),
             rewards=tuple(r for r in rewards if isinstance(r, dict)),
             raw=item,
         )
@@ -558,11 +590,18 @@ def parse_markets(payload: Any, stablecoins: tuple[str, ...] = DEFAULT_STABLECOI
     return rows
 
 
-def rank_stablecoin_supply(rows: list[AaveMarketSnapshot]) -> list[AaveMarketSnapshot]:
+def rank_stablecoin_supply(
+    rows: list[AaveMarketSnapshot],
+    *,
+    require_can_supply: bool = True,
+) -> list[AaveMarketSnapshot]:
     eligible = [
         row for row in rows
-        if not row.frozen and not row.paused and row.supply_apy_pct is not None
-        and (row.available_liquidity is None or row.available_liquidity > 0)
+        if not row.frozen
+        and not row.paused
+        and row.supply_apy_pct is not None
+        and (not require_can_supply or row.can_supply is not False)
+        and (row.suppliable is None or row.suppliable > 0)
     ]
     return sorted(
         eligible,
@@ -573,6 +612,48 @@ def rank_stablecoin_supply(rows: list[AaveMarketSnapshot]) -> list[AaveMarketSna
         reverse=True,
     )
 
+
+async def prepare_supply(
+    client: AaveMCPClient,
+    *,
+    sender: str,
+    reserve: str,
+    chain_id: int,
+    amount: str,
+    enable_collateral: bool = False,
+) -> dict[str, Any]:
+    """Preview and prepare an unsigned Aave V4 supply action."""
+    request: dict[str, Any] = {
+        "sender": sender,
+        "reserve": reserve,
+        "chainId": int(chain_id),
+        "amount": {"erc20": {"value": str(amount)}},
+    }
+    if enable_collateral:
+        request["enableCollateral"] = True
+
+    preview = await client.preview_action(action={"supply": request})
+    if not isinstance(preview, dict):
+        raise AaveMCPError("Aave supply preview returned an unexpected response")
+    warnings = preview.get("warnings") or []
+    if any(
+        isinstance(w, dict) and str(w.get("level", "")).lower() == "error"
+        for w in warnings
+    ):
+        raise AaveMCPError("Aave supply preview returned an error warning")
+
+    simulated = dict(preview)
+    simulated["_dragon_simulation_ok"] = True
+    plan = await client.prepare_action(
+        simulation=simulated,
+        action={"supply": request},
+    )
+    return {
+        "simulation": preview,
+        "execution": plan,
+        "unsigned": True,
+        "signer": sender,
+    }
 
 async def fetch_stablecoin_yields(client: AaveMCPClient | None = None, stablecoins: tuple[str, ...] = DEFAULT_STABLECOINS) -> list[AaveMarketSnapshot]:
     client = client or AaveMCPClient()
