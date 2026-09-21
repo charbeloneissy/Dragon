@@ -15,7 +15,7 @@ COUNTERS = (
     "opportunities_after_fees",
     "opportunities_after_gas",
     "opportunities_after_slippage",
-    "opportunities_after_mev_buffer",
+    "opportunities_after_costs",
     "optimal_size_found",
     "fresh_simulation_passed",
     "tx_submitted",
@@ -52,7 +52,7 @@ class ExecutionTelemetry:
         with self._lock:
             self._counters[name] = max(0, int(value))
 
-    def record_opportunity(self, opportunity: Any, *, stage: str = "opportunity_after_mev_buffer") -> str:
+    def record_opportunity(self, opportunity: Any, *, stage: str = "opportunity_after_costs") -> str:
         now = time.time()
         with self._lock:
             self._sequence += 1
@@ -75,7 +75,7 @@ class ExecutionTelemetry:
                 "gas_cost_quote": str(getattr(opportunity, "gas_cost_quote", "")),
                 "flash_loan_fee_quote": str(getattr(opportunity, "flash_loan_fee_quote", "")),
                 "safety_buffer_quote": str(getattr(opportunity, "safety_buffer_quote", "")),
-                "mev_buffer_quote": str(getattr(opportunity, "safety_buffer_quote", "")),
+                "safety_buffer_quote": str(getattr(opportunity, "safety_buffer_quote", "")),
                 "fresh_quote": True,
                 "optimal_size": int(getattr(opportunity, "quote_amount", 0)) > 0,
             }
