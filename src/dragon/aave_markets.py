@@ -59,6 +59,14 @@ def get_aave_v3_deployment(chain_id: int) -> AaveV3Deployment:
 
 
 @dataclass(frozen=True)
+class AaveMarket:
+    chain_id: int
+    name: str
+    pool: str
+    reserves: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class AaveReserve:
     chain_id: int
     market: str
@@ -106,3 +114,25 @@ class AaveMarketDiscovery:
         for reserve in self.discover(chain_ids):
             result.setdefault(reserve.chain_id, []).append(reserve)
         return result
+
+
+    def discover_markets(self, chain_ids: list[int] | tuple[int, ...]) -> list[AaveMarket]:
+        """Return live Aave V3 market snapshots for the requested chains."""
+        markets: list[AaveMarket] = []
+        for raw_chain_id in chain_ids:
+            chain_id = int(raw_chain_id)
+            deployment = get_aave_v3_deployment(chain_id)
+            rpc_url = self.rpc_urls.get(chain_id)
+            if not rpc_url:
+                raise RuntimeError(f"missing RPC URL for Aave chain {chain_id}")
+            w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 10}))
+            if not w3.is_connected():
+                raise RuntimeError(f"cannot connect to RPC for Aave chain {chain_id}")
+            if int(w3.eth.chain_id) != chain_id:
+                raise RuntimeError(f"Aave RPC chain mismatch: expected {chain_id}, got {w3.eth.chain_id}")
+            pool = w3.eth.contract(address=Web3.to_checksum_address(deployment.pool), abi=POOL_ABI)
+            reserves = tuple(Web3.to_checksum_address(token) for token in pool.functions.getReservesList().call())
+            if not reserves:
+                raise RuntimeError(f"Aave market {chain_id} returned no reserves")
+            markets.append(AaveMarket(chain_id, deployment.name, Web3.to_checksum_address(deployment.pool), reserves))
+        return markets
