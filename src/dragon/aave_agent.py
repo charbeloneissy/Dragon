@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
-
+from typing import Any, Iterable, Mapping
 
 ERROR_LEVEL = "error"
 WARNING_LEVEL = "warning"
 INFO_LEVEL = "info"
+
+# Snapshot of the official Aave skills repository used to align Dragon policy.
+AAVE_SKILLS_COMMIT = "b21a0345f47f5fb8337d6769f927b7b56ff3943a"
 
 
 @dataclass(frozen=True)
@@ -26,10 +28,11 @@ class AaveAgentDecision:
 
 
 class AaveAgentPolicy:
-    """Dragon-side implementation of Aave's discover -> inspect -> simulate -> build -> confirm flow.
+    """Dragon-side policy aligned with Aave official MCP lifecycle.
 
-    This policy never signs, broadcasts, or creates custody. It governs which
-    prepared actions Dragon may present to a signer.
+    discover -> inspect -> simulate -> build -> wallet-sign -> confirm
+
+    This policy never signs, broadcasts, or creates custody.
     """
 
     def __init__(self, *, require_simulation: bool = True, require_confirmation: bool = True):
@@ -44,10 +47,24 @@ class AaveAgentPolicy:
         if not isinstance(raw, list):
             return ()
         return tuple(
-            item for item in raw
-            if isinstance(item, dict) and str(item.get("level", "")).lower() in {
-                ERROR_LEVEL, WARNING_LEVEL, INFO_LEVEL
-            }
+            item
+            for item in raw
+            if isinstance(item, dict)
+            and str(item.get("level", "")).lower()
+            in {ERROR_LEVEL, WARNING_LEVEL, INFO_LEVEL}
+        )
+
+    @staticmethod
+    def coverage(
+        result: Mapping[str, Any] | None,
+    ) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]]:
+        """Return chainsCovered / chainsNotCovered / chainsNotServed from an Aave response."""
+        if not isinstance(result, Mapping):
+            return (), (), ()
+        return (
+            tuple(result.get("chainsCovered") or ()),
+            tuple(result.get("chainsNotCovered") or ()),
+            tuple(result.get("chainsNotServed") or ()),
         )
 
     def guard(
@@ -60,6 +77,13 @@ class AaveAgentPolicy:
         chains_not_covered: Iterable[Any] = (),
     ) -> AaveAgentDecision:
         warnings = self.warnings(result)
+        result_covered, result_not_covered, result_not_served = self.coverage(
+            result if isinstance(result, Mapping) else None
+        )
+        covered = tuple(chains_covered) or result_covered
+        not_covered = tuple(chains_not_covered) or result_not_covered
+        not_served = tuple(chains_not_served) or result_not_served
+
         for warning in warnings:
             if str(warning.get("level", "")).lower() == ERROR_LEVEL:
                 return AaveAgentDecision(
@@ -69,7 +93,7 @@ class AaveAgentPolicy:
                     warnings=warnings,
                 )
 
-        if list(chains_not_served):
+        if not_served:
             return AaveAgentDecision(
                 allowed=False,
                 phase=phase,
@@ -77,8 +101,7 @@ class AaveAgentPolicy:
                 warnings=warnings,
             )
 
-        # An explicitly incomplete read cannot be treated as a zero-result read.
-        if list(chains_not_covered):
+        if not_covered:
             return AaveAgentDecision(
                 allowed=False,
                 phase=phase,
@@ -86,8 +109,16 @@ class AaveAgentPolicy:
                 warnings=warnings,
             )
 
+        if phase == 'discover' and not covered and isinstance(result, Mapping):
+            return AaveAgentDecision(
+                allowed=False,
+                phase=phase,
+                reason="no_coverage_reported",
+                warnings=warnings,
+            )
+
         if phase in {"borrow", "withdraw", "repay", "supply"} and self.require_simulation:
-            if not isinstance(result, dict) or not result.get("_dragon_simulation_ok", False):
+            if not isinstance(result, Mapping) or not result.get("_dragon_simulation_ok", False):
                 return AaveAgentDecision(
                     allowed=False,
                     phase=phase,
@@ -95,13 +126,27 @@ class AaveAgentPolicy:
                     warnings=warnings,
                 )
 
-        if phase == "build":
-            # Building is allowed when the policy has passed previous phases;
-            # signing remains outside this module.
+        if phase == 'build':
             return AaveAgentDecision(
                 allowed=True,
                 phase=phase,
                 reason="unsigned_transaction_ready",
+                warnings=warnings,
+            )
+
+        if phase == 'wallet-sign':
+            return AaveAgentDecision(
+                allowed=True,
+                phase=phase,
+                reason="external_wallet_required",
+                warnings=warnings,
+            )
+
+        if phase == 'confirm' and self.require_confirmation:
+            return AaveAgentDecision(
+                allowed=True,
+                phase=phase,
+                reason="await_protocol_confirmation",
                 warnings=warnings,
             )
 
@@ -163,6 +208,8 @@ AAVE_AGENT_WORKFLOW = (
 AAVE_AGENT_SOURCES = {
     "agents": "https://aave.com/agents",
     "mcp": "https://mcp.aave.com",
+    "mcp_docs": "https://aave.com/docs/mcp",
     "safety": "https://aave.com/docs/mcp/safety",
     "skills": "https://github.com/aave/skills",
+    "skills_commit": AAVE_SKILLS_COMMIT,
 }
