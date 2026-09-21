@@ -27,7 +27,6 @@ class DexOpportunity:
     gas_cost_quote: Decimal
     flash_loan_fee_quote: Decimal
     safety_buffer_quote: Decimal
-    mev_reserve_quote: Decimal
     first_leg: DexExecution
     second_leg: DexExecution
     compound_amount: int = 0
@@ -186,27 +185,6 @@ class DexCrossExchangeEngine:
                 logging.warning("DEX %s price-bound validation failed error=%s: %s", stage, type(exc).__name__, exc)
                 return False
         return True
-
-    def _dynamic_mev_reserve_quote(self, *, notional_quote: Decimal, gas_cost_quote: Decimal, latency_ms: Decimal, buy_quote: DexQuote, sell_quote: DexQuote) -> Decimal:
-        """Estimate an execution-risk/MEV reserve from live opportunity conditions.
-
-        This is a reserve, not a claim about realized MEV. It scales with notional,
-        quote latency and gas pressure, and is deducted exactly once from net profit.
-        """
-        if notional_quote <= 0:
-            return Decimal("0")
-        base_bps = Decimal(os.getenv("DEX_MEV_BASE_BPS", "5"))
-        latency_bps_per_100ms = Decimal(os.getenv("DEX_MEV_LATENCY_BPS_PER_100MS", "1"))
-        gas_multiplier = Decimal(os.getenv("DEX_MEV_GAS_COST_MULTIPLIER", "0.25"))
-        max_bps = Decimal(os.getenv("DEX_MEV_MAX_BPS", "100"))
-        if min(base_bps, latency_bps_per_100ms, gas_multiplier, max_bps) < 0:
-            raise ValueError("MEV reserve parameters cannot be negative")
-        observed_latency = max(self._quote_latency(buy_quote), self._quote_latency(sell_quote), latency_ms)
-        latency_bps = (observed_latency / Decimal("100")) * latency_bps_per_100ms
-        reserve_bps = min(max_bps, base_bps + latency_bps)
-        notional_reserve = notional_quote * reserve_bps / Decimal("10000")
-        gas_reserve = gas_cost_quote * gas_multiplier
-        return notional_reserve + gas_reserve
 
     def _gas_cost_quote(self, quote: DexQuote, execution: DexExecution, native_to_quote_rate: Decimal) -> Decimal:
         direct = getattr(quote, "gas_quote", None)
@@ -615,15 +593,6 @@ class DexCrossExchangeEngine:
             gross = Decimal(final_amount - quote_amount) / scale
             cost_quote = gas_cost_quote + flash_loan_fee_quote + self.safety_buffer_quote
             notional_quote = Decimal(quote_amount) / scale
-            latency_ms = max(self._quote_latency(buy_quote), self._quote_latency(sell_quote))
-            mev_reserve_quote = self._dynamic_mev_reserve_quote(
-                notional_quote=notional_quote,
-                gas_cost_quote=gas_cost_quote,
-                latency_ms=latency_ms,
-                buy_quote=buy_quote,
-                sell_quote=sell_quote,
-            )
-            cost_quote = gas_cost_quote + flash_loan_fee_quote + mev_reserve_quote + self.safety_buffer_quote
             gross_bps = (round_trip_return - Decimal("1")) * Decimal("10000")
             cost_bps = (cost_quote / notional_quote) * Decimal("10000") if notional_quote > 0 else Decimal("0")
             net_bps = gross_bps - cost_bps
@@ -635,10 +604,10 @@ class DexCrossExchangeEngine:
             if gross - gas_cost_quote - flash_loan_fee_quote > 0:
                 self._metric("opportunities_after_gas")
             logging.info(
-                "DEX ROUND_TRIP buy=%s sell=%s token=%s start_quote_raw=%s leg1_base_raw=%s leg2_quote_raw=%s return=%.8f gross=%s gross_bps=%.3f cost=%s cost_bps=%.3f gas=%s flash_fee=%s mev=%s safety=%s net=%s net_bps=%.3f",
+                "DEX ROUND_TRIP buy=%s sell=%s token=%s start_quote_raw=%s leg1_base_raw=%s leg2_quote_raw=%s return=%.8f gross=%s gross_bps=%.3f cost=%s cost_bps=%.3f gas=%s flash_fee=%s safety=%s net=%s net_bps=%.3f",
                 buy_source, source, base_token, quote_amount, buy_execution.buy_amount,
                 final_amount, round_trip_return, gross, gross_bps, cost_quote, cost_bps,
-                gas_cost_quote, flash_loan_fee_quote, mev_reserve_quote, self.safety_buffer_quote,
+                gas_cost_quote, flash_loan_fee_quote, self.safety_buffer_quote,
                 net, net_bps,
             )
             if not net.is_finite():
@@ -651,7 +620,6 @@ class DexCrossExchangeEngine:
             elif net <= 0:
                 self._reject("cross_net_negative_after_costs")
             if net > 0:
-                self._metric("opportunities_after_mev_buffer")
             if net < self.min_profit:
                 self._reject("net_profit_below_min")
                 return
