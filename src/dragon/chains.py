@@ -86,7 +86,7 @@ EVM_CHAINS: dict[int, ChainSpec] = {
         explorer="https://basescan.org",
         rpc_env="DEX_RPC_URL",
         rpc_fallback_env="DEX_RPC_URLS",
-        default_rpc="https://mainnet.base.org",
+        default_rpc="https://base-rpc.publicnode.com",
     ),
     42161: ChainSpec(
         chain_id=42161,
