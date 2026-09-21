@@ -10,7 +10,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from decimal import Decimal
-from itertools import permutations
+from itertools import permutations, product
 from typing import Callable, Iterable
 
 from .leg_brain import LegBrain, LegObservation
@@ -106,6 +106,7 @@ class TriangularEngine:
                     chain_id=route.chain_id, source=route.venues[idx], sell_token=sell,
                     buy_token=buy, sell_amount=current, buy_amount=buy_amount,
                     latency_ms=Decimal(str(getattr(quote, "latency_ms", 0))),
+                    gas_cost_quote=Decimal(str(getattr(quote, "gas_quote", 0))),
                     quote_age_ms=Decimal("0"),
                     liquidity_ok=True,
                 ))
@@ -115,7 +116,7 @@ class TriangularEngine:
                 current = buy_amount
             scale = Decimal(10) ** self.quote_decimals
             gross = Decimal(current - amount) / scale
-            gas = sum((b.average_gas_quote for b in (self._brain(route, i) for i in range(3))), Decimal("0"))
+            gas = sum((Decimal(str(getattr(q, "gas_quote", 0))) for q in legs), Decimal("0"))
             flash_fee = (Decimal(amount) / scale) * self.flash_fee_bps / Decimal("10000")
             net = gross - gas - flash_fee
             return TriangularOpportunity(route, amount, (amount, *[getattr(x, "buy_amount", 0) for x in legs[:2]]),
@@ -140,8 +141,5 @@ class TriangularEngine:
     @staticmethod
     def discover_routes(chain_id: int, venues: Iterable[str], token_cycle: tuple[str, str, str]) -> tuple[TriangularRoute, ...]:
         names = tuple(dict.fromkeys(v for v in venues if v))
-        if len(names) == 1:
-            combos = [(names[0],) * 3]
-        else:
-            combos = permutations(names, 3)
+        combos = product(names, repeat=3)
         return tuple(TriangularRoute(chain_id, (c[0], c[1], c[2]), *token_cycle) for c in combos)
