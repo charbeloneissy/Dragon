@@ -285,6 +285,8 @@ class AaveMCPClient:
         self._request_id = 0
         self._lock = asyncio.Lock()
         self._cache: dict[str, tuple[float, Any]] = {}
+        self._tool_inventory: dict[str, dict[str, Any]] | None = None
+        self._tool_inventory_at: float = 0.0
 
     async def call(self, tool: str, arguments: dict[str, Any]) -> Any:
         if tool in _BLOCKED_TOOLS:
@@ -345,13 +347,30 @@ class AaveMCPClient:
 
         raise AaveMCPError(f"Aave MCP {tool} failed: {last_error}") from last_error
 
-    async def list_tools(self) -> Any:
+    async def list_tools(self, *, refresh: bool = False) -> Any:
         """Return the server's live tools/list inventory.
 
         Aave documents tools/list as authoritative when its schema differs
         from the static documentation.
         """
-        return await self._rpc_request("tools/list", {})
+        now = time.monotonic()
+        if (
+            not refresh
+            and self._tool_inventory is not None
+            and now - self._tool_inventory_at < self.cache_seconds
+        ):
+            return self._tool_inventory
+
+        result = await self._rpc_request("tools/list", {})
+        inventory: dict[str, dict[str, Any]] = {}
+        tools = result.get("tools") if isinstance(result, dict) else None
+        if isinstance(tools, list):
+            for item in tools:
+                if isinstance(item, dict) and item.get("name"):
+                    inventory[str(item["name"])] = item
+        self._tool_inventory = inventory
+        self._tool_inventory_at = time.monotonic()
+        return inventory
 
     async def _rpc_request(self, method: str, params: dict[str, Any]) -> Any:
         async with self._lock:
@@ -383,6 +402,16 @@ class AaveMCPClient:
                 if attempt + 1 < self.max_attempts:
                     await asyncio.sleep(min(2.0, 0.25 * (attempt + 1)))
         raise AaveMCPError(f"Aave MCP {method} failed: {last_error}") from last_error
+
+    async def ensure_tool(self, tool: str, *, refresh: bool = False) -> dict[str, Any]:
+        """Ensure a tool exists in Aave's live inventory and return its schema."""
+        inventory = await self.list_tools(refresh=refresh)
+        item = inventory.get(tool) if isinstance(inventory, dict) else None
+        if not isinstance(item, dict):
+            raise AaveMCPError(
+                f"Aave MCP tool {tool!r} is not present in the live tools/list inventory"
+            )
+        return item
 
     async def preview_action(self, **arguments: Any) -> Any:
         """Simulate a protocol action without executing it."""
