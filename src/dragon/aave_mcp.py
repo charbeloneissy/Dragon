@@ -209,7 +209,8 @@ class AaveMCPClient:
 
         cache_key = json.dumps([tool, arguments], sort_keys=True, separators=(",", ":"))
         now = time.monotonic()
-        cached = self._cache.get(cache_key)
+        cacheable = tool in _READ_TOOLS
+        cached = self._cache.get(cache_key) if cacheable else None
         if cached and now - cached[0] < self.cache_seconds:
             return cached[1]
 
@@ -247,7 +248,8 @@ class AaveMCPClient:
                     raise AaveMCPError(str(body["error"]))
 
                 result = _unwrap_result(body.get("result", body))
-                self._cache[cache_key] = (time.monotonic(), result)
+                if cacheable:
+                    self._cache[cache_key] = (time.monotonic(), result)
                 return result
             except Exception as exc:
                 last_error = exc
@@ -280,6 +282,36 @@ class AaveMCPClient:
                 "newFee": str(fee),
             },
         )
+
+    async def vault_set_fee_request(
+        self,
+        *,
+        chain_id: int,
+        vault: str,
+        new_fee_percent: Decimal | str | float,
+    ) -> dict[str, Any]:
+        """Return the unsigned transaction fields for the vaultSetFee operation."""
+        result = await self.vault_set_fee(
+            chain_id=chain_id,
+            vault=vault,
+            new_fee_percent=new_fee_percent,
+        )
+        data = _unwrap_result(result)
+
+        # Accept either a direct transaction object or MCP/GraphQL-style nesting.
+        tx = data
+        if isinstance(data, dict):
+            for key in ("vaultSetFee", "data", "transaction", "result"):
+                nested = data.get(key)
+                if isinstance(nested, dict):
+                    tx = nested
+                    break
+
+        required = ("to", "from", "data", "value", "chainId")
+        if not isinstance(tx, dict) or any(key not in tx for key in required):
+            raise AaveMCPError("Aave vaultSetFee response did not contain a complete TransactionRequest")
+        return {key: tx[key] for key in required}
+
 
     async def get_markets(self, version: str = "all", symbols: list[str] | None = None) -> Any:
         args: dict[str, Any] = {"version": version}
