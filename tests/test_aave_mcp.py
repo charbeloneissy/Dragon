@@ -118,3 +118,40 @@ def test_parse_canonical_aave_reserve_shape():
     assert row.underlying_token_address == "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
     assert row.underlying_token_name == "USD Coin"
     assert row.supply_apy_pct == Decimal("3.75")
+
+
+import pytest
+
+
+def test_vault_set_fee_validates_aave_minimum(monkeypatch):
+    from src.dragon.aave_mcp import AaveMCPClient
+
+    client = AaveMCPClient()
+
+    class NoNetwork:
+        async def call(self, *args, **kwargs):
+            return args, kwargs
+
+    client.call = NoNetwork().call
+
+    import asyncio
+    result = asyncio.run(client.vault_set_fee(
+        chain_id=1,
+        vault="0x1234567890abcdef1234567890abcdef12345678",
+        new_fee_percent=15,
+    ))
+    assert result[0] == "vaultSetFee"
+    assert result[1]["chainId"] == 1
+    assert result[1]["newFee"] == "15"
+
+
+def test_vault_set_fee_rejects_below_ten_percent():
+    from src.dragon.aave_mcp import AaveMCPClient
+    import asyncio
+
+    with pytest.raises(ValueError, match="between 10% and 100%"):
+        asyncio.run(AaveMCPClient().vault_set_fee(
+            chain_id=1,
+            vault="0x1234567890abcdef1234567890abcdef12345678",
+            new_fee_percent=9,
+        ))
