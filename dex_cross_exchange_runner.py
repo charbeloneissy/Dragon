@@ -37,7 +37,6 @@ from src.dragon.base_live import BaseLiveReader
 from src.dragon.five_circle_engine import FiveCircleEngine
 from src.dragon.base_proof_engine import BaseProofEngine
 from src.dragon.base_atomic_simulator import BaseAtomicSimulator
-from src.dragon.helius_solana import HeliusError, HeliusSolanaClient
 
 STATE = {
     "status": "starting", "mode": "paper", "chains": [], "chain_details": {},
@@ -49,7 +48,6 @@ STATE = {
     "compound_reserve_quote": "0", "last_tx_hash": None, "rejections": {},
     "base_tokens": {}, "universe_mode": {}, "universe": [], "opportunity_records": [],
     "rpc_providers": {}, "rpc_hosts": {},
-    "helius_solana": {"enabled": False, "connected": False, "slot": None, "priority_fee": None, "last_update": None, "error": None},
     "aave_mcp_enabled": False, "aave_mcp_last_update": None,
     "aave_mcp_error": None, "aave_stable_yields": [], "aave_stable_markets": 0,
     "aave_user_state_enabled": False, "aave_user_state_wallet": None,
@@ -80,75 +78,6 @@ STATE = {
 LOCK = Lock()
 METRICS = ExecutionTelemetry()
 AERODROME_ENGINE = AerodromeOpportunityEngine()
-
-async def refresh_helius_solana(client: HeliusSolanaClient) -> None:
-    """Refresh lightweight Solana network state without making trade decisions."""
-    try:
-        slot = await client.get_slot()
-        priority = await client.get_priority_fee_estimate(
-            account_keys=["JUP6LkbZbjS1sKwapdHNy74zcZ3tLUZoi5QNyVTaV4"],
-            include_all_levels=True,
-            recommended=True,
-        )
-        with LOCK:
-            STATE["helius_solana"] = {
-                "enabled": client.config.enabled,
-                "connected": True,
-                "slot": slot,
-                "priority_fee": priority,
-                "last_update": time.time(),
-                "error": None,
-            }
-    except Exception as exc:
-        with LOCK:
-            STATE["helius_solana"] = {
-                "enabled": client.config.enabled,
-                "connected": False,
-                "slot": None,
-                "priority_fee": None,
-                "last_update": time.time(),
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        logging.warning("Helius Solana refresh failed: %s", exc)
-
-
-async def _helius_loop(client: HeliusSolanaClient) -> None:
-    interval = max(2.0, float(os.getenv("HELIUS_REFRESH_SECONDS", "5")))
-    while True:
-        await refresh_helius_solana(client)
-        await asyncio.sleep(interval)
-
-
-async def refresh_helius_solana(client: HeliusSolanaClient) -> None:
-    """Refresh lightweight Solana network state without making trade decisions."""
-    try:
-        slot = await client.get_slot()
-        priority = await client.get_priority_fee_estimate(
-            account_keys=["JUP6LkbZbjS1sKwapdHNy74zcZ3tLUZoi5QNyVTaV4"],
-            include_all_levels=True,
-            recommended=True,
-        )
-        with LOCK:
-            STATE["helius_solana"] = {
-                "enabled": client.config.enabled,
-                "connected": True,
-                "slot": slot,
-                "priority_fee": priority,
-                "last_update": time.time(),
-                "error": None,
-            }
-    except Exception as exc:
-        with LOCK:
-            STATE["helius_solana"] = {
-                "enabled": client.config.enabled,
-                "connected": False,
-                "slot": None,
-                "priority_fee": None,
-                "last_update": time.time(),
-                "error": f"{type(exc).__name__}: {exc}",
-            }
-        logging.warning("Helius Solana refresh failed: %s", exc)
-
 
 def refresh_aerodrome_opportunities() -> None:
     """Evaluate configured Aerodrome snapshots; never deploy capital."""
@@ -982,11 +911,6 @@ async def main():
         base_reader = BaseLiveReader()
         rotation = 0
 
-        helius_solana = HeliusSolanaClient()
-        if helius_solana.config.enabled:
-            await refresh_helius_solana(helius_solana)
-        else:
-            logging.info("Helius Solana adapter disabled: HELIUS_API_KEY not configured")
         stable_vaults = []
         stable_vault_error = None
         if env_bool("AAVE_STABLE_VAULTS_ENABLED", False):
@@ -1067,7 +991,6 @@ async def main():
                 "flash_loan_enabled": env_bool("FLASH_LOAN_ENABLED", False),
                 "compounding_enabled": env_bool("DEX_COMPOUND_PROFITS", False),
                 "rpc_providers": provider_status(load_providers()),
-                "helius_solana": STATE.get("helius_solana", {}),
                 "rpc_hosts": {
                     get_spec(cid).name: [rpc_host(u) for u in rpc_urls_for(cid)]
                     for cid in evm_chains
@@ -1084,7 +1007,6 @@ async def main():
         total_venues = sum(len(d["venues"]) for d in chain_details.values())
         logging.info("Dragon multi-chain ready chains=%s venues=%s min_profit=%s", list(chain_details.keys()), total_venues, min_profit)
 
-        helius_solana_task = asyncio.create_task(_helius_loop(helius_solana)) if helius_solana.config.enabled else None
         aave_task = asyncio.create_task(refresh_aave_mcp())
         aave_user_state_task = asyncio.create_task(refresh_aave_user_state())
         aave_horizon_task = asyncio.create_task(refresh_aave_horizon())
@@ -1375,12 +1297,6 @@ async def main():
                 with LOCK:
                     STATE["status"] = "running"
     finally:
-        if "helius_solana_task" in locals() and helius_solana_task is not None:
-            helius_solana_task.cancel()
-            try:
-                await helius_solana_task
-            except asyncio.CancelledError:
-                pass
         if "aave_user_state_task" in locals():
             aave_user_state_task.cancel()
             try:
