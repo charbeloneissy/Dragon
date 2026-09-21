@@ -63,34 +63,45 @@ window.amplitude.add(window.sessionReplay.plugin({ sampleRate: 1 }));
   }
 
   function sendData() {
-    if (dataSent || !window.amplitude || typeof window.amplitude.identify !== "function") return false;
-    if (typeof window.amplitude.Identify !== "function") return false;
+    if (dataSent || !window.amplitude) return false;
 
-    var campaignInfo = getCampaignInfo();
-    if (!campaignInfo || !campaignInfo.experiment || !campaignInfo.variation) return false;
+    var sent = false;
 
-    var prefix = String(configValue("property_prefix") || fallbackConfig.property_prefix);
-    var identify = new window.amplitude.Identify().set(
-      prefix + " " + campaignInfo.experiment,
-      campaignInfo.variation
-    );
-    window.amplitude.identify(identify);
-
-    if (String(configValue("send_event")) === "y" && typeof window.amplitude.track === "function") {
-      var eventName = String(configValue("event_name") || fallbackConfig.event_name);
-      window.amplitude.track(eventName, {
-        "[Optimizely Campaign]": campaignInfo.campaign,
-        "[Optimizely Experiment]": campaignInfo.experiment,
-        "[Optimizely Variation]": campaignInfo.variation,
-        "[Optimizely Holdback]": campaignInfo.holdback,
-        "customProperty1": "value1",
-        "customProperty2": "value2",
-        "customProperty3": "value3"
-      });
+    // Mobile SDK parity: emit the experiment/variation map as a single event
+    // using the same property names supplied by the Android/iOS examples.
+    if (typeof window.amplitude.track === "function") {
+      logExperimentsAndVariations();
+      sent = true;
     }
 
-    dataSent = true;
-    return true;
+    var campaignInfo = getCampaignInfo();
+    if (campaignInfo && campaignInfo.experiment && campaignInfo.variation &&
+        typeof window.amplitude.identify === "function" &&
+        typeof window.amplitude.Identify === "function") {
+      var prefix = String(configValue("property_prefix") || fallbackConfig.property_prefix);
+      var identify = new window.amplitude.Identify().set(
+        prefix + " " + campaignInfo.experiment,
+        campaignInfo.variation
+      );
+      window.amplitude.identify(identify);
+      sent = true;
+
+      if (String(configValue("send_event")) === "y") {
+        var eventName = String(configValue("event_name") || fallbackConfig.event_name);
+        window.amplitude.track(eventName, {
+          "[Optimizely Campaign]": campaignInfo.campaign,
+          "[Optimizely Experiment]": campaignInfo.experiment,
+          "[Optimizely Variation]": campaignInfo.variation,
+          "[Optimizely Holdback]": campaignInfo.holdback,
+          "customProperty1": "value1",
+          "customProperty2": "value2",
+          "customProperty3": "value3"
+        });
+      }
+    }
+
+    dataSent = sent;
+    return sent;
   }
 
   function sendToAmplitude(attempt) {
