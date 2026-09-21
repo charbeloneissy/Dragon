@@ -227,3 +227,92 @@ def test_v4_supply_eligibility_and_user_suppliable():
     assert rows[0].suppliable == Decimal("1000")
     ranked = rank_stablecoin_supply(rows)
     assert [r.reserve_id for r in ranked] == ["good"]
+
+
+def test_prepare_withdraw_matches_aave_v4_request_shape():
+    import asyncio
+
+    from src.dragon.aave_mcp import AaveMCPClient, prepare_withdraw
+
+    client = AaveMCPClient()
+    calls = []
+
+    async def fake_preview_action(**kwargs):
+        calls.append(("preview", kwargs))
+        return {
+            "healthFactor": {"current": "2.0", "after": "1.8"},
+            "warnings": [],
+        }
+
+    async def fake_prepare_action(*, simulation, **kwargs):
+        calls.append(("prepare", kwargs))
+        assert simulation["_dragon_simulation_ok"] is True
+        return {
+            "__typename": "TransactionRequest",
+            "chainId": 1,
+            "to": "0x0000000000000000000000000000000000000001",
+        }
+
+    client.preview_action = fake_preview_action
+    client.prepare_action = fake_prepare_action
+
+    result = asyncio.run(
+        prepare_withdraw(
+            client,
+            sender="0x0000000000000000000000000000000000000078",
+            reserve="SGVsbG8h",
+            amount="500",
+            withdrawable="1000",
+            reserve_paused=False,
+        )
+    )
+
+    assert result["unsigned"] is True
+    assert calls[0][1]["action"]["withdraw"]["amount"]["erc20"]["value"] == {"exact": "500"}
+    assert calls[1][1]["action"]["withdraw"]["amount"]["erc20"]["value"] == {"exact": "500"}
+
+
+def test_prepare_max_withdraw_uses_max_shape():
+    import asyncio
+
+    from src.dragon.aave_mcp import AaveMCPClient, prepare_withdraw
+
+    client = AaveMCPClient()
+
+    async def fake_preview_action(**kwargs):
+        assert kwargs["action"]["withdraw"]["amount"]["erc20"]["value"] == {"max": True}
+        return {"warnings": []}
+
+    async def fake_prepare_action(*, simulation, **kwargs):
+        return {"__typename": "TransactionRequest"}
+
+    client.preview_action = fake_preview_action
+    client.prepare_action = fake_prepare_action
+
+    result = asyncio.run(
+        prepare_withdraw(
+            client,
+            sender="0x0000000000000000000000000000000000000078",
+            reserve="SGVsbG8h",
+            maximum=True,
+        )
+    )
+    assert result["unsigned"] is True
+
+
+def test_prepare_withdraw_rejects_over_withdrawable():
+    import asyncio
+    import pytest
+
+    from src.dragon.aave_mcp import AaveMCPClient, prepare_withdraw
+
+    with pytest.raises(Exception, match="exceeds live withdrawable"):
+        asyncio.run(
+            prepare_withdraw(
+                AaveMCPClient(),
+                sender="0x0000000000000000000000000000000000000078",
+                reserve="SGVsbG8h",
+                amount="1500",
+                withdrawable="1000",
+            )
+        )
