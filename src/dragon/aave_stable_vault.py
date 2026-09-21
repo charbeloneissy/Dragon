@@ -204,5 +204,130 @@ def validate_stable_vault(config: StableVaultConfig) -> StableVaultSnapshot:
     return StableVaultSnapshot(config=config, healthy=not issues, issues=tuple(issues))
 
 
+def _bytes(value: str | bytes, *, name: str) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return b""
+    if text.startswith("0x"):
+        text = text[2:]
+    if len(text) % 2:
+        raise StableVaultConfigError(f"{name} hex data must have an even length")
+    try:
+        return bytes.fromhex(text)
+    except ValueError as exc:
+        raise StableVaultConfigError(f"{name} must be hex bytes") from exc
+
+
+def _uint(value: int | str, *, name: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise StableVaultConfigError(f"{name} must be an integer") from exc
+    if parsed < 0:
+        raise StableVaultConfigError(f"{name} cannot be negative")
+    return parsed
+
+
+def _encode_call(signature: str, types: list[str], values: list[Any]) -> str:
+    """Encode a Stable Vault call without connecting to an RPC or wallet."""
+    from eth_abi import encode
+    from web3 import Web3
+
+    selector = Web3.keccak(text=signature)[:4]
+    return "0x" + (selector + encode(types, values)).hex()
+
+
+def _unsigned_tx(*, chain_id: int, vault: str, data: str) -> dict[str, Any]:
+    return {
+        "to": _address(vault, name="vault"),
+        "data": data,
+        "value": "0",
+        "chainId": int(chain_id),
+    }
+
+
+def build_deposit_tx(
+    *,
+    chain_id: int,
+    vault: str,
+    user: str,
+    asset: str,
+    amount: int | str,
+    policy_data: str | bytes = b"",
+) -> dict[str, Any]:
+    """Build an unsigned Stable Vault deposit transaction.
+
+    The ERC-20 allowance and the caller's wallet signature remain explicit.
+    """
+    return _unsigned_tx(
+        chain_id=chain_id,
+        vault=vault,
+        data=_encode_call(
+            "deposit(address,address,uint256,bytes)",
+            ["address", "address", "uint256", "bytes"],
+            [
+                _address(user, name="user"),
+                _address(asset, name="asset"),
+                _uint(amount, name="amount"),
+                _bytes(policy_data, name="policy_data"),
+            ],
+        ),
+    )
+
+
+def build_request_withdrawal_tx(
+    *,
+    chain_id: int,
+    vault: str,
+    user: str,
+    requested_amount_ray: int | str,
+    policy_data: str | bytes = b"",
+) -> dict[str, Any]:
+    """Build an unsigned Stable Vault withdrawal-request transaction."""
+    return _unsigned_tx(
+        chain_id=chain_id,
+        vault=vault,
+        data=_encode_call(
+            "requestWithdrawal(address,uint256,bytes)",
+            ["address", "uint256", "bytes"],
+            [
+                _address(user, name="user"),
+                _uint(requested_amount_ray, name="requested_amount_ray"),
+                _bytes(policy_data, name="policy_data"),
+            ],
+        ),
+    )
+
+
+def build_execute_withdrawal_tx(
+    *,
+    chain_id: int,
+    vault: str,
+    user: str,
+    asset_out: str,
+    min_amount_out: int | str,
+    iou_amount_ray: int | str,
+    policy_data: str | bytes = b"",
+) -> dict[str, Any]:
+    """Build an unsigned Stable Vault withdrawal-execution transaction."""
+    return _unsigned_tx(
+        chain_id=chain_id,
+        vault=vault,
+        data=_encode_call(
+            "executeWithdrawal(address,address,uint256,uint256,bytes)",
+            ["address", "address", "uint256", "uint256", "bytes"],
+            [
+                _address(user, name="user"),
+                _address(asset_out, name="asset_out"),
+                _uint(min_amount_out, name="min_amount_out"),
+                _uint(iou_amount_ray, name="iou_amount_ray"),
+                _bytes(policy_data, name="policy_data"),
+            ],
+        ),
+    )
+
+
 def load_validated_stable_vaults() -> list[dict[str, Any]]:
     return [validate_stable_vault(config).as_dict() for config in load_stable_vaults_from_env()]
