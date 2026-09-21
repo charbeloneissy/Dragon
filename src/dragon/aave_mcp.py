@@ -664,7 +664,7 @@ class AaveMCPClient:
 
 
 def _candidate_market_dicts(payload: Any) -> list[dict[str, Any]]:
-    """Extract canonical Aave Reserve objects from MCP output.
+    """Extract canonical Aave Reserve objects from MCP output across current and legacy MCP shapes.
 
     Aave MCP returns reserves with identity nested under:
       reserve.market.{address,chainId}
