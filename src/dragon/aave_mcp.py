@@ -1,0 +1,363 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import time
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from typing import Any
+
+import httpx
+
+
+DEFAULT_STABLECOINS = (
+    "USDC",
+    "USDT",
+    "DAI",
+    "GHO",
+    "USDe",
+    "USDS",
+    "PYUSD",
+    "FRAX",
+    "crvUSD",
+)
+
+_READ_TOOLS = {
+    "get_chains",
+    "get_markets",
+    "get_reserve_details",
+    "get_apy_history",
+    "get_hubs",
+    "get_hub_assets",
+}
+
+
+class AaveMCPError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class AaveMarketSnapshot:
+    version: str
+    chain_id: int | None
+    chain: str
+    symbol: str
+    reserve_id: str | None
+    supply_apy_pct: Decimal | None
+    available_liquidity: Decimal | None
+    utilization_pct: Decimal | None
+    supply_cap: Decimal | None
+    borrow_cap: Decimal | None
+    frozen: bool
+    paused: bool
+    rewards: tuple[dict[str, Any], ...]
+    raw: dict[str, Any]
+
+    @property
+    def incentive_apy_pct(self) -> Decimal:
+        total = Decimal("0")
+        for reward in self.rewards:
+            value = reward.get("extraApy")
+            if value is None:
+                continue
+            parsed = _pct(value)
+            if parsed is not None:
+                total += parsed
+        return total
+
+    @property
+    def displayed_apy_pct(self) -> Decimal | None:
+        if self.supply_apy_pct is None:
+            return None
+        return self.supply_apy_pct + self.incentive_apy_pct
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "chain_id": self.chain_id,
+            "chain": self.chain,
+            "symbol": self.symbol,
+            "reserve_id": self.reserve_id,
+            "supply_apy_pct": _string(self.supply_apy_pct),
+            "incentive_apy_pct": _string(self.incentive_apy_pct),
+            "displayed_apy_pct": _string(self.displayed_apy_pct),
+            "available_liquidity": _string(self.available_liquidity),
+            "utilization_pct": _string(self.utilization_pct),
+            "supply_cap": _string(self.supply_cap),
+            "borrow_cap": _string(self.borrow_cap),
+            "frozen": self.frozen,
+            "paused": self.paused,
+            "rewards": list(self.rewards),
+        }
+
+
+def _string(value: Decimal | None) -> str | None:
+    return None if value is None else str(value)
+
+
+def _pct(value: Any) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, dict):
+        for key in ("value", "pct", "percentage", "amount"):
+            if key in value:
+                return _pct(value[key])
+        return None
+    try:
+        return Decimal(str(value).replace("%", "").strip())
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def _decimal(value: Any) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, dict):
+        for key in ("value", "amount", "usd", "raw"):
+            if key in value:
+                return _decimal(value[key])
+        return None
+    try:
+        value = Decimal(str(value).replace(",", "").strip())
+        return value if value.is_finite() else None
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def _bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _deep_get(item: Any, *names: str) -> Any:
+    if not isinstance(item, dict):
+        return None
+    lowered = {str(k).lower(): v for k, v in item.items()}
+    for name in names:
+        if name.lower() in lowered:
+            return lowered[name.lower()]
+    for value in item.values():
+        if isinstance(value, dict):
+            found = _deep_get(value, *names)
+            if found is not None:
+                return found
+    return None
+
+
+def _walk_dicts(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for nested in value.values():
+            yield from _walk_dicts(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _walk_dicts(nested)
+
+
+def _unwrap_result(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    for key in ("structuredContent", "data"):
+        if key in value:
+            return _unwrap_result(value[key])
+    if "content" in value and isinstance(value["content"], list):
+        texts = [x.get("text") for x in value["content"] if isinstance(x, dict) and x.get("text")]
+        for text in texts:
+            try:
+                return json.loads(text)
+            except Exception:
+                continue
+    return value
+
+
+class AaveMCPClient:
+    """Read-only client for Aave's official MCP market-data tools.
+
+    Dragon intentionally exposes only read calls here. It never invokes
+    prepare_action, submit_signed_order, or any signing/transaction flow.
+    """
+
+    def __init__(self, url: str | None = None):
+        self.url = (url or os.getenv("AAVE_MCP_URL", "https://mcp.aave.com")).rstrip("/")
+        self.timeout = max(2.0, float(os.getenv("AAVE_MCP_TIMEOUT_SECONDS", "8")))
+        self.cache_seconds = max(5.0, float(os.getenv("AAVE_MCP_CACHE_SECONDS", "60")))
+        self.max_attempts = max(1, min(4, int(os.getenv("AAVE_MCP_MAX_ATTEMPTS", "3"))))
+        self._request_id = 0
+        self._lock = asyncio.Lock()
+        self._cache: dict[str, tuple[float, Any]] = {}
+
+    async def call(self, tool: str, arguments: dict[str, Any]) -> Any:
+        if tool not in _READ_TOOLS:
+            raise AaveMCPError(f"tool {tool!r} is not allowed in Dragon's read-only Aave adapter")
+
+        cache_key = json.dumps([tool, arguments], sort_keys=True, separators=(",", ":"))
+        now = time.monotonic()
+        cached = self._cache.get(cache_key)
+        if cached and now - cached[0] < self.cache_seconds:
+            return cached[1]
+
+        async with self._lock:
+            self._request_id += 1
+            request_id = self._request_id
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments},
+        }
+
+        last_error: Exception | None = None
+        for attempt in range(self.max_attempts):
+            try:
+                async with httpx.AsyncClient(
+                    timeout=self.timeout,
+                    headers={
+                        "content-type": "application/json",
+                        "accept": "application/json, text/event-stream",
+                    },
+                ) as client:
+                    response = await client.post(self.url + "/", json=payload)
+
+                if response.status_code == 429:
+                    retry_after = max(0.25, min(5.0, float(response.headers.get("retry-after", "1"))))
+                    await asyncio.sleep(retry_after)
+                    continue
+
+                response.raise_for_status()
+                body = response.json()
+                if "error" in body:
+                    raise AaveMCPError(str(body["error"]))
+
+                result = _unwrap_result(body.get("result", body))
+                self._cache[cache_key] = (time.monotonic(), result)
+                return result
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 < self.max_attempts:
+                    await asyncio.sleep(min(2.0, 0.25 * (attempt + 1)))
+
+        raise AaveMCPError(f"Aave MCP {tool} failed: {last_error}") from last_error
+
+    async def get_markets(self, version: str = "all", symbols: list[str] | None = None) -> Any:
+        args: dict[str, Any] = {"version": version}
+        if symbols:
+            args["symbols"] = symbols
+        return await self.call("get_markets", args)
+
+    async def get_chains(self, version: str = "all") -> Any:
+        return await self.call("get_chains", {"version": version})
+
+    async def get_reserve_details(self, version: str, reserve_id: str | None = None, market: str | None = None, token: str | None = None, chain_id: int | None = None) -> Any:
+        args: dict[str, Any] = {"version": version}
+        if reserve_id is not None:
+            args["reserveId"] = reserve_id
+        if market is not None:
+            args["market"] = market
+        if token is not None:
+            args["token"] = token
+        if chain_id is not None:
+            args["chainId"] = chain_id
+        return await self.call("get_reserve_details", args)
+
+
+def _candidate_market_dicts(payload: Any) -> list[dict[str, Any]]:
+    payload = _unwrap_result(payload)
+    candidates = []
+    for item in _walk_dicts(payload):
+        symbol = _deep_get(item, "symbol")
+        if symbol is None:
+            token = _deep_get(item, "token")
+            symbol = _deep_get(token, "symbol") if isinstance(token, dict) else None
+        supply = _deep_get(item, "supplyApy", "supplyAPY", "supplyRate")
+        reserve = _deep_get(item, "reserveId", "reserve_id")
+        if symbol is not None and (supply is not None or reserve is not None):
+            candidates.append(item)
+    return candidates
+
+
+def parse_markets(payload: Any, stablecoins: tuple[str, ...] = DEFAULT_STABLECOINS) -> list[AaveMarketSnapshot]:
+    allowed = {s.upper() for s in stablecoins}
+    rows: list[AaveMarketSnapshot] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for item in _candidate_market_dicts(payload):
+        symbol = _deep_get(item, "symbol")
+        if isinstance(symbol, dict):
+            symbol = symbol.get("symbol") or symbol.get("name")
+        symbol = str(symbol or "").strip()
+        if symbol.upper() not in allowed:
+            continue
+
+        version = str(_deep_get(item, "version", "protocolVersion", "aaveVersion") or "").lower()
+        if version not in {"v3", "v4"}:
+            # get_markets(version=all) may inherit the version on a parent object;
+            # leave it explicit as unknown rather than inventing a version.
+            version = "unknown"
+
+        chain_id_value = _deep_get(item, "chainId", "chain_id")
+        try:
+            chain_id = int(chain_id_value) if chain_id_value is not None else None
+        except (TypeError, ValueError):
+            chain_id = None
+
+        chain = str(_deep_get(item, "chain", "chainName", "network") or (chain_id or "unknown"))
+        reserve_id = _deep_get(item, "reserveId", "reserve_id")
+        key = (version, str(chain_id), f"{symbol}:{reserve_id}")
+        if key in seen:
+            continue
+        seen.add(key)
+
+        rewards = _deep_get(item, "rewards") or []
+        if isinstance(rewards, dict):
+            rewards = [rewards]
+
+        row = AaveMarketSnapshot(
+            version=version,
+            chain_id=chain_id,
+            chain=chain,
+            symbol=symbol,
+            reserve_id=str(reserve_id) if reserve_id is not None else None,
+            supply_apy_pct=_pct(_deep_get(item, "supplyApy", "supplyAPY", "supplyRate")),
+            available_liquidity=_decimal(_deep_get(item, "availableLiquidity", "available_liquidity", "liquidity")),
+            utilization_pct=_pct(_deep_get(item, "utilization", "utilizationPct", "utilizationPercentage")),
+            supply_cap=_decimal(_deep_get(item, "supplyCap", "supply_cap")),
+            borrow_cap=_decimal(_deep_get(item, "borrowCap", "borrow_cap")),
+            frozen=_bool(_deep_get(item, "isFrozen", "frozen")),
+            paused=_bool(_deep_get(item, "isPaused", "paused")),
+            rewards=tuple(r for r in rewards if isinstance(r, dict)),
+            raw=item,
+        )
+        rows.append(row)
+
+    return rows
+
+
+def rank_stablecoin_supply(rows: list[AaveMarketSnapshot]) -> list[AaveMarketSnapshot]:
+    eligible = [
+        row for row in rows
+        if not row.frozen and not row.paused and row.supply_apy_pct is not None
+        and (row.available_liquidity is None or row.available_liquidity > 0)
+    ]
+    return sorted(
+        eligible,
+        key=lambda row: (
+            row.displayed_apy_pct if row.displayed_apy_pct is not None else Decimal("-1"),
+            row.supply_apy_pct if row.supply_apy_pct is not None else Decimal("-1"),
+        ),
+        reverse=True,
+    )
+
+
+async def fetch_stablecoin_yields(client: AaveMCPClient | None = None, stablecoins: tuple[str, ...] = DEFAULT_STABLECOINS) -> list[AaveMarketSnapshot]:
+    client = client or AaveMCPClient()
+    payload = await client.get_markets(version="all", symbols=list(stablecoins))
+    return parse_markets(payload, stablecoins=stablecoins)
+
+
+async def fetch_best_stablecoin_yields(client: AaveMCPClient | None = None, stablecoins: tuple[str, ...] = DEFAULT_STABLECOINS, limit: int = 20) -> list[dict[str, Any]]:
+    rows = await fetch_stablecoin_yields(client, stablecoins=stablecoins)
+    return [row.as_dict() for row in rank_stablecoin_supply(rows)[:max(1, limit)]]
