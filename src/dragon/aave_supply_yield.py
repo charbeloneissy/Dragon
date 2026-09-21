@@ -43,7 +43,7 @@ def find_enterable_supply_candidates(
 ) -> list[AaveSupplyCandidate]:
     candidates: list[AaveSupplyCandidate] = []
     for row in rows:
-        if row.version != "v4":
+        if row.version not in {"v3", "v4"}:
             continue
         if row.reserve_id is None or row.chain_id is None:
             continue
