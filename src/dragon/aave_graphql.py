@@ -16,11 +16,36 @@ class AaveGraphQLError(RuntimeError):
 
 
 class AaveGraphQLClient:
-    """Low-level AaveKit v4 GraphQL client.
+    """Low-level AaveKit GraphQL client.
+
+    The same client also supports Aave V3/Horizon market reads.
+
 
     This client is transport/data-layer only. It can read AaveKit data and
     prepare transaction responses returned by GraphQL, but it never signs or
     broadcasts transactions.
+    """
+
+    HORIZON_MARKET_QUERY = """
+    query HorizonMarketData($request: MarketRequest!) {
+      market(request: $request) {
+        name
+        chain { name chainId }
+        address
+        totalMarketSize
+        totalAvailableLiquidity
+        reserves {
+          underlyingToken { symbol name address }
+          supplyInfo {
+            apy { formatted }
+            canBeCollateral
+          }
+          borrowInfo {
+            apy { formatted }
+          }
+        }
+      }
+    }
     """
 
     CHAINS_QUERY = """
@@ -292,6 +317,20 @@ class AaveGraphQLClient:
                     await asyncio.sleep(min(1.5, 0.2 * (attempt + 1)))
 
         raise AaveGraphQLError(f"AaveKit GraphQL request failed: {last_error}") from last_error
+
+    async def horizon_market(self) -> dict[str, Any] | None:
+        data = await self.query(
+            self.HORIZON_MARKET_QUERY,
+            {
+                "request": {
+                    "address": "0xAe05Cd22df81871bc7cC2a04BeCfb516bFe332C8",
+                    "chainId": 1,
+                }
+            },
+        )
+        value = data.get("market")
+        return value if isinstance(value, dict) else None
+
 
     async def spokes(self, request: dict[str, Any]) -> list[dict[str, Any]]:
         data = await self.query(self.SPOKES_QUERY, {"request": request})
