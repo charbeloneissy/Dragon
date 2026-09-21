@@ -38,6 +38,7 @@ from src.dragon.five_circle_engine import FiveCircleEngine
 from src.dragon.base_proof_engine import BaseProofEngine
 from src.dragon.base_atomic_simulator import BaseAtomicSimulator
 from src.dragon.solana_runtime import run_solana_world_state
+from src.dragon.solana_quote_runtime import run_solana_quotes
 
 STATE = {
     "status": "starting", "mode": "paper", "chains": [], "chain_details": {},
@@ -76,6 +77,7 @@ STATE = {
     "base_live": {},
     "five_circle": {"rotation": 0, "status": "waiting", "selected": None, "decisions": []},
     "solana_world_state": {"enabled": False, "status": "disabled", "slot": 0, "freshness_ms": 2147483647},
+    "solana_quotes": {"enabled": False, "status": "disabled", "pairs_configured": 0, "quotes": [], "last_update_ms": 0, "error": None},
 }
 LOCK = Lock()
 METRICS = ExecutionTelemetry()
@@ -1017,6 +1019,7 @@ async def main():
         aave_v4_task = asyncio.create_task(refresh_aave_v4())
         aave_v4_liquidity_task = asyncio.create_task(refresh_aave_v4_liquidity())
         solana_world_state_task = asyncio.create_task(run_solana_world_state(STATE, LOCK))
+        solana_quotes_task = asyncio.create_task(run_solana_quotes(STATE, LOCK))
 
         while True:
             try:
@@ -1322,6 +1325,12 @@ async def main():
             aave_supply_yield_task.cancel()
             try:
                 await aave_supply_yield_task
+            except asyncio.CancelledError:
+                pass
+        if "solana_quotes_task" in locals():
+            solana_quotes_task.cancel()
+            try:
+                await solana_quotes_task
             except asyncio.CancelledError:
                 pass
         if "solana_world_state_task" in locals():
