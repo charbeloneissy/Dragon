@@ -122,13 +122,14 @@ contract DragonAtomicExecutor is IAaveV3FlashLoanSimpleReceiver {
 
         uint256 finalBalance = IERC20(asset).balanceOf(address(this));
         uint256 repayment = amount + premium;
-        if (finalBalance < repayment + minProfit) revert InsufficientProfit();
+        if (finalBalance < beforeAsset + repayment + minProfit) revert InsufficientProfit();
+        uint256 profit = finalBalance - beforeAsset - repayment;
 
         if (!IERC20(asset).approve(address(pool), repayment)) {
             revert RepaymentFailed();
         }
 
-        emit AtomicExecution(asset, amount, premium, finalBalance - beforeAsset - premium);
+        emit AtomicExecution(asset, amount, premium, profit);
         return true;
     }
 
