@@ -36,6 +36,140 @@ class AaveGraphQLClient:
     }
     """
 
+
+
+    SPOKES_QUERY = """
+    query Spokes($request: SpokesRequest!) {
+      spokes(request: $request) {
+        id
+        name
+        address
+        chain { chainId name icon explorerUrl isTestnet nativeWrappedToken }
+        liquidationConfig {
+          targetHealthFactor
+          healthFactorForMaxBonus
+          liquidationBonusFactor { normalized value onChainValue decimals }
+        }
+        summary(currency: USD) {
+          totalBorrowed { value symbol decimals }
+          totalBorrowCap { value symbol decimals }
+          totalSupplied { value symbol decimals }
+          totalSupplyCap { value symbol decimals }
+          uniqueAssets
+          connectedHubs
+        }
+        connectedHubs(currency: USD) {
+          hub { id address name chain { chainId name explorerUrl } }
+          summary {
+            totalBorrowed { value symbol decimals }
+            totalSupplied { value symbol decimals }
+            creditLine { value symbol decimals }
+            creditUsed { normalized value onChainValue decimals }
+          }
+        }
+      }
+    }
+    """
+
+    RESERVES_QUERY = """
+    query Reserves($request: ReservesRequest!) {
+      value: reserves(request: $request) {
+        id
+        onChainId
+        chain { chainId name explorerUrl }
+        spoke { id name address chain { chainId name } }
+        asset {
+          id
+          token { chainId address name symbol decimals }
+          summary {
+            reservesCount
+            activeReservesCount
+            averageSupplyApy: supplyApy(metric: AVERAGE) { normalized value }
+            averageBorrowApy: borrowApy(metric: AVERAGE) { normalized value }
+          }
+          price(currency: USD) { current { value symbol decimals } }
+        }
+        summary {
+          supplied { amount { value decimals } }
+          borrowed { amount { value decimals } }
+          supplyApy { normalized value }
+          borrowApy { normalized value }
+        }
+        settings {
+          collateralFactor { normalized value }
+          maxLiquidationBonus { normalized value }
+          liquidationFee { normalized value }
+          collateralRisk { normalized value }
+          borrowable
+          collateral
+          suppliable
+          receiveSharesEnabled
+          latestDynamicConfigKey
+          borrowCap { amount { value decimals } }
+          supplyCap { amount { value decimals } }
+        }
+        status { frozen paused active }
+        canBorrow
+        canSupply
+        canUseAsCollateral
+        canSwapFrom
+      }
+    }
+    """
+
+    ASSET_QUERY = """
+    query Asset($request: AssetRequest!, $currency: Currency!, $timeWindow: TimeWindow!) {
+      value: asset(request: $request) {
+        id
+        token { chainId address name symbol decimals }
+        summary {
+          totalSupplyCap { amount { current { value decimals } } }
+          totalSupplied { amount { current { value decimals } } }
+          totalSuppliable { amount { current { value decimals } } }
+          totalBorrowCap { amount { current { value decimals } } }
+          totalBorrowed { amount { current { value decimals } } }
+          totalBorrowable { amount { current { value decimals } } }
+          reservesCount
+          activeReservesCount
+          averageSupplyApy: supplyApy(metric: AVERAGE) { normalized value }
+          averageBorrowApy: borrowApy(metric: AVERAGE) { normalized value }
+        }
+        price(currency: $currency) {
+          current { value symbol decimals }
+          change(window: $timeWindow) { normalized value }
+        }
+      }
+    }
+    """
+
+    MULTICHAIN_ASSET_QUERY = """
+    query MultichainAsset($request: MultichainAssetRequest!) {
+      value: multichainAsset(request: $request) {
+        assets {
+          id
+          token { chainId address name symbol decimals }
+        }
+        summary {
+          totalSupplied { value symbol decimals }
+          totalBorrowed { value symbol decimals }
+          totalSupplyCap { value symbol decimals }
+          totalBorrowCap { value symbol decimals }
+          totalAvailableLiquidity { value symbol decimals }
+          utilizationRate { normalized value }
+          highestSupplyApy { normalized value }
+          lowestSupplyApy { normalized value }
+          averageSupplyApy { normalized value }
+          highestBorrowApy { normalized value }
+          lowestBorrowApy { normalized value }
+          averageBorrowApy { normalized value }
+          chainCount
+          reservesCount
+          activeReservesCount
+        }
+      }
+    }
+    """
+
     PROCESSED_TX_QUERY = """
     query HasProcessedKnownTransaction($operations: [OperationType!]!, $txHash: TxHash!) {
       value: hasProcessedKnownTransaction(
@@ -90,6 +224,39 @@ class AaveGraphQLClient:
                     await asyncio.sleep(min(1.5, 0.2 * (attempt + 1)))
 
         raise AaveGraphQLError(f"AaveKit GraphQL request failed: {last_error}") from last_error
+
+    async def spokes(self, request: dict[str, Any]) -> list[dict[str, Any]]:
+        data = await self.query(self.SPOKES_QUERY, {"request": request})
+        rows = data.get("spokes", [])
+        if not isinstance(rows, list):
+            raise AaveGraphQLError("AaveKit spokes response was not a list")
+        return [row for row in rows if isinstance(row, dict)]
+
+    async def reserves(self, request: dict[str, Any]) -> list[dict[str, Any]]:
+        data = await self.query(self.RESERVES_QUERY, {"request": request})
+        rows = data.get("value", [])
+        if not isinstance(rows, list):
+            raise AaveGraphQLError("AaveKit reserves response was not a list")
+        return [row for row in rows if isinstance(row, dict)]
+
+    async def asset(
+        self,
+        request: dict[str, Any],
+        *,
+        currency: str = "USD",
+        time_window: str = "LAST_DAY",
+    ) -> dict[str, Any] | None:
+        data = await self.query(
+            self.ASSET_QUERY,
+            {"request": request, "currency": currency, "timeWindow": time_window},
+        )
+        value = data.get("value")
+        return value if isinstance(value, dict) else None
+
+    async def multichain_asset(self, request: dict[str, Any]) -> dict[str, Any] | None:
+        data = await self.query(self.MULTICHAIN_ASSET_QUERY, {"request": request})
+        value = data.get("value")
+        return value if isinstance(value, dict) else None
 
     async def chains(self) -> list[dict[str, Any]]:
         data = await self.query(self.CHAINS_QUERY)
