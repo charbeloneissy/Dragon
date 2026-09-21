@@ -27,7 +27,17 @@ services:
       - key: DEX_CHAINS
         value: "8453"
       - key: NONEVM_CHAINS
-        value: ""
+        value: "solana"
+      - key: HELIUS_API_KEY
+        sync: false
+      - key: HELIUS_RPC_URL
+        value: "https://mainnet.helius-rpc.com/"
+      - key: HELIUS_API_URL
+        value: "https://api.helius.xyz"
+      - key: HELIUS_TIMEOUT_SECONDS
+        value: "8"
+      - key: HELIUS_REFRESH_SECONDS
+        value: "5"
       - key: JUPITER_QUOTE_URL
         value: "https://api.jup.ag/swap/v1/quote"
       - key: ALCHEMY_API_KEY
