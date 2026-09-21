@@ -36,6 +36,7 @@ from src.dragon.dragon_core import DragonCore, ChainState, EconomicCandidate
 from src.dragon.base_live import BaseLiveReader
 from src.dragon.five_circle_engine import FiveCircleEngine
 from src.dragon.base_proof_engine import BaseProofEngine
+from src.dragon.base_atomic_simulator import BaseAtomicSimulator
 
 STATE = {
     "status": "starting", "mode": "paper", "chains": [], "chain_details": {},
@@ -900,6 +901,7 @@ async def main():
         economic_agent = EconomicDecisionAgent(history_size=int(os.getenv("ECONOMIC_AGENT_HISTORY_SIZE", "256")), min_profit=min_profit)
         dragon_core = DragonCore(min_profit=min_profit)
         proof_engine = BaseProofEngine(min_profit=min_profit)
+    atomic_simulator = BaseAtomicSimulator(min_profit=min_profit)
         five_circle = FiveCircleEngine(
             min_profit=min_profit,
             gas_stress_bps=env_decimal("DRAGON_CHALLENGE_GAS_BPS", "2000"),
@@ -1159,6 +1161,7 @@ async def main():
                 base_block = int(STATE.get("base_live", {}).get("block_number", 0))
                 base_candidates = [opp for opp, _label in all_found if getattr(opp, "chain_id", None) == 8453]
                 proof_passed = False
+                atomic_result = None
                 proof_candidate = max(base_candidates, key=lambda x: Decimal(str(getattr(x, "net_profit_quote", "-Infinity"))), default=None)
                 if proof_candidate is not None:
                     try:
@@ -1170,6 +1173,15 @@ async def main():
                             slippage_bps=slippage,
                         )
                         proof_passed = bool(proof.passed)
+                        if proof_passed:
+                            atomic_result = await to_thread(
+                                atomic_simulator.simulate,
+                                adapter=adapter,
+                                opportunity=proof_candidate,
+                                taker=taker,
+                                slippage_bps=slippage,
+                            )
+                            proof_passed = bool(atomic_result.passed)
                     except Exception:
                         logging.exception("Base proof gate failed")
                 circle_result = five_circle.run(
@@ -1182,7 +1194,8 @@ async def main():
                 with LOCK:
                     STATE["five_circle"] = {
                         "rotation": rotation,
-                        "status": "ready_for_simulation" if circle_result.decisions[-1].circle == "PROVE" else ("candidate_survived" if circle_result.selected else "rejected"),
+                        "status": "atomic_simulation_passed" if atomic_result is not None and atomic_result.passed else ("ready_for_atomic_simulation" if proof_candidate is not None else "rejected"),
+                        "atomic_simulation": None if atomic_result is None else {"passed": atomic_result.passed, "block_number": atomic_result.block_number, "gas_estimate": atomic_result.gas_estimate, "reason": atomic_result.reason, "target": atomic_result.target},
                         "selected": None if circle_result.selected is None else {
                             "buy_source": getattr(circle_result.selected, "buy_source", None),
                             "sell_source": getattr(circle_result.selected, "sell_source", None),
