@@ -49,6 +49,8 @@ STATE = {
     "aave_stable_vaults_enabled": False, "aave_stable_vaults": [], "aave_stable_vault_error": None,
     "aave_v4_enabled": False, "aave_v4_chains": [], "aave_v4_arc": None, "aave_v4_last_update": None,
     "aave_v4_error": None, "aave_v4_liquidity": {"spokes": [], "reserves": []}, "aave_v4_liquidity_error": None,
+    "aave_horizon_enabled": False, "aave_horizon_last_update": None,
+    "aave_horizon_error": None, "aave_horizon_market": None,
     "aave_agent": {"workflow": AAVE_AGENT_WORKFLOW, "sources": AAVE_AGENT_SOURCES, "policy": "discover-inspect-simulate-build-wallet-sign-confirm"},
     "aave_address_book": aave_address_snapshot(),
     "data_source": "multi-chain cross-DEX executable quotes (EVM + non-EVM) + Aave MCP read-only market data",
@@ -108,6 +110,24 @@ class Handler(BaseHTTPRequestHandler):
                 "enabled": payload.get("aave_v4_enabled", False),
                 "error": payload.get("aave_v4_liquidity_error"),
                 "liquidity": payload.get("aave_v4_liquidity", {"spokes": [], "reserves": []}),
+            }, default=str).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == "/api/aave/horizon":
+            body = json.dumps({
+                "enabled": payload.get("aave_horizon_enabled", False),
+                "last_update": payload.get("aave_horizon_last_update"),
+                "error": payload.get("aave_horizon_error"),
+                "market": payload.get("aave_horizon_market"),
+                "unsigned_only": True,
+                "market_address": "0xAe05Cd22df81871bc7cC2a04BeCfb516bFe332C8",
+                "chain_id": 1,
             }, default=str).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -411,6 +431,44 @@ async def refresh_aave_v4_liquidity():
             logging.warning(
                 "AaveKit V4 liquidity refresh failed: %s: %s",
                 type(exc).__name__, exc,
+            )
+        await asyncio.sleep(interval)
+
+
+async def refresh_aave_horizon():
+    """Refresh the Aave Horizon V3 market off the latency-critical DEX path."""
+    enabled = env_bool("AAVE_HORIZON_ENABLED", True)
+    interval = max(30.0, float(os.getenv("AAVE_HORIZON_REFRESH_SECONDS", "60")))
+    client = AaveGraphQLClient()
+    with LOCK:
+        STATE["aave_horizon_enabled"] = enabled
+    if not enabled:
+        return
+
+    while True:
+        try:
+            market = await client.horizon_market()
+            if not isinstance(market, dict):
+                raise RuntimeError("Aave Horizon GraphQL returned no market")
+            with LOCK:
+                STATE["aave_horizon_market"] = market
+                STATE["aave_horizon_last_update"] = time.time()
+                STATE["aave_horizon_error"] = None
+            reserves = market.get("reserves") or []
+            logging.info(
+                "Aave Horizon refreshed reserves=%s liquidity=%s",
+                len(reserves),
+                market.get("totalAvailableLiquidity"),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            with LOCK:
+                STATE["aave_horizon_error"] = f"{type(exc).__name__}: {exc}"
+            logging.warning(
+                "Aave Horizon refresh failed: %s: %s",
+                type(exc).__name__,
+                exc,
             )
         await asyncio.sleep(interval)
 
@@ -788,6 +846,7 @@ async def main():
         logging.info("Dragon multi-chain ready chains=%s venues=%s min_profit=%s", list(chain_details.keys()), total_venues, min_profit)
 
         aave_task = asyncio.create_task(refresh_aave_mcp())
+        aave_horizon_task = asyncio.create_task(refresh_aave_horizon())
         aave_supply_yield_task = asyncio.create_task(refresh_aave_supply_yield())
         aave_umbrella_task = asyncio.create_task(refresh_aave_umbrella())
         aave_v4_task = asyncio.create_task(refresh_aave_v4())
@@ -934,6 +993,12 @@ async def main():
                 with LOCK:
                     STATE["status"] = "running"
     finally:
+        if "aave_horizon_task" in locals():
+            aave_horizon_task.cancel()
+            try:
+                await aave_horizon_task
+            except asyncio.CancelledError:
+                pass
         if "aave_umbrella_task" in locals():
             aave_umbrella_task.cancel()
             try:
