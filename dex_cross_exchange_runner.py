@@ -20,6 +20,7 @@ from src.dragon.universe import universe_payload
 from src.dragon.venues import venues_for
 from src.dragon.hash_utils import opportunity_hash
 from src.dragon.aave_mcp import AaveMCPClient, DEFAULT_STABLECOINS, fetch_best_stablecoin_yields
+from src.dragon.aave_graphql import AAVE_V4_ARC_CHAIN_ID, AaveGraphQLClient
 from src.dragon.aave_stable_vault import load_validated_stable_vaults
 from src.dragon.aave_flash import env_flash_loan_config, validate_config as validate_flash_loan_config
 
@@ -36,6 +37,8 @@ STATE = {
     "aave_mcp_enabled": False, "aave_mcp_last_update": None,
     "aave_mcp_error": None, "aave_stable_yields": [], "aave_stable_markets": 0,
     "aave_stable_vaults_enabled": False, "aave_stable_vaults": [], "aave_stable_vault_error": None,
+    "aave_v4_enabled": False, "aave_v4_chains": [], "aave_v4_arc": None, "aave_v4_last_update": None,
+    "aave_v4_error": None,
     "data_source": "multi-chain cross-DEX executable quotes (EVM + non-EVM) + Aave MCP read-only market data",
 }
 LOCK = Lock()
@@ -73,6 +76,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
             return
+        if path == "/api/aave/v4/chains":
+            body = json.dumps({
+                "enabled": payload.get("aave_v4_enabled", False),
+                "last_update": payload.get("aave_v4_last_update"),
+                "error": payload.get("aave_v4_error"),
+                "chains": payload.get("aave_v4_chains", []),
+                "arc": payload.get("aave_v4_arc"),
+            }, default=str).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if path == "/api/aave/stable-vaults":
             body = json.dumps({
                 "enabled": payload.get("aave_stable_vaults_enabled", False),
@@ -285,6 +304,38 @@ def merge_rejections(stats):
     with LOCK:
         for key, value in stats.items():
             STATE["rejections"][key] = int(value)
+
+async def refresh_aave_v4():
+    """Refresh AaveKit v4 chain metadata without blocking DEX scans."""
+    enabled = env_bool("AAVE_V4_GRAPHQL_ENABLED", True)
+    interval = max(30.0, float(os.getenv("AAVE_V4_GRAPHQL_REFRESH_SECONDS", "60")))
+    client = AaveGraphQLClient()
+    with LOCK:
+        STATE["aave_v4_enabled"] = enabled
+    if not enabled:
+        return
+
+    while True:
+        try:
+            rows = await client.chains()
+            arc = next(
+                (row for row in rows if int(row.get("chainId", -1)) == AAVE_V4_ARC_CHAIN_ID),
+                None,
+            )
+            with LOCK:
+                STATE["aave_v4_chains"] = rows
+                STATE["aave_v4_arc"] = arc
+                STATE["aave_v4_last_update"] = time.time()
+                STATE["aave_v4_error"] = None
+            logging.info("AaveKit v4 refreshed chains=%s arc=%s", len(rows), bool(arc))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            with LOCK:
+                STATE["aave_v4_error"] = f"{type(exc).__name__}: {exc}"
+            logging.warning("AaveKit v4 refresh failed: %s: %s", type(exc).__name__, exc)
+        await asyncio.sleep(interval)
+
 
 async def refresh_aave_mcp():
     """Refresh Aave V3/V4 stablecoin market data without blocking DEX scans."""
@@ -534,6 +585,7 @@ async def main():
         logging.info("Dragon multi-chain ready chains=%s venues=%s min_profit=%s", list(chain_details.keys()), total_venues, min_profit)
 
         aave_task = asyncio.create_task(refresh_aave_mcp())
+        aave_v4_task = asyncio.create_task(refresh_aave_v4())
 
         while True:
             try:
@@ -680,6 +732,12 @@ async def main():
             aave_task.cancel()
             try:
                 await aave_task
+            except asyncio.CancelledError:
+                pass
+        if "aave_v4_task" in locals():
+            aave_v4_task.cancel()
+            try:
+                await aave_v4_task
             except asyncio.CancelledError:
                 pass
         if adapter is not None:
