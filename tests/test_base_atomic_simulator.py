@@ -9,8 +9,7 @@ def test_simulator_requires_deployed_executor(monkeypatch):
     result = sim.simulate(
         adapter=object(),
         opportunity=type("O", (), {"chain_id": 8453})(),
-        first_execution=object(),
-        second_execution=object(),
+        taker="0x0000000000000000000000000000000000000001",
     )
     assert not result.passed
     assert "not configured" in result.reason
