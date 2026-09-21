@@ -60,6 +60,7 @@ class TriangularEngine:
         self.quote_decimals = int(quote_decimals)
         self.flash_fee_bps = Decimal(flash_fee_bps)
         self.native_to_quote_rate = Decimal(native_to_quote_rate)
+        self.max_quote_age_ms = Decimal(max_quote_age_ms)
         self.max_workers = max(3, int(max_workers))
         self._brains: dict[tuple[int, str, str, str], LegBrain] = {}
         self.last_best: dict[TriangularRoute, TriangularOpportunity] = {}
@@ -71,7 +72,7 @@ class TriangularEngine:
 
     @property
     def _max_age(self) -> Decimal:
-        return Decimal("500")
+        return self.max_quote_age_ms
 
     @staticmethod
     def candidate_amounts(max_amount: int, *, points: int = 9) -> tuple[int, ...]:
@@ -126,16 +127,57 @@ class TriangularEngine:
             return None
 
     def optimize(self, routes: Iterable[TriangularRoute], max_amount: int) -> list[TriangularOpportunity]:
-        candidates: list[TriangularOpportunity] = []
-        for route in routes:
-            best = None
-            for amount in self.candidate_amounts(max_amount):
+        """Explore the profit surface, refine around the best point, then gate.
+
+        The coarse grid is deliberately allowed to be negative. A negative
+        coarse point must never hide a profitable local peak caused by AMM
+        price impact. Every refinement re-quotes all three legs using the exact
+        output of the previous leg.
+        """
+        route_list = tuple(routes)
+        coarse = self.candidate_amounts(max_amount)
+        if not route_list or not coarse:
+            return []
+
+        def evaluate_route(route: TriangularRoute) -> TriangularOpportunity | None:
+            best: TriangularOpportunity | None = None
+            for amount in coarse:
                 candidate = self.evaluate(route, amount)
                 if candidate is not None and (best is None or candidate.net_profit_quote > best.net_profit_quote):
                     best = candidate
-            if best is not None and best.net_profit_quote >= self.min_profit:
-                self.last_best[route] = best
-                candidates.append(best)
+            if best is None:
+                return None
+
+            # Local refinement around the best observed size. Keep the search
+            # bounded so aggressive discovery cannot turn into unbounded RPC
+            # fan-out.
+            ordered = tuple(sorted(coarse))
+            idx = min(range(len(ordered)), key=lambda i: abs(ordered[i] - best.quote_amount))
+            lo = ordered[max(0, idx - 1)]
+            hi = ordered[min(len(ordered) - 1, idx + 1)]
+            if hi > lo:
+                span = hi - lo
+                refined = {
+                    max(1, lo + (span * n) // 8)
+                    for n in range(1, 8)
+                }
+                for amount in sorted(refined):
+                    candidate = self.evaluate(route, amount)
+                    if candidate is not None and candidate.net_profit_quote > best.net_profit_quote:
+                        best = candidate
+
+            return best
+
+        candidates: list[TriangularOpportunity] = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            for best in pool.map(evaluate_route, route_list):
+                # Hard gate is applied only after the complete profit-surface
+                # search/refinement for this route.
+                if best is not None:
+                    self.last_best[best.route] = best
+                    if best.net_profit_quote >= self.min_profit:
+                        candidates.append(best)
+
         return sorted(candidates, key=lambda x: x.net_profit_quote, reverse=True)
 
     @staticmethod
