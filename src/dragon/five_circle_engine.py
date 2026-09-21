@@ -106,7 +106,7 @@ class FiveCircleEngine:
             rotation=rotation,
             chain_id=chain_id,
             block_number=block_number,
-            min_profit=self.min_profit,
+            min_profit_quote=self.min_profit,
             gas_stress_bps=self.gas_stress_bps,
             execution_stress_bps=self.execution_stress_bps,
             max_candidates=self.max_candidates,
