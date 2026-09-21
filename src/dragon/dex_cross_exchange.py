@@ -4,7 +4,7 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Iterable
 
@@ -30,6 +30,7 @@ class DexOpportunity:
     first_leg: DexExecution
     second_leg: DexExecution
     compound_amount: int = 0
+    flash_multiplier: Decimal = Decimal("0")
 
     @property
     def flash_loan_amount(self) -> int:
@@ -370,6 +371,12 @@ class DexCrossExchangeEngine:
             )
             return []
         best = max(profitable, key=lambda x: (x.net_profit_quote, x.net_profit_quote / Decimal(x.quote_amount)))
+        # Compute the multiplier only after route selection and executable-size
+        # optimization. 1x equals the minimum 5% sizing probe.
+        minimum_probe = max(Decimal("1"), Decimal(max_quote_amount) * Decimal("0.05"))
+        selected_human = Decimal(best.quote_amount) / (Decimal(10) ** self.quote_token_decimals)
+        multiplier = selected_human / minimum_probe
+        best = replace(best, flash_multiplier=multiplier)
         self._metric("optimal_size_found")
         logging.info(
             "DEX dynamic optimizer selected buy=%s sell=%s base=%s amount_raw=%s net=%s",
