@@ -5,7 +5,7 @@ from src.dragon.aave_graphql import AAVE_HORIZON_POOL_ADDRESS, AaveGraphQLClient
 
 class StubHorizonClient(AaveGraphQLClient):
     def __init__(self, payload):
-        super().__init__(v3_url="https://example.invalid/graphql", v3_url=None)
+        super().__init__(v3_url="https://example.invalid/graphql")
         self.payload = payload
 
     async def query_v3(self, query, variables=None):
