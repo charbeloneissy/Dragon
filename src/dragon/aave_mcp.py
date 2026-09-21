@@ -28,15 +28,55 @@ _READ_TOOLS = {
     "get_chains",
     "get_markets",
     "get_reserve_details",
+    "get_emode_categories",
     "get_apy_history",
+    "get_protocol_history",
     "get_hubs",
     "get_hub_assets",
+    "get_user_positions",
+    "get_position_items",
+    "get_user_summary",
+    "get_user_summary_history",
+    "get_user_activity",
+    "get_transaction_processed",
+    "get_user_rewards",
+    "get_swappable_tokens",
+    "get_swap_quote",
+    "get_pending_orders",
+    "get_order_status",
+    "get_sgho_vault",
+    "get_sgho_preview",
+    "search_governance_proposals",
+    "get_governance_proposal",
+    "get_proposal_votes",
+    "get_user_vote",
+    "get_proposal_payloads",
+    "get_started",
+    "get_aave_guide",
+    "tools/list",
 }
 
-_PREPARE_TOOLS = {
+# These tools only prepare/simulate. They never sign or relay a transaction.
+_UNSIGNED_TOOLS = {
+    "preview_action",
+    "prepare_action",
+    "prepare_set_collateral",
+    "prepare_set_emode",
+    "prepare_liquidation",
+    "prepare_claim_rewards",
+    "prepare_order",
+    "prepare_cancel_order",
+    "prepare_sgho_action",
+    "prepare_stkgho_migrate",
     "vaultSetFee",
     "vaultWithdrawFees",
     "vaultTransferOwnership",
+}
+
+# Explicitly rejected because they relay a signature or cancellation to a live order.
+_BLOCKED_TOOLS = {
+    "submit_signed_order",
+    "cancel_order",
 }
 
 
@@ -186,10 +226,11 @@ def _unwrap_result(value: Any) -> Any:
 
 
 class AaveMCPClient:
-    """Read-only client for Aave's official MCP market-data tools.
+    """Safe client for Aave's official MCP server.
 
-    Dragon intentionally exposes only read calls here. It never invokes
-    prepare_action, submit_signed_order, or any signing/transaction flow.
+    Dragon may read live protocol data, simulate actions, and prepare unsigned
+    transactions. It never signs, relays signed orders, or stores private keys.
+    The live tools/list inventory is authoritative when server capabilities change.
     """
 
     def __init__(self, url: str | None = None):
@@ -202,10 +243,12 @@ class AaveMCPClient:
         self._cache: dict[str, tuple[float, Any]] = {}
 
     async def call(self, tool: str, arguments: dict[str, Any]) -> Any:
-        if tool not in _READ_TOOLS and tool not in _PREPARE_TOOLS:
+        if tool in _BLOCKED_TOOLS:
+            raise AaveMCPError(f"tool {tool!r} is blocked because it relays signed state-changing requests")
+        if tool not in _READ_TOOLS and tool not in _UNSIGNED_TOOLS:
             raise AaveMCPError(f"tool {tool!r} is not allowed in Dragon's Aave adapter")
-        if tool in _PREPARE_TOOLS:
-            logging.info("Aave Vault prepare-only call tool=%s; no signing or broadcast is performed", tool)
+        if tool in _UNSIGNED_TOOLS:
+            logging.info("Aave unsigned/simulation call tool=%s; no signing or broadcast is performed", tool)
 
         cache_key = json.dumps([tool, arguments], sort_keys=True, separators=(",", ":"))
         now = time.monotonic()
@@ -257,6 +300,75 @@ class AaveMCPClient:
                     await asyncio.sleep(min(2.0, 0.25 * (attempt + 1)))
 
         raise AaveMCPError(f"Aave MCP {tool} failed: {last_error}") from last_error
+
+    async def list_tools(self) -> Any:
+        """Return the server's live tools/list inventory.
+
+        Aave's documentation states that tools/list is authoritative when its
+        schema differs from static documentation.
+        """
+        return await self._rpc_request("tools/list", {})
+
+    async def _rpc_request(self, method: str, params: dict[str, Any]) -> Any:
+        async with self._lock:
+            self._request_id += 1
+            request_id = self._request_id
+        payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+        last_error: Exception | None = None
+        for attempt in range(self.max_attempts):
+            try:
+                async with httpx.AsyncClient(
+                    timeout=self.timeout,
+                    headers={
+                        "content-type": "application/json",
+                        "accept": "application/json, text/event-stream",
+                    },
+                ) as client:
+                    response = await client.post(self.url + "/", json=payload)
+                if response.status_code == 429:
+                    retry_after = max(0.25, min(5.0, float(response.headers.get("retry-after", "1"))))
+                    await asyncio.sleep(retry_after)
+                    continue
+                response.raise_for_status()
+                body = response.json()
+                if "error" in body:
+                    raise AaveMCPError(str(body["error"]))
+                return _unwrap_result(body.get("result", body))
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 < self.max_attempts:
+                    await asyncio.sleep(min(2.0, 0.25 * (attempt + 1)))
+        raise AaveMCPError(f"Aave MCP {method} failed: {last_error}") from last_error
+
+    async def preview_action(self, **arguments: Any) -> Any:
+        """Simulate a protocol action without executing it."""
+        return await self.call("preview_action", arguments)
+
+    async def prepare_action(self, *, simulation: dict[str, Any], **arguments: Any) -> Any:
+        """Prepare an unsigned action only after a caller supplies a clean simulation."""
+        if not isinstance(simulation, dict):
+            raise ValueError("simulation must be the preview_action result")
+        warnings = simulation.get("warnings") or []
+        if any(isinstance(w, dict) and str(w.get("level", "")).lower() == "error" for w in warnings):
+            raise AaveMCPError("preview_action returned an error warning; refusing to build")
+        if not simulation.get("_dragon_simulation_ok", True):
+            raise AaveMCPError("simulation was not marked successful")
+        return await self.call("prepare_action", arguments)
+
+    async def get_user_positions(self, *, user: str, version: str = "all") -> Any:
+        return await self.call("get_user_positions", {"user": user, "version": version})
+
+    async def get_user_summary(self, *, user: str, version: str = "all") -> Any:
+        return await self.call("get_user_summary", {"user": user, "version": version})
+
+    async def get_transaction_processed(self, *, transaction_hash: str) -> Any:
+        return await self.call("get_transaction_processed", {"transactionHash": transaction_hash, "version": "v4"})
+
+    async def get_sgho_vault(self, *, user: str | None = None) -> Any:
+        args: dict[str, Any] = {"version": "v3"}
+        if user:
+            args["user"] = user
+        return await self.call("get_sgho_vault", args)
 
     async def vault_set_fee(
         self,
