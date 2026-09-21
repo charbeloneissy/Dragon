@@ -38,3 +38,5 @@ Aave intelligence and safety refreshes remain off the 500 ms DEX quote path. The
 - Skills snapshot: b21a0345f47f5fb8337d6769f927b7b56ff3943a
 - Address Book: https://github.com/aave-dao/aave-address-book
 - Aave V4: https://github.com/aave/aave-v4
+- `src/dragon/aave_101.py` keeps Aave lending semantics (supply/borrow/collateral/liquidation) separate from Dragon's atomic flash-loan liquidity path; reserve flags follow the MCP safety table.
+- Flash-loan arbitrage must not be evaluated as a collateralized user position or with lending health-factor assumptions.
