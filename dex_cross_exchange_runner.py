@@ -19,7 +19,8 @@ from src.dragon.admin_server import start_admin_server
 from src.dragon.universe import universe_payload
 from src.dragon.venues import venues_for
 from src.dragon.hash_utils import opportunity_hash
-from src.dragon.aave_mcp import AaveMCPClient, DEFAULT_STABLECOINS, fetch_best_stablecoin_yields
+from src.dragon.aave_mcp import AaveMCPClient, DEFAULT_STABLECOINS, fetch_best_stablecoin_yields, parse_markets
+from src.dragon.aave_supply_yield import find_enterable_supply_candidates
 from src.dragon.aave_graphql import AAVE_V4_ARC_CHAIN_ID, AaveGraphQLClient
 from src.dragon.aave_agent import AAVE_AGENT_SOURCES, AAVE_AGENT_WORKFLOW, AaveAgentPolicy
 from src.dragon.aave_address_book import snapshot as aave_address_snapshot
@@ -38,6 +39,9 @@ STATE = {
     "rpc_providers": {}, "rpc_hosts": {},
     "aave_mcp_enabled": False, "aave_mcp_last_update": None,
     "aave_mcp_error": None, "aave_stable_yields": [], "aave_stable_markets": 0,
+    "aave_supply_yield_enabled": False, "aave_supply_yield_last_update": None,
+    "aave_supply_yield_error": None, "aave_supply_candidates": [],
+    "aave_supply_yield_wallet": None,
     "aave_stable_vaults_enabled": False, "aave_stable_vaults": [], "aave_stable_vault_error": None,
     "aave_v4_enabled": False, "aave_v4_chains": [], "aave_v4_arc": None, "aave_v4_last_update": None,
     "aave_v4_error": None, "aave_v4_liquidity": {"spokes": [], "reserves": []}, "aave_v4_liquidity_error": None,
@@ -139,6 +143,22 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if path == "/api/aave/supply-yields":
+            body = json.dumps({
+                "enabled": payload.get("aave_supply_yield_enabled", False),
+                "wallet": payload.get("aave_supply_yield_wallet"),
+                "last_update": payload.get("aave_supply_yield_last_update"),
+                "error": payload.get("aave_supply_yield_error"),
+                "candidates": payload.get("aave_supply_candidates", []),
+                "unsigned_only": True,
+            }, default=str).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/api/aave/yields":
             body = json.dumps({
                 "enabled": payload.get("aave_mcp_enabled", False),
@@ -405,6 +425,51 @@ async def refresh_aave_v4():
         await asyncio.sleep(interval)
 
 
+async def refresh_aave_supply_yield():
+    """Refresh Aave V4 supply opportunities for yield parking/compounding."""
+    enabled = env_bool("AAVE_YIELD_ENABLED", False)
+    interval = max(30.0, float(os.getenv("AAVE_YIELD_REFRESH_SECONDS", "60")))
+    wallet = os.getenv("AAVE_YIELD_WALLET_ADDRESS", "").strip() or None
+    stablecoins = tuple(
+        x.strip().upper()
+        for x in os.getenv("AAVE_YIELD_STABLECOINS", ",".join(DEFAULT_STABLECOINS)).split(",")
+        if x.strip()
+    ) or DEFAULT_STABLECOINS
+    client = AaveMCPClient()
+
+    with LOCK:
+        STATE["aave_supply_yield_enabled"] = enabled
+        STATE["aave_supply_yield_wallet"] = wallet
+    if not enabled:
+        return
+
+    while True:
+        try:
+            payload = await client.get_markets(
+                version="v4",
+                symbols=list(stablecoins),
+                user=wallet,
+            )
+            rows = parse_markets(payload, stablecoins=stablecoins)
+            candidates = [candidate.as_dict() for candidate in find_enterable_supply_candidates(rows)]
+            with LOCK:
+                STATE["aave_supply_candidates"] = candidates
+                STATE["aave_supply_yield_last_update"] = time.time()
+                STATE["aave_supply_yield_error"] = None
+            logging.info(
+                "Aave V4 supply-yield refresh candidates=%s wallet_state=%s",
+                len(candidates),
+                bool(wallet),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            with LOCK:
+                STATE["aave_supply_yield_error"] = f"{type(exc).__name__}: {exc}"
+            logging.warning("Aave V4 supply-yield refresh failed: %s: %s", type(exc).__name__, exc)
+        await asyncio.sleep(interval)
+
+
 async def refresh_aave_mcp():
     """Refresh Aave V3/V4 stablecoin market data without blocking DEX scans."""
     enabled = env_bool("AAVE_MCP_ENABLED", True)
@@ -653,6 +718,7 @@ async def main():
         logging.info("Dragon multi-chain ready chains=%s venues=%s min_profit=%s", list(chain_details.keys()), total_venues, min_profit)
 
         aave_task = asyncio.create_task(refresh_aave_mcp())
+        aave_supply_yield_task = asyncio.create_task(refresh_aave_supply_yield())
         aave_v4_task = asyncio.create_task(refresh_aave_v4())
         aave_v4_liquidity_task = asyncio.create_task(refresh_aave_v4_liquidity())
 
@@ -797,6 +863,12 @@ async def main():
                 with LOCK:
                     STATE["status"] = "running"
     finally:
+        if "aave_supply_yield_task" in locals():
+            aave_supply_yield_task.cancel()
+            try:
+                await aave_supply_yield_task
+            except asyncio.CancelledError:
+                pass
         if "aave_task" in locals():
             aave_task.cancel()
             try:
