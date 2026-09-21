@@ -115,7 +115,7 @@ class HeliusWebSocketStream:
         self.api_key = (api_key or os.getenv("HELIUS_API_KEY", "")).strip()
         self.ws_url = (ws_url or os.getenv(
             "HELIUS_WSS_URL",
-            "wss://atlas-mainnet.helius-rpc.com/",
+            "wss://mainnet.helius-rpc.com/",
         )).strip()
         self.commitment = (commitment or os.getenv(
             "SOLANA_COMMITMENT", "processed"
