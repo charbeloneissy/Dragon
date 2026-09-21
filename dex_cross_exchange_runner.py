@@ -966,7 +966,7 @@ async def main():
                 for result in probe_results:
                     if isinstance(result, Exception):
                         rejections["chain_probe_error"] = rejections.get("chain_probe_error", 0) + 1
-                        logging.warning("chain probe failed: %s", type(result).__name__, result)
+                        logging.warning("chain probe failed: %s: %s", type(result).__name__, result)
                         continue
                     cid, score, stats = result
                     if score.is_finite():
@@ -1001,7 +1001,7 @@ async def main():
                 for result in chain_results:
                     if isinstance(result, Exception):
                         rejections["chain_scan_error"] = rejections.get("chain_scan_error", 0) + 1
-                        logging.warning("chain scan failed: %s", type(result).__name__, result)
+                        logging.warning("chain scan failed: %s: %s", type(result).__name__, result)
                         continue
                     cid, (found, rej) = result
                     for opp in found:
