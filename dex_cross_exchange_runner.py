@@ -26,6 +26,7 @@ from src.dragon.aave_agent import AAVE_AGENT_SOURCES, AAVE_AGENT_WORKFLOW, AaveA
 from src.dragon.aave_address_book import snapshot as aave_address_snapshot
 from src.dragon.aave_stable_vault import load_validated_stable_vaults
 from src.dragon.aave_flash import env_flash_loan_config, validate_config as validate_flash_loan_config
+from src.dragon.aave_umbrella import AaveUmbrellaClient, choose_umbrella_candidates
 
 STATE = {
     "status": "starting", "mode": "paper", "chains": [], "chain_details": {},
@@ -42,6 +43,9 @@ STATE = {
     "aave_supply_yield_enabled": False, "aave_supply_yield_last_update": None,
     "aave_supply_yield_error": None, "aave_supply_candidates": [],
     "aave_supply_yield_wallet": None,
+    "aave_umbrella_enabled": False, "aave_umbrella_last_update": None,
+    "aave_umbrella_error": None, "aave_umbrella_wallet": None,
+    "aave_umbrella_positions": [], "aave_umbrella_candidates": [],
     "aave_stable_vaults_enabled": False, "aave_stable_vaults": [], "aave_stable_vault_error": None,
     "aave_v4_enabled": False, "aave_v4_chains": [], "aave_v4_arc": None, "aave_v4_last_update": None,
     "aave_v4_error": None, "aave_v4_liquidity": {"spokes": [], "reserves": []}, "aave_v4_liquidity_error": None,
@@ -151,6 +155,24 @@ class Handler(BaseHTTPRequestHandler):
                 "error": payload.get("aave_supply_yield_error"),
                 "candidates": payload.get("aave_supply_candidates", []),
                 "unsigned_only": True,
+            }, default=str).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/api/aave/umbrella":
+            body = json.dumps({
+                "enabled": payload.get("aave_umbrella_enabled", False),
+                "wallet": payload.get("aave_umbrella_wallet"),
+                "last_update": payload.get("aave_umbrella_last_update"),
+                "error": payload.get("aave_umbrella_error"),
+                "positions": payload.get("aave_umbrella_positions", []),
+                "candidates": payload.get("aave_umbrella_candidates", []),
+                "unsigned_only": True,
+                "network": "Ethereum",
             }, default=str).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -470,6 +492,54 @@ async def refresh_aave_supply_yield():
         await asyncio.sleep(interval)
 
 
+async def refresh_aave_umbrella():
+    """Refresh Umbrella stake/reward state off the 500 ms DEX path."""
+    enabled = env_bool("AAVE_UMBRELLA_ENABLED", False)
+    interval = max(60.0, float(os.getenv("AAVE_UMBRELLA_REFRESH_SECONDS", "300")))
+    wallet = (
+        os.getenv("AAVE_UMBRELLA_WALLET_ADDRESS", "").strip()
+        or os.getenv("AAVE_YIELD_WALLET_ADDRESS", "").strip()
+        or None
+    )
+    with LOCK:
+        STATE["aave_umbrella_enabled"] = enabled
+        STATE["aave_umbrella_wallet"] = wallet
+    if not enabled or not wallet:
+        return
+    rpc_candidates = rpc_urls_for(1)
+    if not rpc_candidates:
+        with LOCK:
+            STATE["aave_umbrella_error"] = "no Ethereum RPC configured"
+        return
+    client = AaveUmbrellaClient(rpc_url=rpc_candidates[0])
+    while True:
+        try:
+            snapshots = await to_thread(client.snapshot, wallet)
+            candidates = [item.as_dict() for item in choose_umbrella_candidates(snapshots)]
+            positions = [item.as_dict() for item in snapshots if item.user_shares > 0]
+            with LOCK:
+                STATE["aave_umbrella_positions"] = positions
+                STATE["aave_umbrella_candidates"] = candidates
+                STATE["aave_umbrella_last_update"] = time.time()
+                STATE["aave_umbrella_error"] = None
+            logging.info(
+                "Aave Umbrella refreshed positions=%s candidates=%s",
+                len(positions),
+                len(candidates),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            with LOCK:
+                STATE["aave_umbrella_error"] = f"{type(exc).__name__}: {exc}"
+            logging.warning(
+                "Aave Umbrella refresh failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+        await asyncio.sleep(interval)
+
+
 async def refresh_aave_mcp():
     """Refresh Aave V3/V4 stablecoin market data without blocking DEX scans."""
     enabled = env_bool("AAVE_MCP_ENABLED", True)
@@ -719,6 +789,7 @@ async def main():
 
         aave_task = asyncio.create_task(refresh_aave_mcp())
         aave_supply_yield_task = asyncio.create_task(refresh_aave_supply_yield())
+        aave_umbrella_task = asyncio.create_task(refresh_aave_umbrella())
         aave_v4_task = asyncio.create_task(refresh_aave_v4())
         aave_v4_liquidity_task = asyncio.create_task(refresh_aave_v4_liquidity())
 
@@ -863,6 +934,12 @@ async def main():
                 with LOCK:
                     STATE["status"] = "running"
     finally:
+        if "aave_umbrella_task" in locals():
+            aave_umbrella_task.cancel()
+            try:
+                await aave_umbrella_task
+            except asyncio.CancelledError:
+                pass
         if "aave_supply_yield_task" in locals():
             aave_supply_yield_task.cancel()
             try:
