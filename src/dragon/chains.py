@@ -64,6 +64,18 @@ EVM_CHAINS: dict[int, ChainSpec] = {
         rpc_fallback_env="AVALANCHE_RPC_URLS",
         default_rpc="https://avalanche-c-chain-rpc.publicnode.com",
     ),
+    84532: ChainSpec(
+        chain_id=84532,
+        name="base-sepolia",
+        family="evm",
+        native_symbol="ETH",
+        wrapped_native="0x4200000000000000000000000000000000000006",
+        wrapped_native_decimals=18,
+        explorer="https://sepolia.basescan.org",
+        rpc_env="BASE_SEPOLIA_RPC_URL",
+        rpc_fallback_env="BASE_SEPOLIA_RPC_URLS",
+        default_rpc="https://sepolia.base.org",
+    ),
     8453: ChainSpec(
         chain_id=8453,
         name="base",
