@@ -170,6 +170,74 @@ class AaveGraphQLClient:
     }
     """
 
+
+    PREVIEW_QUERY = """
+    query Preview($request: PreviewRequest!, $currency: Currency!, $timeWindow: TimeWindow!) {
+      value: preview(request: $request) {
+        __typename
+        id
+        healthFactor { __typename }
+        netApy { before { normalized value } after { normalized value } }
+        riskPremium { before { normalized value } after { normalized value } }
+        netCollateral(currency: $currency) {
+          before { value symbol decimals }
+          after { value symbol decimals }
+        }
+        netBalance(currency: $currency) {
+          before { value symbol decimals }
+          after { value symbol decimals }
+        }
+        projectedEarnings {
+          before { value symbol decimals }
+          after { value symbol decimals }
+        }
+        maxBorrowingPower {
+          before { value symbol decimals }
+          after { value symbol decimals }
+        }
+        remainingBorrowingPower {
+          before { value symbol decimals }
+          after { value symbol decimals }
+        }
+        reserveRates {
+          supplyApy { before { normalized value } after { normalized value } }
+          borrowApy { before { normalized value } after { normalized value } }
+        }
+        otherConditions {
+          __typename
+          ... on CollateralFactorVariation {
+            reserveId
+            current { normalized value }
+            after { normalized value }
+          }
+          ... on MaxLiquidationBonusVariation {
+            reserveId
+            current { normalized value }
+            after { normalized value }
+          }
+          ... on LiquidationFeeVariation {
+            reserveId
+            current { normalized value }
+            after { normalized value }
+          }
+        }
+      }
+    }
+    """
+
+    UPDATE_POSITION_CONDITIONS_QUERY = """
+    query UpdateUserPositionConditions($request: UpdateUserPositionConditionsRequest!) {
+      value: updateUserPositionConditions(request: $request) {
+        to
+        from
+        data
+        value
+        chainId
+        operations
+      }
+    }
+    """
+
     PROCESSED_TX_QUERY = """
     query HasProcessedKnownTransaction($operations: [OperationType!]!, $txHash: TxHash!) {
       value: hasProcessedKnownTransaction(
@@ -255,6 +323,58 @@ class AaveGraphQLClient:
 
     async def multichain_asset(self, request: dict[str, Any]) -> dict[str, Any] | None:
         data = await self.query(self.MULTICHAIN_ASSET_QUERY, {"request": request})
+        value = data.get("value")
+        return value if isinstance(value, dict) else None
+
+
+    async def preview(
+        self,
+        action: dict[str, Any],
+        *,
+        currency: str = "USD",
+        time_window: str = "LAST_WEEK",
+    ) -> dict[str, Any] | None:
+        if not isinstance(action, dict) or len(action) != 1:
+            raise ValueError("preview action must contain exactly one action key")
+        if "updateUserPositionConditions" in action:
+            request = action["updateUserPositionConditions"]
+            if not isinstance(request, dict):
+                raise ValueError("updateUserPositionConditions must be an object")
+            if request.get("update") not in {"ALL_DYNAMIC_CONFIG", "JUST_RISK_PREMIUM"}:
+                raise ValueError("update must be ALL_DYNAMIC_CONFIG or JUST_RISK_PREMIUM")
+            if not str(request.get("userPositionId", "")).strip():
+                raise ValueError("userPositionId is required")
+        data = await self.query(
+            self.PREVIEW_QUERY,
+            {
+                "request": {"action": action},
+                "currency": currency,
+                "timeWindow": time_window,
+            },
+        )
+        value = data.get("value")
+        return value if isinstance(value, dict) else None
+
+    async def update_user_position_conditions_tx(
+        self,
+        *,
+        user_position_id: str,
+        update: str = "ALL_DYNAMIC_CONFIG",
+    ) -> dict[str, Any] | None:
+        normalized = str(update).strip().upper()
+        if normalized not in {"ALL_DYNAMIC_CONFIG", "JUST_RISK_PREMIUM"}:
+            raise ValueError("update must be ALL_DYNAMIC_CONFIG or JUST_RISK_PREMIUM")
+        if not str(user_position_id).strip():
+            raise ValueError("user_position_id is required")
+        data = await self.query(
+            self.UPDATE_POSITION_CONDITIONS_QUERY,
+            {
+                "request": {
+                    "userPositionId": str(user_position_id),
+                    "update": normalized,
+                }
+            },
+        )
         value = data.get("value")
         return value if isinstance(value, dict) else None
 
