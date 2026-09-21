@@ -366,6 +366,14 @@ class AaveMCPClient:
     async def get_user_summary(self, *, user: str, version: str = "all") -> Any:
         return await self.call("get_user_summary", {"user": user, "version": version})
 
+    async def get_position_items(self, **arguments: Any) -> Any:
+        """Fetch V4 position-level supply/borrow items using the live MCP schema.
+
+        Keyword arguments are passed through unchanged because Aave's live
+        tools/list response is authoritative for this tool's exact selectors.
+        """
+        return await self.call("get_position_items", arguments)
+
     async def get_transaction_processed(self, *, transaction_hash: str) -> Any:
         return await self.call("get_transaction_processed", {"transactionHash": transaction_hash, "version": "v4"})
 
