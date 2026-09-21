@@ -40,3 +40,8 @@ Aave intelligence and safety refreshes remain off the 500 ms DEX quote path. The
 - Aave V4: https://github.com/aave/aave-v4
 - `src/dragon/aave_101.py` keeps Aave lending semantics (supply/borrow/collateral/liquidation) separate from Dragon's atomic flash-loan liquidity path; reserve flags follow the MCP safety table.
 - Flash-loan arbitrage must not be evaluated as a collateralized user position or with lending health-factor assumptions.
+
+- Umbrella staking is an optional yield layer for retained capital. Rewards must be shown separately from Aave supply APY and must not be presented as risk-free yield.
+- Umbrella StakeTokens can be slashed for deficits on the protected asset/network. Treat slashing exposure as asset- and network-specific.
+- Umbrella withdrawals require cooldown activation followed by the unstake window; never assume immediate liquidity.
+- Umbrella deposit/cooldown/redeem/withdraw/claim operations are prepared unsigned only. Do not auto-stake Dragon's flash-loan principal.
