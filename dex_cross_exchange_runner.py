@@ -33,6 +33,7 @@ from src.dragon.aave_umbrella import AaveUmbrellaClient, choose_umbrella_candida
 from src.dragon.aerodrome_opportunity import AerodromeOpportunityEngine, snapshot_from_dict
 from src.dragon.economic_agent import EconomicDecisionAgent
 from src.dragon.dragon_core import DragonCore, ChainState, EconomicCandidate
+from src.dragon.base_live import BaseLiveReader
 
 STATE = {
     "status": "starting", "mode": "paper", "chains": [], "chain_details": {},
@@ -68,6 +69,7 @@ STATE = {
     "execution_capacity": 8, "gas_sponsor_enabled": False, "gas_sponsor_required": False,
     "economic_agent": {"enabled": True, "last_update": None, "ranked_orders": [], "chain_memory": {}},
     "dragon_core": {},
+    "base_live": {},
 }
 LOCK = Lock()
 METRICS = ExecutionTelemetry()
@@ -892,6 +894,7 @@ async def main():
         sponsor_manager = GasSponsorManager(min_net_profit=min_profit)
         economic_agent = EconomicDecisionAgent(history_size=int(os.getenv("ECONOMIC_AGENT_HISTORY_SIZE", "256")), min_profit=min_profit)
         dragon_core = DragonCore(min_profit=min_profit)
+        base_reader = BaseLiveReader()
 
         stable_vaults = []
         stable_vault_error = None
@@ -1000,6 +1003,16 @@ async def main():
         while True:
             try:
                 all_found = []
+                try:
+                    base_snapshot = await to_thread(base_reader.snapshot)
+                    base_chain = ChainState(chain_id=8453, block_number=base_snapshot["block_number"], block_timestamp=base_snapshot["block_timestamp"], gas_quote=Decimal(str(base_snapshot.get("base_fee_wei", "0"))), rpc_latency_ms=Decimal(str(base_snapshot["rpc_latency_ms"])))
+                    dragon_core.observe_chain(base_chain)
+                    with LOCK:
+                        STATE["base_live"] = base_snapshot
+                except Exception as exc:
+                    with LOCK:
+                        STATE["base_live"] = {"connected": False, "error": f"{type(exc).__name__}: {exc}"}
+                    logging.warning("Base live read failed: %s: %s", exc, exc)
                 rejections = {}
                 # Phase 1: cheap gross-spread probes across every active chain.
                 # Phase 2: spend the expensive full sizing/second-leg scan only
