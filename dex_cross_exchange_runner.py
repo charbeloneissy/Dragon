@@ -40,6 +40,9 @@ STATE = {
     "rpc_providers": {}, "rpc_hosts": {},
     "aave_mcp_enabled": False, "aave_mcp_last_update": None,
     "aave_mcp_error": None, "aave_stable_yields": [], "aave_stable_markets": 0,
+    "aave_user_state_enabled": False, "aave_user_state_wallet": None,
+    "aave_user_state_last_update": None, "aave_user_state_error": None,
+    "aave_user_positions": [], "aave_user_summary": None, "aave_user_rewards": None,
     "aave_supply_yield_enabled": False, "aave_supply_yield_last_update": None,
     "aave_supply_yield_error": None, "aave_supply_candidates": [],
     "aave_supply_yield_wallet": None,
@@ -110,6 +113,25 @@ class Handler(BaseHTTPRequestHandler):
                 "enabled": payload.get("aave_v4_enabled", False),
                 "error": payload.get("aave_v4_liquidity_error"),
                 "liquidity": payload.get("aave_v4_liquidity", {"spokes": [], "reserves": []}),
+            }, default=str).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == "/api/aave/user-state":
+            body = json.dumps({
+                "enabled": payload.get("aave_user_state_enabled", False),
+                "wallet": payload.get("aave_user_state_wallet"),
+                "last_update": payload.get("aave_user_state_last_update"),
+                "error": payload.get("aave_user_state_error"),
+                "positions": payload.get("aave_user_positions", []),
+                "summary": payload.get("aave_user_summary"),
+                "rewards": payload.get("aave_user_rewards"),
+                "unsigned_only": True,
             }, default=str).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -598,6 +620,42 @@ async def refresh_aave_umbrella():
         await asyncio.sleep(interval)
 
 
+async def refresh_aave_user_state():
+    """Refresh wallet positions/summary/rewards outside the DEX quote path."""
+    enabled = env_bool("AAVE_USER_STATE_ENABLED", False)
+    interval = max(30.0, float(os.getenv("AAVE_USER_STATE_REFRESH_SECONDS", "60")))
+    wallet = os.getenv("AAVE_USER_STATE_WALLET_ADDRESS", "").strip() or os.getenv("AAVE_YIELD_WALLET_ADDRESS", "").strip() or None
+    client = AaveMCPClient()
+
+    with LOCK:
+        STATE["aave_user_state_enabled"] = enabled
+        STATE["aave_user_state_wallet"] = wallet
+    if not enabled or not wallet:
+        return
+
+    while True:
+        try:
+            positions, summary, rewards = await asyncio.gather(
+                client.get_user_positions(user=wallet, version="all"),
+                client.get_user_summary(user=wallet, version="all"),
+                client.get_user_rewards(user=wallet, version="all"),
+            )
+            with LOCK:
+                STATE["aave_user_positions"] = positions
+                STATE["aave_user_summary"] = summary
+                STATE["aave_user_rewards"] = rewards
+                STATE["aave_user_state_last_update"] = time.time()
+                STATE["aave_user_state_error"] = None
+            logging.info("Aave user state refreshed wallet=%s", wallet[:10])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            with LOCK:
+                STATE["aave_user_state_error"] = f"{type(exc).__name__}: {exc}"
+            logging.warning("Aave user state refresh failed: %s: %s", type(exc).__name__, exc)
+        await asyncio.sleep(interval)
+
+
 async def refresh_aave_mcp():
     """Refresh Aave V3/V4 stablecoin market data without blocking DEX scans."""
     enabled = env_bool("AAVE_MCP_ENABLED", True)
@@ -846,6 +904,7 @@ async def main():
         logging.info("Dragon multi-chain ready chains=%s venues=%s min_profit=%s", list(chain_details.keys()), total_venues, min_profit)
 
         aave_task = asyncio.create_task(refresh_aave_mcp())
+        aave_user_state_task = asyncio.create_task(refresh_aave_user_state())
         aave_horizon_task = asyncio.create_task(refresh_aave_horizon())
         aave_supply_yield_task = asyncio.create_task(refresh_aave_supply_yield())
         aave_umbrella_task = asyncio.create_task(refresh_aave_umbrella())
@@ -993,6 +1052,12 @@ async def main():
                 with LOCK:
                     STATE["status"] = "running"
     finally:
+        if "aave_user_state_task" in locals():
+            aave_user_state_task.cancel()
+            try:
+                await aave_user_state_task
+            except asyncio.CancelledError:
+                pass
         if "aave_horizon_task" in locals():
             aave_horizon_task.cancel()
             try:
