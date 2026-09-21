@@ -164,39 +164,58 @@ class AaveAgentPolicy:
         return enriched
 
     def execution_plan_summary(self, plan: Any) -> dict[str, Any]:
+        """Interpret an Aave execution plan without ever signing it."""
         if not isinstance(plan, dict):
             return {"type": type(plan).__name__, "ready": False}
 
         typename = str(plan.get("__typename") or plan.get("operation") or "unknown")
-        summary = {"type": typename, "ready": False}
+        summary = {"type": typename, "ready": False, "requires_wallet_signature": False}
 
         if typename == "TransactionRequest":
+            required = ("to", "from", "data", "value", "chainId")
+            missing = [key for key in required if key not in plan]
             summary.update({
-                "ready": True,
+                "ready": not missing,
+                "missing_fields": missing,
                 "chainId": plan.get("chainId"),
                 "to": plan.get("to"),
                 "from": plan.get("from"),
                 "operation": plan.get("operation"),
-                "requires_wallet_signature": True,
+                "requires_wallet_signature": not missing,
             })
+
         elif typename in {"ApprovalRequired", "Erc20ApprovalRequired"}:
+            approval = plan.get("byTransaction") or plan.get("approval") or plan.get("transaction")
+            by_signature = plan.get("bySignature")
             summary.update({
                 "ready": False,
                 "requires_approval": True,
+                "approval_transaction": approval,
+                "permit_typed_data": by_signature,
+                "permit_available": isinstance(by_signature, dict),
                 "reason": plan.get("reason"),
             })
+
         elif typename == "PreContractActionRequired":
+            first = plan.get("transaction")
+            second = plan.get("originalTransaction")
             summary.update({
                 "ready": False,
                 "requires_ordered_steps": True,
+                "transaction": first,
+                "original_transaction": second,
+                "first_step_present": isinstance(first, dict),
+                "second_step_present": isinstance(second, dict),
             })
+
         elif typename == "InsufficientBalanceError":
             summary.update({
                 "ready": False,
                 "reason": "insufficient_balance",
             })
+
         else:
-            summary["ready"] = False
+            summary["reason"] = "unsupported_execution_plan"
 
         return summary
 
