@@ -155,3 +155,38 @@ def test_vault_set_fee_rejects_below_ten_percent():
             vault="0x1234567890abcdef1234567890abcdef12345678",
             new_fee_percent=9,
         ))
+
+
+def test_vault_set_fee_request_normalizes_transaction_request():
+    from src.dragon.aave_mcp import AaveMCPClient
+    import asyncio
+
+    client = AaveMCPClient()
+
+    async def fake_vault_set_fee(**kwargs):
+        assert kwargs["chain_id"] == 1
+        assert kwargs["vault"].startswith("0x")
+        assert str(kwargs["new_fee_percent"]) == "15"
+        return {
+            "vaultSetFee": {
+                "to": "0x0000000000000000000000000000000000000001",
+                "from": "0x0000000000000000000000000000000000000002",
+                "data": "0x1234",
+                "value": "0",
+                "chainId": 1,
+            }
+        }
+
+    client.vault_set_fee = fake_vault_set_fee
+    result = asyncio.run(client.vault_set_fee_request(
+        chain_id=1,
+        vault="0x1234567890abcdef1234567890abcdef12345678",
+        new_fee_percent=15,
+    ))
+    assert result == {
+        "to": "0x0000000000000000000000000000000000000001",
+        "from": "0x0000000000000000000000000000000000000002",
+        "data": "0x1234",
+        "value": "0",
+        "chainId": 1,
+    }
