@@ -806,7 +806,7 @@ async def scan_evm_chain(adapter, chain_id, *, max_quote, taker, slippage, min_p
     venue_names = [v.name for v in venues_for(chain_id) if not configured_venues or v.name in configured_venues]
     if len(venue_names) < 2:
         return [], {}
-    flash_enabled = env_bool("FLASH_LOAN_ENABLED", False)
+    flash_enabled = env_bool("FLASH_LOAN_ENABLED", True)
     configured_fee_bps = env_decimal("FLASH_LOAN_FEE_BPS", "0")
     fee_bps = configured_fee_bps
     if flash_enabled and hasattr(adapter, "evm") and adapter.evm is not None:
@@ -988,7 +988,7 @@ async def main():
                 "safety_buffer": str(safety),
                 "flash_cap": str(flash_cap_quote),
                 "flash_cap_unit": "human quote units",
-                "flash_loan_enabled": env_bool("FLASH_LOAN_ENABLED", False),
+                "flash_loan_enabled": env_bool("FLASH_LOAN_ENABLED", True),
                 "compounding_enabled": env_bool("DEX_COMPOUND_PROFITS", False),
                 "rpc_providers": provider_status(load_providers()),
                 "rpc_hosts": {
@@ -1049,13 +1049,13 @@ async def main():
                         # the cheap ranking. A configured fee is only a fallback
                         # when flash loans are disabled.
                         fee_bps = env_decimal("FLASH_LOAN_FEE_BPS", "0")
-                        if env_bool("FLASH_LOAN_ENABLED", False) and hasattr(adapter, "evm") and adapter.evm is not None:
+                        if env_bool("FLASH_LOAN_ENABLED", True) and hasattr(adapter, "evm") and adapter.evm is not None:
                             fee_bps = Decimal(str(adapter.evm.flash_loan_fee_bps(cid)))
                         venue_names = [v.name for v in venues_for(cid)]
                         engine = DexCrossExchangeEngine(
                             adapter, venue_names, min_profit=min_profit,
                             quote_token_decimals=quote_decimals,
-                            flash_loan_enabled=env_bool("FLASH_LOAN_ENABLED", False),
+                            flash_loan_enabled=env_bool("FLASH_LOAN_ENABLED", True),
                             flash_loan_fee_bps=fee_bps, telemetry=METRICS,
                         )
                         best = Decimal("-Infinity")
