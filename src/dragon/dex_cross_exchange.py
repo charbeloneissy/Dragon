@@ -366,45 +366,59 @@ class DexCrossExchangeEngine:
         # latency is bounded by the slowest candidate rather than the sum of all
         # candidate RPC round trips. Keep the worker count bounded for RPC safety.
         max_workers = max(1, min(len(candidates), int(os.getenv("DEX_CANDIDATE_CONCURRENCY", "1"))))
-        def _scan(candidate: int):
+        def _scan(candidate: int, enforce_profit_gate: bool = False):
             return self.scan_once(
                 chain_id=chain_id, quote_token=quote_token, base_token=base_token,
                 quote_amount=candidate, taker=taker, slippage_bps=slippage_bps,
-                compound_amount=compound_amount,
+                compound_amount=compound_amount, enforce_profit_gate=enforce_profit_gate,
             )
+        # First build a profit surface without applying the final minimum-profit gate.
+        # This is important: a coarse point can be negative while the true optimum
+        # between two points is positive. The optimizer must learn the shape of the
+        # curve before deciding whether the route is executable.
         if max_workers == 1:
-            results = [_scan(candidate) for candidate in candidates]
+            coarse_results = [_scan(candidate, False) for candidate in candidates]
         else:
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                results = list(pool.map(_scan, candidates))
-        for result in results:
-            profitable.extend(result)
-
-        # Dynamic second pass: refine around the best executable coarse size.
-        # Every refined size goes through the same hard profitability gates.
-        if profitable:
-            best = max(profitable, key=lambda x: (x.net_profit_quote, x.quote_amount))
-            refined = [
-                amount for amount in self._refinement_amounts(best.quote_amount, ceiling, candidates, floor=floor)
-                if amount > compound_amount
-            ]
-            if refined:
-                logging.info(
-                    "DEX dynamic optimizer coarse_best=%s refined_candidates=%s ceiling=%s",
-                    best.quote_amount, refined, ceiling,
-                )
-                if max_workers == 1:
-                    refined_results = [_scan(candidate) for candidate in refined]
-                else:
-                    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                        refined_results = list(pool.map(_scan, refined))
-                for result in refined_results:
-                    profitable.extend(result)
-
-        if not profitable:
+                coarse_results = list(pool.map(lambda candidate: _scan(candidate, False), candidates))
+        surface = [op for result in coarse_results for op in result]
+        if not surface:
             logging.info(
-                "DEX dynamic optimizer found no executable positive route base=%s candidates=%s",
+                "DEX dynamic optimizer no executable quotes for profit surface base=%s candidates=%s",
                 base_token, candidates,
+            )
+            return []
+
+        # Refine around the best observed NET point even when that point is still
+        # negative. This avoids missing narrow positive regions between coarse sizes.
+        best_surface = max(surface, key=lambda x: (x.net_profit_quote, x.quote_amount))
+        refined = [
+            amount for amount in self._refinement_amounts(best_surface.quote_amount, ceiling, candidates, floor=floor)
+            if amount > compound_amount
+        ]
+        if refined:
+            logging.info(
+                "DEX dynamic profit curve coarse_best=%s coarse_net=%s refined_candidates=%s ceiling=%s",
+                best_surface.quote_amount, best_surface.net_profit_quote, refined, ceiling,
+            )
+            if max_workers == 1:
+                refined_results = [_scan(candidate, False) for candidate in refined]
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    refined_results = list(pool.map(lambda candidate: _scan(candidate, False), refined))
+            surface.extend(op for result in refined_results for op in result)
+
+        # Final hard gate is applied only after curve exploration and refinement.
+        profitable = [
+            op for op in surface
+            if op.net_profit_quote >= self.min_profit
+            and ((op.net_profit_quote / (Decimal(op.quote_amount) / scale)) * Decimal("10000")) >= self.min_net_bps
+        ]
+        if not profitable:
+            best_surface = max(surface, key=lambda x: (x.net_profit_quote, x.quote_amount))
+            logging.info(
+                "DEX dynamic optimizer no positive executable point base=%s best_amount=%s best_net=%s min_profit=%s candidates=%s",
+                base_token, best_surface.quote_amount, best_surface.net_profit_quote, self.min_profit, candidates + refined,
             )
             return []
         best = max(profitable, key=lambda x: (x.net_profit_quote, x.net_profit_quote / Decimal(x.quote_amount)))
@@ -421,7 +435,7 @@ class DexCrossExchangeEngine:
         )
         return [best]
 
-    def scan_once(self, *, chain_id: int, quote_token: str, base_token: str, quote_amount: int, taker: str, slippage_bps: int = 50, compound_amount: int = 0) -> list[DexOpportunity]:
+    def scan_once(self, *, chain_id: int, quote_token: str, base_token: str, quote_amount: int, taker: str, slippage_bps: int = 50, compound_amount: int = 0, enforce_profit_gate: bool = True) -> list[DexOpportunity]:
         if len(self.sources) < 2: raise ValueError("DEX cross-exchange mode requires at least two DEX sources")
         if quote_amount <= 0: raise ValueError("quote_amount must be positive")
         if compound_amount != 0:
@@ -619,10 +633,10 @@ class DexCrossExchangeEngine:
                 self._reject("cross_gross_negative")
             elif net <= 0:
                 self._reject("cross_net_negative_after_costs")
-            if net < self.min_profit:
+            if enforce_profit_gate and net < self.min_profit:
                 self._reject("net_profit_below_min")
                 return
-            if net_bps < self.min_net_bps:
+            if enforce_profit_gate and net_bps < self.min_net_bps:
                 self._reject("net_bps_below_min")
                 logging.info(
                     "DEX opportunity rejected net_bps=%.3f min_net_bps=%.3f buy=%s sell=%s amount=%s",
