@@ -262,15 +262,35 @@ def rpc_urls(spec: ChainSpec) -> list[str]:
     for url in [primary, *fallbacks]:
         if url and url not in urls:
             urls.append(url)
+    # Keep explicit endpoints, but never allow a single public provider to
+    # become a hard dependency. Base in particular gets independent fallbacks
+    # so a dRPC 429 cannot collapse the whole quote engine.
+    if urls and spec.chain_id == 8453 and os.getenv("DEX_RPC_AUTO_FALLBACK", "true").strip().lower() in {"1", "true", "yes", "on"}:
+        for url in (
+            "https://base-rpc.publicnode.com",
+            "https://base.llamarpc.com",
+            "https://1rpc.io/base",
+        ):
+            if url not in urls:
+                urls.append(url)
+        return urls
     if urls:
         return urls
 
-    # No explicit endpoint: prefer authenticated providers, then the public one.
+    # No explicit endpoint: prefer authenticated providers, then public fallbacks.
     from src.dragon.rpc_providers import load_providers, private_urls
 
     for url in private_urls(spec.chain_id, load_providers()):
         if url not in urls:
             urls.append(url)
+    if spec.chain_id == 8453:
+        for url in (
+            "https://base-rpc.publicnode.com",
+            "https://base.llamarpc.com",
+            "https://1rpc.io/base",
+        ):
+            if url not in urls:
+                urls.append(url)
     if not urls and spec.default_rpc:
         urls.append(spec.default_rpc)
     return urls
