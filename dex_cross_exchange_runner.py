@@ -18,6 +18,7 @@ from src.dragon.rpc_providers import load_providers, provider_status
 from src.dragon.admin_server import start_admin_server
 from src.dragon.universe import universe_payload
 from src.dragon.venues import venues_for
+from src.dragon.hash_utils import opportunity_hash
 
 STATE = {
     "status": "starting", "mode": "paper", "chains": [], "chain_details": {},
@@ -553,13 +554,23 @@ async def main():
                 top = all_found[:max(1, int(os.getenv("DEX_MAX_OPPORTUNITIES", "8")))]
                 rows = []
                 for index, (opp, chain_label) in enumerate(top):
-                    identifier = f"{STATE['scans']}-{index}"
+                    identifier = opportunity_hash(
+                        chain_id=opp.chain_id,
+                        buy_source=opp.buy_source,
+                        sell_source=opp.sell_source,
+                        base_token=opp.base_token,
+                        quote_token=opp.quote_token,
+                        quote_amount=opp.quote_amount,
+                        quote_version="v1",
+                    )
                     try:
                         METRICS.record_opportunity(opp)
                     except Exception:
                         logging.debug("telemetry record_opportunity failed", exc_info=True)
                     quote_decimals = int(next((d["quote_decimals"] for d in chain_details.values() if d.get("chain_id") == opp.chain_id), 6))
-                    rows.append(opportunity_view(opp, identifier, chain_label, quote_decimals))
+                    row = opportunity_view(opp, identifier, chain_label, quote_decimals)
+                    row["hash_algorithm"] = "SHA-256"
+                    rows.append(row)
                 opportunities = top
                 with LOCK:
                     STATE["scans"] += 1
