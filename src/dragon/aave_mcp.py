@@ -823,8 +823,6 @@ async def prepare_supply(
         "chainId": int(chain_id),
         "amount": {"erc20": {"value": canonical_human_amount(str(amount))}},
     }
-    human_amount = parse_human_amount(str(amount))
-    request["amount"] = {"erc20": {"value": canonical_human_amount(str(amount))}}
     if enable_collateral:
         request["enableCollateral"] = True
 
