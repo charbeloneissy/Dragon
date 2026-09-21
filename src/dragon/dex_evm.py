@@ -246,6 +246,10 @@ class _EvmDexCore:
         self.gas_limit = max(100_000, int(os.getenv("DEX_GAS_LIMIT", "300000")))
         self.flash_loan_pool = os.getenv("DEX_AAVE_POOL_ADDRESS", "").strip()
 
+    def _flash_loan_pool_address(self, chain_id: int) -> str:
+        """Resolve the configured Aave V3 Pool per chain, with a global fallback."""
+        return os.getenv(f"DEX_AAVE_POOL_{int(chain_id)}", "").strip() or self.flash_loan_pool
+
         wanted = chain_ids if chain_ids is not None else env_chain_ids()
         for cid in wanted:
             spec = get_spec(cid)
@@ -324,10 +328,13 @@ class _EvmDexCore:
                 provider.disconnect()
 
     def flash_loan_fee_bps(self, chain_id: int = 8453) -> Decimal:
-        if not self.flash_loan_pool:
-            return Decimal("0")
+        pool_address = self._flash_loan_pool_address(chain_id)
+        if not pool_address:
+            raise RuntimeError(f"Aave V3 Pool address is not configured for chain {chain_id}")
+        if not Web3.is_address(pool_address):
+            raise ValueError(f"invalid Aave V3 Pool address for chain {chain_id}")
         abi = [{"inputs": [], "name": "FLASHLOAN_PREMIUM_TOTAL", "outputs": [{"internalType": "uint128", "name": "", "type": "uint128"}], "stateMutability": "view", "type": "function"}]
-        raw = Decimal(str(self._rpc(chain_id, lambda w3: w3.eth.contract(address=self._addr(self.flash_loan_pool), abi=abi).functions.FLASHLOAN_PREMIUM_TOTAL().call())))
+        raw = Decimal(str(self._rpc(chain_id, lambda w3: w3.eth.contract(address=self._addr(pool_address), abi=abi).functions.FLASHLOAN_PREMIUM_TOTAL().call())))
         if raw < 0 or raw > Decimal("1000"):
             raise RuntimeError(f"invalid Aave flash-loan premium: {raw} bps")
         return raw
