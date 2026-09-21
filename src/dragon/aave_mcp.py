@@ -215,18 +215,57 @@ def _walk_dicts(value: Any):
 
 
 def _unwrap_result(value: Any) -> Any:
+    """Normalize an MCP response without discarding safety metadata.
+
+    Aave MCP returns an envelope containing data, next_actions and warnings.
+    Older Dragon code unwrapped data recursively and lost warnings. We now
+    preserve those fields while flattening the data payload for callers that
+    already expect a dictionary/list.
+    """
     if not isinstance(value, dict):
         return value
-    for key in ("structuredContent", "data"):
-        if key in value:
-            return _unwrap_result(value[key])
-    if "content" in value and isinstance(value["content"], list):
-        texts = [x.get("text") for x in value["content"] if isinstance(x, dict) and x.get("text")]
+
+    structured = value.get("structuredContent")
+    if isinstance(structured, dict):
+        normalized = _unwrap_result(structured)
+        if isinstance(normalized, dict):
+            data = normalized.get("data")
+            envelope = dict(data) if isinstance(data, dict) else {"data": data}
+            for key in ("warnings", "next_actions", "chainsCovered", "chainsNotCovered", "chainsNotServed"):
+                if key in normalized:
+                    envelope[key] = normalized[key]
+            envelope["_aave_envelope"] = normalized
+            return envelope
+        return normalized
+
+    if isinstance(value.get("content"), list):
+        texts = [
+            x.get("text")
+            for x in value["content"]
+            if isinstance(x, dict) and x.get("text")
+        ]
         for text in texts:
             try:
-                return json.loads(text)
+                parsed = json.loads(text)
+                normalized = _unwrap_result(parsed)
+                if isinstance(normalized, dict):
+                    # Preserve top-level JSON-RPC/MCP metadata when present.
+                    for key in ("warnings", "next_actions", "chainsCovered", "chainsNotCovered", "chainsNotServed"):
+                        if key in value and key not in normalized:
+                            normalized[key] = value[key]
+                return normalized
             except Exception:
                 continue
+
+    if "data" in value and isinstance(value.get("data"), (dict, list)):
+        data = value["data"]
+        envelope = dict(data) if isinstance(data, dict) else {"data": data}
+        for key in ("warnings", "next_actions", "chainsCovered", "chainsNotCovered", "chainsNotServed"):
+            if key in value:
+                envelope[key] = value[key]
+        envelope["_aave_envelope"] = value
+        return envelope
+
     return value
 
 
