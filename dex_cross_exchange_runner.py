@@ -21,6 +21,8 @@ from src.dragon.venues import venues_for
 from src.dragon.hash_utils import opportunity_hash
 from src.dragon.aave_mcp import AaveMCPClient, DEFAULT_STABLECOINS, fetch_best_stablecoin_yields
 from src.dragon.aave_graphql import AAVE_V4_ARC_CHAIN_ID, AaveGraphQLClient
+from src.dragon.aave_agent import AAVE_AGENT_SOURCES, AAVE_AGENT_WORKFLOW, AaveAgentPolicy
+from src.dragon.aave_address_book import snapshot as aave_address_snapshot
 from src.dragon.aave_stable_vault import load_validated_stable_vaults
 from src.dragon.aave_flash import env_flash_loan_config, validate_config as validate_flash_loan_config
 
@@ -39,6 +41,8 @@ STATE = {
     "aave_stable_vaults_enabled": False, "aave_stable_vaults": [], "aave_stable_vault_error": None,
     "aave_v4_enabled": False, "aave_v4_chains": [], "aave_v4_arc": None, "aave_v4_last_update": None,
     "aave_v4_error": None, "aave_v4_liquidity": {"spokes": [], "reserves": []}, "aave_v4_liquidity_error": None,
+    "aave_agent": {"workflow": AAVE_AGENT_WORKFLOW, "sources": AAVE_AGENT_SOURCES, "policy": "discover-inspect-simulate-build-wallet-sign-confirm"},
+    "aave_address_book": aave_address_snapshot(),
     "data_source": "multi-chain cross-DEX executable quotes (EVM + non-EVM) + Aave MCP read-only market data",
 }
 LOCK = Lock()
@@ -76,6 +80,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(body)
             return
+        if path == "/api/aave/agent":
+            body = json.dumps({
+                "workflow": payload.get("aave_agent", {}).get("workflow"),
+                "sources": payload.get("aave_agent", {}).get("sources", {}),
+                "policy": payload.get("aave_agent", {}).get("policy"),
+                "address_book": payload.get("aave_address_book", {}),
+            }, default=str).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if path == "/api/aave/v4/liquidity":
             body = json.dumps({
                 "enabled": payload.get("aave_v4_enabled", False),
