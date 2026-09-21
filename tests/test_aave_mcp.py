@@ -79,3 +79,42 @@ def test_rank_excludes_unavailable_and_paused():
     }
     ranked = rank_stablecoin_supply(parse_markets(payload))
     assert [r.symbol for r in ranked] == ["DAI", "USDC"]
+
+
+def test_parse_canonical_aave_reserve_shape():
+    payload = {
+        "data": {
+            "reserves": [
+                {
+                    "__typename": "Reserve",
+                    "market": {
+                        "__typename": "MarketInfo",
+                        "address": "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2",
+                        "chainId": 1,
+                    },
+                    "underlyingToken": {
+                        "__typename": "Currency",
+                        "symbol": "USDC",
+                        "name": "USD Coin",
+                        "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                    },
+                    "reserveId": "canonical-usdc-v3-eth",
+                    "summary": {
+                        "supplyApy": "3.75",
+                        "rewards": [],
+                    },
+                    "isFrozen": False,
+                    "isPaused": False,
+                }
+            ]
+        }
+    }
+    rows = parse_markets(payload)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.symbol == "USDC"
+    assert row.chain_id == 1
+    assert row.market_address == "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2"
+    assert row.underlying_token_address == "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    assert row.underlying_token_name == "USD Coin"
+    assert row.supply_apy_pct == Decimal("3.75")
