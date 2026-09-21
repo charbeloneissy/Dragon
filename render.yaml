@@ -5,7 +5,7 @@ services:
     region: frankfurt
     plan: free
     branch: main
-    buildCommand: python -m pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+    buildCommand: python -m pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt && python -m pytest -q tests/test_grpc_testing.py tests/test_admin_server.py
     startCommand: python dex_cross_exchange_runner.py
     autoDeploy: true
     healthCheckPath: /health
