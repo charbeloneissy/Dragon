@@ -23,6 +23,31 @@ def test_uncovered_chain_blocks_zero_assumption():
     assert result.reason == "required_chain_not_covered"
 
 
+def test_uncovered_chain_from_aave_response_is_detected():
+    policy = AaveAgentPolicy()
+    result = policy.guard(
+        phase="inspect",
+        result={
+            "data": [],
+            "chainsCovered": [1],
+            "chainsNotCovered": [42161],
+            "chainsNotServed": [],
+        },
+    )
+    assert result.allowed is False
+    assert result.reason == "required_chain_not_covered"
+
+
+def test_discovery_requires_coverage_metadata():
+    policy = AaveAgentPolicy()
+    result = policy.guard(
+        phase="discover",
+        result={"data": []},
+    )
+    assert result.allowed is False
+    assert result.reason == "no_coverage_reported"
+
+
 def test_simulation_required_before_buildable_action():
     policy = AaveAgentPolicy()
     result = policy.guard(
