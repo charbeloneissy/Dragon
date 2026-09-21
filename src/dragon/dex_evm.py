@@ -19,6 +19,7 @@ import os
 import re
 import threading
 import time
+import random
 from decimal import Decimal
 
 from web3 import Web3
@@ -93,6 +94,13 @@ class RpcPool:
         self._failures = [0] * len(urls)
         self._cooldown_until = [0.0] * len(urls)
         self._success = [0] * len(urls)
+        self._inflight = [0] * len(urls)
+        self._latency_ms = [0.0] * len(urls)
+        self._rate_limits = [0] * len(urls)
+        self._provider = [self._provider_name(url) for url in urls]
+        self._provider_inflight: dict[str, int] = {}
+        self._provider_cooldown_until: dict[str, float] = {}
+        self._provider_max_inflight = max(1, int(os.getenv("DEX_RPC_PROVIDER_MAX_INFLIGHT", "2")))
         self._errors = [0] * len(urls)
         self._selftest = ["untested"] * len(urls)
         self._lock = threading.Lock()
@@ -110,6 +118,25 @@ class RpcPool:
                 logging.warning("RPC startup failed chain=%s index=%s host=%s error=%s", chain.name, idx, self._host(url), exc)
         if self.w3 is None:
             raise RpcRateLimitError(f"all RPC endpoints failed for {chain.name}: " + " | ".join(errors))
+
+    @staticmethod
+    def _provider_name(url: str) -> str:
+        host = RpcPool._host(url).lower()
+        if "drpc.org" in host or "drpc.live" in host:
+            return "drpc"
+        if "publicnode" in host:
+            return "publicnode"
+        if "llamarpc" in host:
+            return "llamarpc"
+        if "1rpc" in host:
+            return "1rpc"
+        if "alchemy" in host:
+            return "alchemy"
+        if "infura" in host:
+            return "infura"
+        if "quicknode" in host or "quiknode" in host:
+            return "quicknode"
+        return host or "unknown"
 
     @staticmethod
     def _host(url: str) -> str:
@@ -158,51 +185,79 @@ class RpcPool:
     def call(self, fn, deadline: float | None = None):
         last_exc = None
         attempted: set[int] = set()
-        max_attempts = max(1, min(len(self.urls), int(os.getenv("DEX_RPC_MAX_ATTEMPTS", "3"))))
+        max_attempts = max(1, min(len(self.urls), int(os.getenv("DEX_RPC_MAX_ATTEMPTS", "4"))))
         for _ in range(max_attempts):
             now = time.monotonic()
-            ready = [i for i in range(len(self.urls)) if i not in attempted and self._cooldown_until[i] <= now]
-            if not ready:
+            with self._lock:
+                ready = [
+                    i for i in range(len(self.urls))
+                    if i not in attempted
+                    and self._cooldown_until[i] <= now
+                    and self._provider_cooldown_until.get(self._provider[i], 0.0) <= now
+                    and self._provider_inflight.get(self._provider[i], 0) < self._provider_max_inflight
+                ]
+                if ready:
+                    keyed_ready = [i for i in ready if self._keyed[i]]
+                    candidates = keyed_ready or ready
+                    idx = min(candidates, key=lambda i: (
+                        self._provider_inflight.get(self._provider[i], 0),
+                        self._inflight[i], self._rate_limits[i],
+                        self._failures[i], self._latency_ms[i] or 0.0,
+                    ))
+                    self._inflight[idx] += 1
+                    provider = self._provider[idx]
+                    self._provider_inflight[provider] = self._provider_inflight.get(provider, 0) + 1
+                    self._index = (idx + 1) % len(self.urls)
+                else:
+                    idx = -1
+                    provider = ""
+            if idx < 0:
+                if deadline is not None and time.monotonic() + self.timeout > deadline:
+                    break
                 remaining = [i for i in range(len(self.urls)) if i not in attempted]
                 if not remaining:
                     break
                 idx = min(remaining, key=lambda i: self._cooldown_until[i])
-            else:
-                keyed_ready = [i for i in ready if self._keyed[i]]
-                candidates = keyed_ready or ready
-                with self._lock:
-                    idx = next((i for i in candidates if i >= self._index), candidates[0])
-                    self._index = (idx + 1) % len(self.urls)
-            if deadline is not None and time.monotonic() >= deadline:
-                break
+                provider = self._provider[idx]
+                attempted.add(idx)
+                continue
             attempted.add(idx)
-            if self.url != self.urls[idx]:
-                try:
-                    self._bind(idx)
-                except Exception as exc:
-                    last_exc = exc
-                    self._cooldown_until[idx] = time.monotonic() + 10.0
-                    continue
+            started = time.monotonic()
             try:
+                if self.url != self.urls[idx]:
+                    self._bind(idx)
                 if deadline is not None and time.monotonic() + self.timeout > deadline:
                     raise RpcRateLimitError("RPC call skipped: quote deadline exhausted")
                 result = fn(self.w3)
-                self._failures[idx] = 0
-                self._success[idx] += 1
+                elapsed_ms = (time.monotonic() - started) * 1000.0
+                with self._lock:
+                    self._failures[idx] = 0
+                    self._success[idx] += 1
+                    self._latency_ms[idx] = elapsed_ms if not self._latency_ms[idx] else (0.8 * self._latency_ms[idx] + 0.2 * elapsed_ms)
                 return result
             except Exception as exc:
                 last_exc = exc
                 if not self._transient(exc):
-                    self._errors[idx] += 1
+                    with self._lock:
+                        self._errors[idx] += 1
                     raise
-                self._failures[idx] += 1
-                self._errors[idx] += 1
-                base = 1.5 if self._keyed[idx] else 5.0
-                cap = 10.0 if self._keyed[idx] else 30.0
-                backoff = min(cap, base * (2 ** min(self._failures[idx] - 1, 2)))
-                self._cooldown_until[idx] = time.monotonic() + backoff
-                logging.warning("RPC transient error chain=%s index=%s cooldown=%.1fs error=%s", self.chain.name, idx, backoff, exc)
-                self._index = (idx + 1) % len(self.urls)
+                with self._lock:
+                    self._failures[idx] += 1
+                    self._errors[idx] += 1
+                    is_429 = any(x in str(exc).lower() for x in ("429", "too many requests", "rate limit"))
+                    if is_429:
+                        self._rate_limits[idx] += 1
+                    base = 1.0 if self._keyed[idx] else 3.0
+                    cap = 8.0 if self._keyed[idx] else 20.0
+                    backoff = min(cap, base * (2 ** min(self._failures[idx] - 1, 2))) + random.uniform(0.05, 0.35)
+                    self._cooldown_until[idx] = time.monotonic() + backoff
+                    if is_429:
+                        self._provider_cooldown_until[provider] = max(self._provider_cooldown_until.get(provider, 0.0), time.monotonic() + backoff)
+                logging.warning("RPC transient error chain=%s index=%s provider=%s cooldown=%.1fs error=%s", self.chain.name, idx, provider, backoff, exc)
+            finally:
+                with self._lock:
+                    self._inflight[idx] = max(0, self._inflight[idx] - 1)
+                    self._provider_inflight[provider] = max(0, self._provider_inflight.get(provider, 1) - 1)
         if all(self._cooldown_until[i] > time.monotonic() for i in range(len(self.urls))):
             reason = "all RPC endpoints are in cool-down; quote deadline too short to wait"
         elif not attempted:
@@ -222,7 +277,11 @@ class RpcPool:
                     "selftest": self._selftest[i],
                     "success": self._success[i],
                     "errors": self._errors[i],
-                    "cooling_down": self._cooldown_until[i] > time.monotonic(),
+                    "rate_limits": self._rate_limits[i],
+                    "inflight": self._inflight[i],
+                    "latency_ms": round(self._latency_ms[i], 2),
+                    "provider": self._provider[i],
+                    "cooling_down": self._cooldown_until[i] > time.monotonic() or self._provider_cooldown_until.get(self._provider[i], 0.0) > time.monotonic(),
                 }
                 for i, url in enumerate(self.urls)
             ],
