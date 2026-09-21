@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {ISpoke} from "aave-v4/src/spoke/interfaces/ISpoke.sol";
+
 /// @notice Minimal Aave V3 flash-loan receiver for Dragon.
 /// @dev Owner-only entrypoint; DEX targets must be explicitly allowlisted.
 interface IERC20 {
@@ -40,6 +42,11 @@ contract DragonAaveFlashExecutor is IAaveFlashLoanSimpleReceiver {
     error InvalidPool();
     error TransferFailed();
     error ApprovalFailed();
+    error InvalidYieldPlan();
+    error InvalidYieldBps();
+    error YieldAssetMismatch();
+    error YieldSupplyFailed();
+    error WithdrawFailed();
 
     struct Approval {
         address token;
@@ -53,10 +60,17 @@ contract DragonAaveFlashExecutor is IAaveFlashLoanSimpleReceiver {
         bytes data;
     }
 
+    struct YieldPlan {
+        address spoke;
+        uint256 reserveId;
+        uint16 bps;
+    }
+
     struct FlashPlan {
         uint256 minProfit;
         Approval[] approvals;
         Call[] calls;
+        YieldPlan yieldPlan;
     }
 
     address public immutable owner;
@@ -66,6 +80,18 @@ contract DragonAaveFlashExecutor is IAaveFlashLoanSimpleReceiver {
     event TargetPermissionUpdated(address indexed target, bool allowed);
     event FlashStarted(address indexed asset, uint256 amount, uint256 minProfit);
     event FlashCompleted(address indexed asset, uint256 amount, uint256 premium, uint256 profit);
+    event ProfitSuppliedToAaveV4(
+        address indexed spoke,
+        uint256 indexed reserveId,
+        uint256 amount,
+        uint256 remainingProfit
+    );
+    event AaveV4SupplyWithdrawn(
+        address indexed spoke,
+        uint256 indexed reserveId,
+        uint256 amount,
+        address indexed to
+    );
 
     constructor(address pool_, address owner_) {
         if (pool_ == address(0) || owner_ == address(0)) revert InvalidPool();
@@ -133,13 +159,73 @@ contract DragonAaveFlashExecutor is IAaveFlashLoanSimpleReceiver {
         uint256 afterBalance = IERC20(asset).balanceOf(address(this));
         if (afterBalance < beforeBalance + owed + plan.minProfit) revert InsufficientProfit();
 
+        uint256 profit = afterBalance - beforeBalance - owed;
+        uint256 yieldAmount;
+
+        if (plan.yieldPlan.bps != 0) {
+            if (plan.yieldPlan.spoke == address(0)) revert InvalidYieldPlan();
+            if (plan.yieldPlan.bps > 10_000) revert InvalidYieldBps();
+
+            yieldAmount = (profit * plan.yieldPlan.bps) / 10_000;
+            if (profit < yieldAmount || profit - yieldAmount < plan.minProfit) {
+                revert InsufficientProfit();
+            }
+
+            ISpoke spoke = ISpoke(plan.yieldPlan.spoke);
+            ISpoke.Reserve memory reserve = spoke.getReserve(plan.yieldPlan.reserveId);
+            if (reserve.underlying != asset) revert YieldAssetMismatch();
+            if (address(reserve.hub) == address(0)) revert InvalidYieldPlan();
+
+            if (!IERC20(asset).approve(address(reserve.hub), yieldAmount)) {
+                revert ApprovalFailed();
+            }
+            try spoke.supply(plan.yieldPlan.reserveId, yieldAmount, address(this)) returns (uint256, uint256) {
+            } catch {
+                revert YieldSupplyFailed();
+            }
+
+            emit ProfitSuppliedToAaveV4(
+                plan.yieldPlan.spoke,
+                plan.yieldPlan.reserveId,
+                yieldAmount,
+                profit - yieldAmount
+            );
+        }
+
         if (!IERC20(asset).approve(pool, owed)) revert ApprovalFailed();
 
-        uint256 profit = afterBalance - beforeBalance - owed;
-        if (profit > 0 && !IERC20(asset).transfer(owner, profit)) revert TransferFailed();
+        uint256 remainingProfit = profit - yieldAmount;
+        if (remainingProfit > 0 && !IERC20(asset).transfer(owner, remainingProfit)) {
+            revert TransferFailed();
+        }
 
-        emit FlashCompleted(asset, amount, premium, profit);
+        emit FlashCompleted(asset, amount, premium, remainingProfit);
         return true;
+    }
+
+    function withdrawAaveV4Supply(
+        address spokeAddress,
+        uint256 reserveId,
+        uint256 amount,
+        address to
+    ) external onlyOwner returns (uint256 withdrawnAmount) {
+        if (spokeAddress == address(0) || to == address(0)) revert InvalidYieldPlan();
+        if (amount == 0) revert InvalidYieldPlan();
+
+        try ISpoke(spokeAddress).withdraw(reserveId, amount, address(this)) returns (
+            uint256,
+            uint256 assets
+        ) {
+            withdrawnAmount = assets;
+        } catch {
+            revert WithdrawFailed();
+        }
+
+        if (!IERC20(ISpoke(spokeAddress).getReserve(reserveId).underlying).transfer(to, withdrawnAmount)) {
+            revert TransferFailed();
+        }
+
+        emit AaveV4SupplyWithdrawn(spokeAddress, reserveId, withdrawnAmount, to);
     }
 
     receive() external payable {}
