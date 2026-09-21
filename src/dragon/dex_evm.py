@@ -684,7 +684,7 @@ class EvmDexAdapter(_EvmDexCore):
             return router.encode_abi("exactInput", args=[(encoded, self._addr(taker), amount_in, min_out)])
         if venue.kind == "stable":
             router = self._contract(chain_id, venue.router, STABLE_ROUTER_ABI)
-            return router.encode_abi("swapExactTokensForTokens", args=[amount_in, min_out, list(path)])
+            return router.encode_abi("swapExactTokensForTokens", args=[amount_in, min_out, list(path), self._addr(taker), tx_deadline])
         raise ValueError(f"calldata not supported for venue kind {venue.kind}")
 
 def _stable_flag_combinations(hops: int):
