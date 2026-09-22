@@ -203,41 +203,92 @@ class DexCrossExchangeEngine:
         return (gas_native / Decimal(10) ** 18) * native_to_quote_rate
 
     def _candidate_amounts(self, ceiling: int, floor: int = 1) -> list[int]:
-        """Build a dynamic size grid from available capital/liquidity.
+        """Build an adaptive economic sizing grid for the opportunity brain.
 
-        The grid is deliberately independent of a fixed dollar size. It samples
-        small, medium and near-ceiling notionals, then the optimizer can refine
-        around the best observed region. This lets the same engine adapt from
-        small balances to larger executable liquidity without pretending that
-        a single size is optimal for every route.
+        It mixes low-size discovery, geometric liquidity expansion and ceiling
+        probes. The second pass then zooms into the best observed net-economic
+        regions. No fixed dollar size is assumed to be optimal.
         """
         floor = max(1, int(floor))
-        if ceiling < floor or ceiling <= 0: return []
-        configured = int(os.getenv("DEX_MAX_QUOTE_CANDIDATES", "8"))
-        max_candidates = max(4, min(32, configured))
-        if max_candidates == 1: return [ceiling]
-        # Always include both a small probe and the full flash-liquidity ceiling;
-        # the old fixed prefix stopped at 60% when candidates were reduced to 8.
+        if ceiling < floor or ceiling <= 0:
+            return []
+        configured = int(os.getenv("DEX_MAX_QUOTE_CANDIDATES", "12"))
+        max_candidates = max(6, min(40, configured))
+        if ceiling == floor:
+            return [floor]
+
         span = ceiling - floor
-        fractions = [Decimal("0"), Decimal("0.05"), Decimal("0.15"), Decimal("0.30"), Decimal("0.50"), Decimal("0.70"), Decimal("0.85"), Decimal("1.00")]
-        # Keep the grid representative when the candidate budget is small:
-        # always probe both low size and full available size instead of truncating
-        # the fraction list at 30%, which can miss the most profitable size.
-        if max_candidates <= len(fractions):
-            if max_candidates == 4:
-                selected = [Decimal("0.05"), Decimal("0.20"), Decimal("0.50"), Decimal("1.00")]
-            else:
-                idx = [round(i * (len(fractions) - 1) / (max_candidates - 1)) for i in range(max_candidates)]
-                selected = [fractions[i] for i in sorted(set(idx))]
-                while len(selected) < max_candidates:
-                    selected.append(fractions[len(selected)])
-        else:
-            selected = fractions[:]
-        amounts = [floor + int(Decimal(span) * f) for f in selected]
-        if max_candidates > len(fractions):
-            for i in range(len(fractions) + 1, max_candidates + 1):
-                amounts.append(max(1, (ceiling * i) // max_candidates))
-        return sorted(set(amounts))
+        # Tiny profitable pockets are easy to miss with a linear grid because
+        # price impact can change sharply at concentrated-liquidity boundaries.
+        fractions = [
+            Decimal("0"), Decimal("0.01"), Decimal("0.02"), Decimal("0.05"),
+            Decimal("0.10"), Decimal("0.20"), Decimal("0.35"), Decimal("0.50"),
+            Decimal("0.65"), Decimal("0.80"), Decimal("0.90"), Decimal("0.97"),
+            Decimal("1.00"),
+        ]
+        if max_candidates < len(fractions):
+            keep = [fractions[0], fractions[1], fractions[3], fractions[-2], fractions[-1]]
+            middle = fractions[4:-2]
+            remaining = max_candidates - len(keep)
+            for i in range(max(0, remaining)):
+                idx = round(i * (len(middle) - 1) / max(1, remaining - 1))
+                keep.append(middle[idx])
+            fractions = sorted(set(keep))
+        elif max_candidates > len(fractions):
+            for i in range(1, max_candidates - len(fractions) + 1):
+                fractions.append(Decimal(i) / Decimal(max_candidates + 1))
+
+        amounts = {floor + int(Decimal(span) * f) for f in fractions}
+        amounts.update({floor, ceiling})
+        return sorted(x for x in amounts if floor <= x <= ceiling and x > 0)
+
+    def _adaptive_refinement_amounts(self, surface: list[DexOpportunity], ceiling: int, floor: int, candidates: list[int]) -> list[int]:
+        """Find extra sizes where the observed profit curve changes shape.
+
+        The calculator follows up to three economic peaks per route and probes
+        between improving points. This catches narrow arbitrage pockets caused
+        by price impact or concentrated liquidity without an unbounded RPC scan.
+        """
+        if len(surface) < 2 or ceiling <= floor:
+            return []
+        by_route: dict[tuple[str, str, str], list[DexOpportunity]] = {}
+        for op in surface:
+            key = (op.buy_source, op.sell_source, op.base_token)
+            by_route.setdefault(key, []).append(op)
+
+        proposals: set[int] = set()
+        radius = Decimal(os.getenv("DEX_OPTIMIZER_RADIUS", "0.20"))
+        steps = max(2, min(10, int(os.getenv("DEX_OPTIMIZER_STEPS", "6"))))
+        radius = max(Decimal("0.05"), min(Decimal("0.60"), radius))
+
+        for points in by_route.values():
+            points.sort(key=lambda x: x.quote_amount)
+            peaks = sorted(
+                points,
+                key=lambda x: (
+                    x.net_profit_quote,
+                    x.net_profit_quote / Decimal(max(1, x.quote_amount)),
+                ),
+                reverse=True,
+            )[:3]
+            for peak in peaks:
+                lo = max(floor, int(Decimal(peak.quote_amount) * (Decimal("1") - radius)))
+                hi = min(ceiling, int(Decimal(peak.quote_amount) * (Decimal("1") + radius)))
+                if hi <= lo:
+                    continue
+                span = hi - lo
+                for i in range(1, steps + 1):
+                    proposals.add(lo + (span * i) // (steps + 1))
+
+            # If net profit is improving between two observations, inspect the
+            # midpoint because the curve may bend before the next coarse point.
+            for left, right in zip(points, points[1:]):
+                if right.quote_amount > left.quote_amount and right.net_profit_quote > left.net_profit_quote:
+                    proposals.add((left.quote_amount + right.quote_amount) // 2)
+
+        existing = set(candidates)
+        return sorted(x for x in proposals if floor <= x <= ceiling and x not in existing)
+
 
     def _refinement_amounts(self, best_amount: int, ceiling: int, candidates: list[int], floor: int = 1) -> list[int]:
         """Generate a local refinement grid around the best coarse size."""
