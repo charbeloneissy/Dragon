@@ -32,7 +32,7 @@ from src.dragon.aave_flash import env_flash_loan_config, validate_config as vali
 from src.dragon.aave_umbrella import AaveUmbrellaClient, choose_umbrella_candidates
 from src.dragon.aerodrome_opportunity import AerodromeOpportunityEngine, snapshot_from_dict
 from src.dragon.economic_agent import EconomicDecisionAgent
-from src.dragon.dragon_core import DragonCore, ChainState, EconomicCandidate
+from src.dragon.dragon_core import DragonCore, ChainState, EconomicCandidate, ThreeBrainEngines
 from src.dragon.base_live import BaseLiveReader
 from src.dragon.five_circle_engine import FiveCircleEngine
 from src.dragon.base_proof_engine import BaseProofEngine
@@ -72,6 +72,7 @@ STATE = {
     "execution_capacity": 8, "gas_sponsor_enabled": False, "gas_sponsor_required": False,
     "economic_agent": {"enabled": True, "last_update": None, "ranked_orders": [], "chain_memory": {}},
     "dragon_core": {},
+    "brain_engines": {},
     "base_live": {},
     "five_circle": {"rotation": 0, "status": "waiting", "selected": None, "decisions": []},
 }
@@ -886,8 +887,8 @@ async def main():
         evm_chains = _enabled_evm_chains()
         nonevm_chains = _enabled_nonevm()
         min_profit = env_decimal("DEX_MIN_NET_PROFIT", "0.0025")
-        if min_profit < Decimal("0.005"):
-            raise ValueError("DEX_MIN_NET_PROFIT cannot be below 0.005")
+        if min_profit < Decimal("0.002"):
+            raise ValueError("DEX_MIN_NET_PROFIT cannot be below 0.002")
         safety = Decimal("0")
         slippage = int(os.getenv("DEX_SLIPPAGE_BPS", "50"))
         flash_cap_quote = env_decimal("DEX_FLASH_LOAN_LIQUIDITY_QUOTE", "10000")
@@ -908,6 +909,24 @@ async def main():
             execution_stress_bps=env_decimal("DRAGON_CHALLENGE_EXECUTION_BPS", "100"),
             max_candidates=int(os.getenv("DRAGON_CHALLENGE_MAX_CANDIDATES", "8")),
         )
+        # Three top-level brain engines. Specialized brains remain underneath these boundaries.
+        base_discovery_venues = [x.strip() for x in os.getenv("DRAGON_BASE_VENUES", "Aerodrome,Uniswap_V3").split(",") if x.strip()]
+        discovery_brain = DexCrossExchangeEngine(
+            adapter,
+            base_discovery_venues,
+            min_profit=min_profit,
+            quote_token_decimals=6,
+            flash_loan_enabled=env_bool("FLASH_LOAN_ENABLED", True),
+            flash_loan_fee_bps=env_decimal("FLASH_LOAN_FEE_BPS", "0"),
+            telemetry=METRICS,
+        )
+        brain_engines = ThreeBrainEngines(
+            discovery=discovery_brain,
+            economics=economic_agent,
+            execution=atomic_simulator,
+            min_profit=min_profit,
+        )
+        brain_engines.last_stage = "ready"
         base_reader = BaseLiveReader()
         rotation = 0
 
