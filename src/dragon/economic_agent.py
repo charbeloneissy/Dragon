@@ -75,11 +75,11 @@ class EconomicDecisionAgent:
     should receive the next expensive simulation/order slot.
     """
 
-    def __init__(self, *, history_size: int = 256, min_profit: Decimal = Decimal("0.005")):
+    def __init__(self, *, history_size: int = 256, min_profit: Decimal = Decimal("0.002")):
         self.history_size = max(32, int(history_size))
-        self.min_profit = _d(min_profit, Decimal("0.005"))
-        if self.min_profit < Decimal("0.005"):
-            raise ValueError("min_profit cannot be below 0.005")
+        self.min_profit = _d(min_profit, Decimal("0.002"))
+        if self.min_profit < Decimal("0.002"):
+            raise ValueError("min_profit cannot be below 0.002")
         self._memory: dict[int, _ChainMemory] = {}
 
     def _memory_for(self, chain_id: int) -> _ChainMemory:
