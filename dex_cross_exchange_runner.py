@@ -1017,6 +1017,7 @@ async def main():
                 "aave_stable_vaults_enabled": env_bool("AAVE_STABLE_VAULTS_ENABLED", False),
                 "aave_stable_vaults": stable_vaults,
                 "aave_stable_vault_error": stable_vault_error,
+                "brain_engines": brain_engines.snapshot(),
             })
         if not any(provider_status(load_providers()).values()):
             logging.warning(
@@ -1049,6 +1050,7 @@ async def main():
                         STATE["base_live"] = {"connected": False, "error": f"{type(exc).__name__}: {exc}"}
                     logging.warning("Base live read failed: %s: %s", exc, exc)
                 rejections = {}
+                brain_engines.last_stage = "discovery"
                 # Phase 1: cheap gross-spread probes across every active chain.
                 # Phase 2: spend the expensive full sizing/second-leg scan only
                 # on chains whose probe economics clear the flash-fee hurdle.
@@ -1174,6 +1176,7 @@ async def main():
                     for k, v in rej.items():
                         rejections[k] = rejections.get(k, 0) + int(v)
                 merge_rejections(rejections)
+                brain_engines.last_stage = "economics"
                 # Five-circle gate: fast discovery/optimization, adversarial stress,
                 # explicit proof status, then an execution gate. The current runtime
                 # remains paper-only until an exact simulator result is supplied.
@@ -1203,6 +1206,7 @@ async def main():
                             proof_passed = bool(atomic_result.passed)
                     except Exception:
                         logging.exception("Base proof gate failed")
+                brain_engines.last_stage = "execution"
                 circle_result = five_circle.run(
                     base_candidates,
                     rotation=rotation,
@@ -1211,6 +1215,7 @@ async def main():
                     simulation_passed=proof_passed,
                 )
                 with LOCK:
+                    STATE["brain_engines"] = brain_engines.snapshot()
                     STATE["five_circle"] = {
                         "rotation": rotation,
                         "status": "atomic_simulation_passed" if atomic_result is not None and atomic_result.passed else ("ready_for_atomic_simulation" if proof_candidate is not None else "rejected"),
@@ -1305,6 +1310,9 @@ async def main():
                     STATE["last_error"] = None
                     STATE["opportunity_records"] = rows
                 refresh_aerodrome_opportunities()
+                brain_engines.last_stage = "verify"
+                with LOCK:
+                    STATE["brain_engines"] = brain_engines.snapshot()
                 logging.info("scan complete chains=%s opportunities=%s rejections=%s aerodrome_candidates=%s", len(evm_chains), len(opportunities), rejections, len(STATE.get("aerodrome", {}).get("opportunities", [])))
                 await asyncio.sleep(poll)
             except Exception as exc:
