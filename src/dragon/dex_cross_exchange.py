@@ -40,9 +40,9 @@ class DexOpportunity:
 class DexCrossExchangeEngine:
     """Two-leg cross-DEX scanner with conservative net-profit accounting."""
 
-    def __init__(self, adapter, sources: Iterable[str], min_profit: Decimal = Decimal("0.005"), quote_token_decimals: int = 6, max_quote_latency_ms: Decimal = Decimal(os.getenv("DEX_MAX_QUOTE_LATENCY_MS", "500")), safety_buffer_quote: Decimal = Decimal("0"), flash_loan_enabled: bool = False, flash_loan_fee_bps: Decimal = Decimal("0"), native_to_quote_rate: Decimal = Decimal("0"), min_net_bps: Decimal = Decimal("15"), telemetry=None):
+    def __init__(self, adapter, sources: Iterable[str], min_profit: Decimal = Decimal("0.002"), quote_token_decimals: int = 6, max_quote_latency_ms: Decimal = Decimal(os.getenv("DEX_MAX_QUOTE_LATENCY_MS", "500")), safety_buffer_quote: Decimal = Decimal("0"), flash_loan_enabled: bool = False, flash_loan_fee_bps: Decimal = Decimal("0"), native_to_quote_rate: Decimal = Decimal("0"), min_net_bps: Decimal = Decimal("15"), telemetry=None):
         if quote_token_decimals < 0 or quote_token_decimals > 36: raise ValueError("quote_token_decimals must be between 0 and 36")
-        if Decimal(min_profit) < Decimal("0.005"): raise ValueError("min_profit cannot be below 0.005")
+        if Decimal(min_profit) < Decimal("0.002"): raise ValueError("min_profit cannot be below 0.002")
         if Decimal(max_quote_latency_ms) <= 0: raise ValueError("max_quote_latency_ms must be positive")
         if Decimal(safety_buffer_quote) < 0: raise ValueError("safety_buffer_quote cannot be negative")
         if Decimal(flash_loan_fee_bps) < 0 or Decimal(flash_loan_fee_bps) > 1000: raise ValueError("flash_loan_fee_bps must be between 0 and 1000")
