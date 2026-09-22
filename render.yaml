@@ -50,6 +50,12 @@ services:
         value: "10000"
       - key: DEX_MIN_NET_PROFIT
         value: "0.0025"
+      - key: DEX_DYNAMIC_MIN_PROFIT
+        value: "true"
+      - key: DEX_MIN_NET_PROFIT_FLOOR
+        value: "0.002"
+      - key: DEX_MIN_NET_PROFIT_CEILING
+        value: "0.005"
       - key: DEX_MIN_NET_BPS
         value: "0"
       - key: DEX_SAFETY_BUFFER
