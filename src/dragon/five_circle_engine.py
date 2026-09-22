@@ -109,7 +109,7 @@ class FiveCircleEngine:
             min_profit_quote=self.min_profit,
             gas_stress_bps=self.gas_stress_bps,
             execution_stress_bps=self.execution_stress_bps,
-            max_candidates=self.max_candidates,
+            max_candidates=len(source),
         )
         source = tuple(
             x for x in opportunities
@@ -117,7 +117,7 @@ class FiveCircleEngine:
         )
 
         # Circle 1: discover.
-        discovered = tuple(sorted(source, key=self._net, reverse=True)[: self.max_candidates])
+        discovered = tuple(sorted(source, key=self._net, reverse=True))
         c1 = CircleDecision(
             "DISCOVER", bool(discovered), discovered,
             "live candidates from current rotation" if discovered else "no valid candidates",
