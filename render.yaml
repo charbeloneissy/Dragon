@@ -49,7 +49,7 @@ services:
       - key: DEX_FLASH_LOAN_LIQUIDITY_QUOTE
         value: "10000"
       - key: DEX_MIN_NET_PROFIT
-        value: "0.005"
+        value: "0.002"
       - key: DEX_MIN_NET_BPS
         value: "0"
       - key: DEX_SAFETY_BUFFER
