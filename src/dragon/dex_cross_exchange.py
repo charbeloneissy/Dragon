@@ -474,7 +474,7 @@ class DexCrossExchangeEngine:
                     source, (quote, execution) = future.result()
                 except Exception as exc:
                     category = "INFRA_FAILURE" if any(x in str(exc).lower() for x in ("deadline", "rate limit", "rate-limit", "endpoint", "timeout", "rpc")) else "QUOTE_FAILURE"
-                    logging.warning("DEX buy quote failed category=%s source=%s sell=%s buy=%s amount=%s error=%s: %s", category, source, quote_token, base_token, quote_amount, type(exc).__name__, exc)
+                    logging.log(logging.INFO if "cached capability miss" in str(exc).lower() else logging.WARNING, "DEX buy quote failed category=%s source=%s sell=%s buy=%s amount=%s error=%s: %s", category, source, quote_token, base_token, quote_amount, type(exc).__name__, exc)
                     self._reject("buy_quote_error"); continue
                 quote_latency = self._quote_latency(quote)
                 if quote_latency > self.max_quote_latency_ms:
