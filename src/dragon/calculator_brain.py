@@ -77,10 +77,10 @@ class CalculationResult:
 
 
 class EconomicCalculator:
-    def __init__(self, *, min_profit: Decimal = Decimal("0.005")):
+    def __init__(self, *, min_profit: Decimal = Decimal("0.002")):
         self.min_profit = _d(min_profit)
-        if self.min_profit < Decimal("0.005"):
-            raise ValueError("min_profit cannot be below 0.005")
+        if self.min_profit < Decimal("0.002"):
+            raise ValueError("min_profit cannot be below 0.002")
 
     def calculate(
         self,
