@@ -100,7 +100,7 @@ Copy `.env.example` to `.env`. Key settings:
 | `DEX_QUOTE_TOKENS` | per-chain stablecoin | `"8453:0x...:6"` overrides |
 | `DEX_MIN_NET_PROFIT` | `0.005` | Minimum net profit in quote units (floor) |
 | `DEX_FLASH_LOAN_LIQUIDITY_QUOTE` | `1000` | Flash-loan principal cap (quote units) |
-| `DEX_POLL_SECONDS` | `2.0` | Seconds between full scans |
+| `DEX_POLL_SECONDS` | `30` | Seconds between full opportunity-search cycles |
 | `FLASH_LOAN_ENABLED` | `false` | Compute flash-loan fees into net profit |
 | `AERODROME_POOLS_JSON` | empty | Optional live/externally refreshed Aerodrome pool snapshots for read-only capital ranking |
 | `AERODROME_MIN_TVL_USD` | `1000` | Minimum Aerodrome TVL considered by the allocator |
