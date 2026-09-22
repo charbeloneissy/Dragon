@@ -896,7 +896,12 @@ async def main():
             raise ValueError("DEX_FLASH_LOAN_LIQUIDITY_QUOTE must be positive")
         taker = os.getenv("DEX_TAKER_ADDRESS", "").strip() or "0x000000000000000000000000000000000000dEaD"
         poll = max(1.0, float(os.getenv("DEX_POLL_SECONDS", "30")))
-        logging.info("Dragon opportunity scan cycle configured at %.1fs", poll)
+        min_profit_floor = env_decimal("DEX_MIN_NET_PROFIT_FLOOR", "0.002")
+        min_profit_ceiling = env_decimal("DEX_MIN_NET_PROFIT_CEILING", "0.005")
+        if min_profit_floor < Decimal("0.002") or min_profit_ceiling < min_profit_floor:
+            raise ValueError("invalid dynamic profit bounds")
+        dynamic_profit = env_bool("DEX_DYNAMIC_MIN_PROFIT", True)
+        logging.info("Dragon opportunity scan cycle configured at %.1fs dynamic_profit=%s bounds=%s..%s", poll, dynamic_profit, min_profit_floor, min_profit_ceiling)
         triangular_enabled = env_bool("TRIANGULAR_ARBITRAGE_ENABLED", True)
         capacity = ExecutionCapacity(initial=int(os.getenv("DEX_MAX_EXECUTION_CONCURRENCY", "8")), maximum=max(1, int(os.getenv("DEX_MAX_EXECUTION_CONCURRENCY", "64"))))
         sponsor_manager = GasSponsorManager(min_net_profit=min_profit)
@@ -1039,6 +1044,23 @@ async def main():
         while True:
             try:
                 rotation += 1
+                if dynamic_profit:
+                    cycle_profit_floor = env_decimal("DEX_MIN_NET_PROFIT_FLOOR", str(min_profit_floor))
+                    cycle_profit_ceiling = env_decimal("DEX_MIN_NET_PROFIT_CEILING", str(min_profit_ceiling))
+                    current_env_profit = env_decimal("DEX_MIN_NET_PROFIT", str(min_profit))
+                    min_profit = max(cycle_profit_floor, min(cycle_profit_ceiling, current_env_profit))
+                    sponsor_manager.min_net_profit = min_profit
+                    economic_agent.min_profit = min_profit
+                    dragon_core.min_profit = min_profit
+                    proof_engine.min_profit = min_profit
+                    atomic_simulator.min_profit = min_profit
+                    five_circle.min_profit = min_profit
+                    brain_engines.min_profit = min_profit
+                    with LOCK:
+                        STATE["dynamic_min_net_profit"] = str(min_profit)
+                        STATE["dynamic_min_net_profit_floor"] = str(cycle_profit_floor)
+                        STATE["dynamic_min_net_profit_ceiling"] = str(cycle_profit_ceiling)
+                    logging.info("Dragon cycle=%s dynamic min_net_profit=%s", rotation, min_profit)
                 all_found = []
                 try:
                     base_snapshot = await to_thread(base_reader.snapshot)
