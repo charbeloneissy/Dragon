@@ -55,7 +55,6 @@ services:
       - key: DEX_MIN_NET_PROFIT_FLOOR
         value: "0.002"
       - key: DEX_MIN_NET_PROFIT_CEILING
-        value: "0.005"
       - key: DEX_MIN_NET_BPS
         value: "0"
       - key: DEX_SAFETY_BUFFER
@@ -75,7 +74,6 @@ services:
       - key: DRAGON_CHALLENGE_EXECUTION_BPS
         value: "100"
       - key: DRAGON_CHALLENGE_MAX_CANDIDATES
-        value: "8"
       - key: FREE_RENDER_HEALTH_PING_MINUTES
         value: "5"
       - key: AMPLITUDE_ENABLED
@@ -85,7 +83,6 @@ services:
       - key: AMPLITUDE_ENDPOINT
         value: "https://api2.amplitude.com/2/httpapi"
       - key: DEX_MAX_OPPORTUNITIES
-        value: "8"
       - key: FLASH_LOAN_ENABLED
         value: "true"
       - key: FLASH_LOAN_FEE_BPS
