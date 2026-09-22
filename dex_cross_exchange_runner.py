@@ -320,6 +320,30 @@ def env_bool(name, default=False):
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def configured_base_venues(chain_id: int) -> list[str]:
+    """Return the exact DEX allowlist for the cross-DEX scanner."""
+    configured = [
+        x.strip()
+        for x in os.getenv("DRAGON_BASE_VENUES", "Aerodrome,Uniswap_V3").split(",")
+        if x.strip()
+    ]
+    available = {v.name for v in venues_for(chain_id)}
+    selected = [name for name in configured if name in available]
+    unknown = [name for name in configured if name not in available]
+    if unknown:
+        logging.warning(
+            "Ignoring unknown/unavailable Base DEX venues chain=%s venues=%s",
+            chain_id,
+            unknown,
+        )
+    if len(selected) < 2:
+        raise ValueError(
+            f"DRAGON_BASE_VENUES must resolve to at least two available venues on chain {chain_id}; "
+            f"configured={configured} available={sorted(available)}"
+        )
+    return selected
+
+
 def rpc_host(url):
     """Host of an RPC URL with any embedded key/path stripped, for safe logging."""
     try:
@@ -803,10 +827,7 @@ async def scan_evm_chain(adapter, chain_id, *, max_quote, taker, slippage, min_p
     spec = get_spec(chain_id)
     quote_token, quote_decimals = _quote_token_for(chain_id)
     base_tokens = _base_tokens_for(chain_id)
-    configured_venues = [x.strip() for x in os.getenv("DRAGON_BASE_VENUES", "").split(",") if x.strip()]
-    venue_names = [v.name for v in venues_for(chain_id) if not configured_venues or v.name in configured_venues]
-    if len(venue_names) < 2:
-        return [], {}
+    venue_names = configured_base_venues(chain_id)
     flash_enabled = env_bool("FLASH_LOAN_ENABLED", True)
     configured_fee_bps = env_decimal("FLASH_LOAN_FEE_BPS", "0")
     fee_bps = configured_fee_bps
@@ -915,7 +936,7 @@ async def main():
             max_candidates=int(os.getenv("DRAGON_CHALLENGE_MAX_CANDIDATES", "8")),
         )
         # Three top-level brain engines. Specialized brains remain underneath these boundaries.
-        base_discovery_venues = [x.strip() for x in os.getenv("DRAGON_BASE_VENUES", "Aerodrome,Uniswap_V3").split(",") if x.strip()]
+        base_discovery_venues = configured_base_venues(8453)
         discovery_brain = DexCrossExchangeEngine(
             adapter,
             base_discovery_venues,
@@ -952,9 +973,9 @@ async def main():
             spec = get_spec(cid)
             try:
                 quote_token, quote_decimals = _validate_quote_token_config(cid)
-                venues = list(adapter.sources(cid))
+                venues = configured_base_venues(cid)
                 if not venues:
-                    raise ValueError(f"no DEX venues configured for chain {cid}")
+                    raise ValueError(f"no allowed Base DEX venues configured for chain {cid}")
                 valid_evm_chains.append(cid)
                 chain_details[spec.name] = {
                     "chain_id": cid,
@@ -1092,7 +1113,7 @@ async def main():
                         fee_bps = env_decimal("FLASH_LOAN_FEE_BPS", "0")
                         if env_bool("FLASH_LOAN_ENABLED", True) and hasattr(adapter, "evm") and adapter.evm is not None:
                             fee_bps = Decimal(str(adapter.evm.flash_loan_fee_bps(cid)))
-                        venue_names = [v.name for v in venues_for(cid)]
+                        venue_names = configured_base_venues(cid)
                         engine = DexCrossExchangeEngine(
                             adapter, venue_names, min_profit=min_profit,
                             quote_token_decimals=quote_decimals,
