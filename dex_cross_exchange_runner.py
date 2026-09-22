@@ -895,7 +895,8 @@ async def main():
         if flash_cap_quote <= 0:
             raise ValueError("DEX_FLASH_LOAN_LIQUIDITY_QUOTE must be positive")
         taker = os.getenv("DEX_TAKER_ADDRESS", "").strip() or "0x000000000000000000000000000000000000dEaD"
-        poll = float(os.getenv("DEX_POLL_SECONDS", "0.5"))
+        poll = max(1.0, float(os.getenv("DEX_POLL_SECONDS", "30")))
+        logging.info("Dragon opportunity scan cycle configured at %.1fs", poll)
         triangular_enabled = env_bool("TRIANGULAR_ARBITRAGE_ENABLED", True)
         capacity = ExecutionCapacity(initial=int(os.getenv("DEX_MAX_EXECUTION_CONCURRENCY", "8")), maximum=max(1, int(os.getenv("DEX_MAX_EXECUTION_CONCURRENCY", "64"))))
         sponsor_manager = GasSponsorManager(min_net_profit=min_profit)
