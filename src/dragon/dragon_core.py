@@ -16,7 +16,7 @@ from typing import Any, Iterable
 
 
 ZERO = Decimal("0")
-MIN_PROFIT = Decimal("0.005")
+MIN_PROFIT = Decimal("0.002")
 
 
 def D(value: Any, default: Decimal = ZERO) -> Decimal:
@@ -342,6 +342,49 @@ class LearningEngine:
         errors = [abs(D(x["error"])) for x in self.samples]
         mae = sum(errors, ZERO) / Decimal(len(errors))
         return {"samples": len(self.samples), "mean_absolute_error": str(mae)}
+
+
+class ThreeBrainEngines:
+    """Top-level orchestration boundary for Dragon's three main brain engines.
+
+    Specialized brains remain implementation modules, but are governed through:
+    1. Discovery: discover, quote, and optimize executable opportunities.
+    2. Economics: calculate all costs, risk, and expected value.
+    3. Execution: prove atomic repayment/profit invariants before execution.
+
+    This boundary never signs or broadcasts transactions.
+    """
+
+    def __init__(self, *, discovery, economics, execution, min_profit: Decimal = MIN_PROFIT) -> None:
+        self.min_profit = D(min_profit, MIN_PROFIT)
+        if self.min_profit < MIN_PROFIT:
+            raise ValueError(f"min_profit cannot be below {MIN_PROFIT}")
+        self.discovery = discovery
+        self.economics = economics
+        self.execution = execution
+        self.last_stage = "idle"
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "architecture": "three_brain_engines",
+            "min_profit": str(self.min_profit),
+            "stage": self.last_stage,
+            "engines": {
+                "discovery": {
+                    "role": "discover_quote_size_profit_curve",
+                    "component": type(self.discovery).__name__,
+                },
+                "economics": {
+                    "role": "calculate_rank_risk_select",
+                    "component": type(self.economics).__name__,
+                },
+                "execution": {
+                    "role": "prove_simulate_atomic_gate",
+                    "component": type(self.execution).__name__,
+                },
+            },
+            "invariant": "DISCOVER -> ECONOMICS -> EXECUTION -> VERIFY",
+        }
 
 
 class DragonCore:
