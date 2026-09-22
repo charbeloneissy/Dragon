@@ -28,7 +28,7 @@ class ProofResult:
 class BaseProofEngine:
     def __init__(self, *, min_profit: Decimal = Decimal("0.002"), max_block_drift: int = 0):
         self.min_profit = Decimal(min_profit)
-        if self.min_profit < Decimal("0.005"):
+        if self.min_profit < Decimal("0.002"):
             raise ValueError("minimum profit floor cannot be below 0.002")
         self.max_block_drift = max(0, int(max_block_drift))
 
