@@ -47,14 +47,14 @@ class ExecutionDataCenter:
 class ExecutionCapacity:
     """Adaptive concurrency; no artificial daily trade-count limit."""
 
-    def __init__(self, *, initial: int = 8, minimum: int = 1, maximum: int = 128):
-        self.current = max(minimum, min(initial, maximum))
+    def __init__(self, *, initial: int = 8, minimum: int = 1, maximum: int | None = None):
+        self.current = max(minimum, initial)
         self.minimum = minimum
         self.maximum = maximum
 
     def observe(self, *, rpc_ok: bool, latency_ms: Decimal, pending: int, capacity_hint: int | None = None) -> int:
         if capacity_hint is not None:
-            target = max(self.minimum, min(int(capacity_hint), self.maximum))
+            target = max(self.minimum, int(capacity_hint)) if self.maximum is None else max(self.minimum, min(int(capacity_hint), self.maximum))
             self.current = target
             return target
         if not rpc_ok or pending > self.current * 2:
@@ -62,5 +62,5 @@ class ExecutionCapacity:
         elif latency_ms > Decimal("1000"):
             self.current = max(self.minimum, self.current - 1)
         elif latency_ms < Decimal("250") and pending < self.current:
-            self.current = min(self.maximum, self.current + 1)
+            self.current = self.current + 1 if self.maximum is None else min(self.maximum, self.current + 1)
         return self.current
