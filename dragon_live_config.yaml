@@ -18,7 +18,7 @@ capital:
   flash_loan_only: true
 
 arbitrage:
-  min_net_profit_usdt: 0.005
+  min_net_profit_usdt: 0.002
   include_trading_fees: true
   include_gas_cost: true
   include_slippage: true
