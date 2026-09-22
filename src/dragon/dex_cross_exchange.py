@@ -443,8 +443,14 @@ class DexCrossExchangeEngine:
         # Refine around the best observed NET point even when that point is still
         # negative. This avoids missing narrow positive regions between coarse sizes.
         best_surface = max(surface, key=lambda x: (x.net_profit_quote, x.quote_amount))
+        adaptive_refined = self._adaptive_refinement_amounts(
+            surface, ceiling, floor, candidates
+        )
+        local_refined = self._refinement_amounts(
+            best_surface.quote_amount, ceiling, candidates, floor=floor
+        )
         refined = [
-            amount for amount in self._refinement_amounts(best_surface.quote_amount, ceiling, candidates, floor=floor)
+            amount for amount in sorted(set(adaptive_refined + local_refined))
             if amount > compound_amount
         ]
         if refined:
