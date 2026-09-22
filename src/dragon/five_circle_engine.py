@@ -102,6 +102,10 @@ class FiveCircleEngine:
         block_number: int,
         simulation_passed: bool = False,
     ) -> FiveCircleResult:
+        source = tuple(
+            x for x in opportunities
+            if getattr(x, "chain_id", chain_id) == chain_id and self._net(x).is_finite()
+        )
         params = DynamicParameters(
             rotation=rotation,
             chain_id=chain_id,
@@ -110,10 +114,6 @@ class FiveCircleEngine:
             gas_stress_bps=self.gas_stress_bps,
             execution_stress_bps=self.execution_stress_bps,
             max_candidates=len(source),
-        )
-        source = tuple(
-            x for x in opportunities
-            if getattr(x, "chain_id", chain_id) == chain_id and self._net(x).is_finite()
         )
 
         # Circle 1: discover.
