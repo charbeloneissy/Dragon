@@ -897,11 +897,10 @@ async def main():
         taker = os.getenv("DEX_TAKER_ADDRESS", "").strip() or "0x000000000000000000000000000000000000dEaD"
         poll = max(1.0, float(os.getenv("DEX_POLL_SECONDS", "30")))
         min_profit_floor = env_decimal("DEX_MIN_NET_PROFIT_FLOOR", "0.002")
-        min_profit_ceiling = env_decimal("DEX_MIN_NET_PROFIT_CEILING", "0.005")
-        if min_profit_floor < Decimal("0.002") or min_profit_ceiling < min_profit_floor:
-            raise ValueError("invalid dynamic profit bounds")
+        if min_profit_floor < Decimal("0.002"):
+            raise ValueError("DEX_MIN_NET_PROFIT_FLOOR cannot be below 0.002")
         dynamic_profit = env_bool("DEX_DYNAMIC_MIN_PROFIT", True)
-        logging.info("Dragon opportunity scan cycle configured at %.1fs dynamic_profit=%s bounds=%s..%s", poll, dynamic_profit, min_profit_floor, min_profit_ceiling)
+        logging.info("Dragon opportunity scan cycle configured at %.1fs dynamic_profit=%s floor=%s no_ceiling=true", poll, dynamic_profit, min_profit_floor)
         triangular_enabled = env_bool("TRIANGULAR_ARBITRAGE_ENABLED", True)
         capacity = ExecutionCapacity(initial=int(os.getenv("DEX_MAX_EXECUTION_CONCURRENCY", "8")), maximum=max(1, int(os.getenv("DEX_MAX_EXECUTION_CONCURRENCY", "64"))))
         sponsor_manager = GasSponsorManager(min_net_profit=min_profit)
@@ -1046,9 +1045,8 @@ async def main():
                 rotation += 1
                 if dynamic_profit:
                     cycle_profit_floor = env_decimal("DEX_MIN_NET_PROFIT_FLOOR", str(min_profit_floor))
-                    cycle_profit_ceiling = env_decimal("DEX_MIN_NET_PROFIT_CEILING", str(min_profit_ceiling))
                     current_env_profit = env_decimal("DEX_MIN_NET_PROFIT", str(min_profit))
-                    min_profit = max(cycle_profit_floor, min(cycle_profit_ceiling, current_env_profit))
+                    min_profit = max(cycle_profit_floor, current_env_profit)
                     sponsor_manager.min_net_profit = min_profit
                     economic_agent.min_profit = min_profit
                     dragon_core.min_profit = min_profit
@@ -1059,8 +1057,7 @@ async def main():
                     with LOCK:
                         STATE["dynamic_min_net_profit"] = str(min_profit)
                         STATE["dynamic_min_net_profit_floor"] = str(cycle_profit_floor)
-                        STATE["dynamic_min_net_profit_ceiling"] = str(cycle_profit_ceiling)
-                    logging.info("Dragon cycle=%s dynamic min_net_profit=%s", rotation, min_profit)
+                    logging.info("Dragon cycle=%s dynamic min_net_profit=%s floor=%s no_ceiling=true", rotation, min_profit, cycle_profit_floor)
                 all_found = []
                 try:
                     base_snapshot = await to_thread(base_reader.snapshot)
@@ -1256,12 +1253,12 @@ async def main():
                     all_found = [(order.opportunity, opp_chain_labels.get(id(order.opportunity), get_spec(order.chain_id).name)) for order in economic_orders]
                 else:
                     all_found.sort(key=lambda pair: pair[0].net_profit_quote, reverse=True)
-                top = all_found[:max(1, int(os.getenv("DEX_MAX_OPPORTUNITIES", "8")))]
+                top = all_found
                 with LOCK:
                     STATE["economic_agent"] = {
                         "enabled": True,
                         "last_update": time.time(),
-                        "ranked_orders": [{"chain_id": order.chain_id, "net_profit_quote": str(order.net_profit_quote), "expected_net_profit_quote": str(order.expected_net_profit_quote), "execution_probability": str(order.execution_probability), "freshness_factor": str(order.freshness_factor), "latency_factor": str(order.latency_factor), "capital_efficiency": str(order.capital_efficiency), "economic_priority": str(order.economic_priority), "reason": order.reason} for order in economic_orders[:max(1, int(os.getenv("DEX_MAX_OPPORTUNITIES", "8")))]],
+                        "ranked_orders": [{"chain_id": order.chain_id, "net_profit_quote": str(order.net_profit_quote), "expected_net_profit_quote": str(order.expected_net_profit_quote), "execution_probability": str(order.execution_probability), "freshness_factor": str(order.freshness_factor), "latency_factor": str(order.latency_factor), "capital_efficiency": str(order.capital_efficiency), "economic_priority": str(order.economic_priority), "reason": order.reason} for order in economic_orders],
                         "chain_memory": economic_agent.snapshot(),
                     }
                 # Feed normalized opportunities into the Dragon Core. This is a paper/economic layer only;
