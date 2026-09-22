@@ -21,10 +21,10 @@ class AtomicSimulationResult:
 
 
 class BaseAtomicSimulator:
-    def __init__(self, *, min_profit: Decimal = Decimal("0.005")):
+    def __init__(self, *, min_profit: Decimal = Decimal("0.002")):
         self.min_profit = Decimal(min_profit)
-        if self.min_profit < Decimal("0.005"):
-            raise ValueError("minimum profit floor cannot be below 0.005")
+        if self.min_profit < Decimal("0.002"):
+            raise ValueError("minimum profit floor cannot be below 0.002")
 
     def simulate(self, *, adapter, opportunity, taker: str, slippage_bps: int = 50) -> AtomicSimulationResult:
         if int(opportunity.chain_id) != 8453:
