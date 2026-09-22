@@ -79,8 +79,8 @@ class FiveCircleEngine:
         self.gas_stress_bps = _d(gas_stress_bps)
         self.execution_stress_bps = _d(execution_stress_bps)
         self.max_candidates = max(1, int(max_candidates))
-        if self.min_profit < Decimal("0.005"):
-            raise ValueError("min_profit cannot be below 0.005")
+        if self.min_profit < Decimal("0.002"):
+            raise ValueError("min_profit cannot be below 0.002")
         if self.gas_stress_bps < 0 or self.execution_stress_bps < 0:
             raise ValueError("stress parameters cannot be negative")
 
